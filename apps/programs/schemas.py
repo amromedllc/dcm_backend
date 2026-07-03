@@ -424,6 +424,7 @@ class TargetStatusSchema(Schema):
     icon: str
     is_staff_visible: bool
     is_default: bool
+    is_active: bool
     display_order: int
     created_at: datetime
     updated_at: datetime
@@ -436,6 +437,7 @@ class TargetStatusRequest(Schema):
     icon: str = 'circle'
     is_staff_visible: bool = False
     is_default: bool = False
+    is_active: bool = True
     display_order: int = 0
 
 
@@ -445,6 +447,7 @@ class TargetStatusUpdateRequest(Schema):
     icon: str | None = None
     is_staff_visible: bool | None = None
     is_default: bool | None = None
+    is_active: bool | None = None
     display_order: int | None = None
 
 

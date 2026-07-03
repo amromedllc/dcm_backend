@@ -336,6 +336,7 @@ class TargetStatus(TenantAwareModel):
     icon = models.CharField(max_length=30, default='circle')
     is_staff_visible = models.BooleanField(default=False, help_text='Shown to staff in the session recording view')
     is_default = models.BooleanField(default=False, help_text='Starting status for newly created targets')
+    is_active = models.BooleanField(default=True, help_text='Inactive statuses are hidden everywhere except Settings')
     display_order = models.PositiveIntegerField(default=0)
 
     class Meta:
