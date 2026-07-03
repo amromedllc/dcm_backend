@@ -1,0 +1,350 @@
+import logging
+import jwt
+from ninja import Router
+
+logger = logging.getLogger(__name__)
+from ninja.errors import HttpError
+from django.db import transaction
+
+from .models import User, APIKey
+from .auth import create_access_token, create_refresh_token, decode_token, jwt_auth
+from .schemas import (
+    LoginRequest,
+    TokenResponse,
+    RefreshRequest,
+    AccessTokenResponse,
+    UserSchema,
+    UserCreateRequest,
+    UserUpdateRequest,
+    APIKeyCreateRequest,
+    APIKeyCreatedResponse,
+    APIKeyListItem,
+    ErrorResponse,
+    StaffSchema,
+)
+
+# ---------------------------------------------------------------------------
+# TherapyPMS bcrypt helper
+# ---------------------------------------------------------------------------
+
+def _verify_tpms_password(plain: str, hashed: str | None) -> bool:
+    """Verify a Laravel bcrypt hash ($2y$ or $2a$) against a plain-text password."""
+    if not hashed:
+        return False
+    try:
+        import bcrypt
+        # Laravel uses $2y$; older PHP used $2a$. Python bcrypt expects $2b$.
+        normalized = hashed.replace('$2y$', '$2b$', 1).replace('$2a$', '$2b$', 1).encode()
+        result = bcrypt.checkpw(plain.encode(), normalized)
+        return result
+    except Exception as e:
+        logger.warning('bcrypt verification error: %s | hash prefix: %s', e, hashed[:7] if hashed else None)
+        return False
+
+
+def _tpms_role_for_employee_type(employee_type: str | None) -> str:
+    """Map a TPMS employee_type string to a DCM role."""
+    if not employee_type:
+        return User.Role.STAFF
+    et = employee_type.lower()
+    if 'bcba' in et or 'supervisor' in et or 'admin' in et:
+        return User.Role.SUPERVISOR
+    return User.Role.STAFF
+
+router = Router()
+
+
+@router.post('/login', response=TokenResponse, auth=None)
+def login(request, data: LoginRequest):
+    # Always authenticate against TPMS — no manual DCM user creation needed.
+    # A DCM user record is auto-provisioned transparently on first login so the
+    # JWT system has a user object to reference.
+    return _tpms_auth(data.email, data.password)
+
+
+def _tpms_effective_admin_id(admin) -> int:
+    """
+    Mirror TPMS login logic: is_up_admin=1 means this is the top-level practice
+    owner — use their own id. is_up_admin=0 means sub-admin — use up_admin_id
+    (the parent practice owner's id) so data scoping matches TPMS exactly.
+    """
+    if admin.is_up_admin == 1:
+        return admin.id
+    return admin.up_admin_id or admin.id
+
+
+def _tpms_auth(email: str, password: str) -> TokenResponse:
+    """Verify credentials against TPMS admins/employees and return a DCM token."""
+    from apps.legacy.models import TpmsAdmin, TpmsEmployee
+    from django.db.models import Q
+
+    # Collect candidate records from both tables, then pick the one whose
+    # password verifies. A user can exist in admins (practice owner) AND
+    # employees (provider) — we must try both.
+    candidates: list[dict] = []
+
+    try:
+        admin = TpmsAdmin.objects.using('therapypms').get(
+            Q(email=email) | Q(login_email=email)
+        )
+        if admin.password:
+            candidates.append({
+                'hashed_password': admin.password,
+                'is_active': bool(admin.active),
+                'first_name': admin.first_name or admin.name or '',
+                'last_name': admin.last_name or '',
+                'dcm_role': User.Role.ADMIN,
+                'tpms_admin_id': _tpms_effective_admin_id(admin),
+            })
+    except TpmsAdmin.DoesNotExist:
+        pass
+    except TpmsAdmin.MultipleObjectsReturned:
+        for admin in TpmsAdmin.objects.using('therapypms').filter(
+            Q(email=email) | Q(login_email=email)
+        ):
+            if admin.password:
+                candidates.append({
+                    'hashed_password': admin.password,
+                    'is_active': bool(admin.active),
+                    'first_name': admin.first_name or admin.name or '',
+                    'last_name': admin.last_name or '',
+                    'dcm_role': User.Role.ADMIN,
+                    'tpms_admin_id': _tpms_effective_admin_id(admin),
+                })
+
+    tpms_employee_id: int | None = None
+    try:
+        employee = TpmsEmployee.objects.using('therapypms').get(login_email=email)
+        if employee.password:
+            tpms_employee_id = employee.id
+            candidates.append({
+                'hashed_password': employee.password,
+                'is_active': bool(employee.is_staff_active or employee.is_active),
+                'first_name': employee.first_name or '',
+                'last_name': employee.last_name or '',
+                'dcm_role': _tpms_role_for_employee_type(employee.employee_type),
+                'tpms_admin_id': employee.admin_id,
+            })
+    except TpmsEmployee.DoesNotExist:
+        pass
+
+    # Try each candidate in order — first password match wins
+    matched = next(
+        (c for c in candidates if _verify_tpms_password(password, c['hashed_password'])),
+        None,
+    )
+
+    if matched is None:
+        raise HttpError(401, 'Invalid email or password')
+
+    first_name  = matched['first_name']
+    last_name   = matched['last_name']
+    dcm_role    = matched['dcm_role']
+    is_active   = matched['is_active']
+    tpms_admin_id = matched['tpms_admin_id']
+
+    if not is_active:
+        raise HttpError(403, 'Account is inactive')
+
+    # Auto-provision DCM user on first TPMS login; keep tpms_admin_id + tpms_employee_id current
+    with transaction.atomic():
+        user, created = User.objects.get_or_create(
+            email=email,
+            defaults={
+                'first_name': first_name,
+                'last_name': last_name,
+                'role': dcm_role,
+                'is_active': True,
+                'tpms_admin_id': tpms_admin_id,
+                'tpms_employee_id': tpms_employee_id,
+            },
+        )
+        if created:
+            user.set_unusable_password()
+            user.save(update_fields=['password'])
+        else:
+            update_fields = []
+            if user.tpms_admin_id != tpms_admin_id:
+                user.tpms_admin_id = tpms_admin_id
+                update_fields.append('tpms_admin_id')
+            if user.tpms_employee_id != tpms_employee_id:
+                user.tpms_employee_id = tpms_employee_id
+                update_fields.append('tpms_employee_id')
+            if update_fields:
+                user.save(update_fields=update_fields)
+
+    return TokenResponse(
+        access_token=create_access_token(user),
+        refresh_token=create_refresh_token(user),
+        user_id=user.id,
+        email=user.email,
+        role=user.role,
+        full_name=user.full_name,
+    )
+
+
+
+@router.post('/refresh', response=AccessTokenResponse, auth=None)
+def refresh_token(request, data: RefreshRequest):
+    try:
+        payload = decode_token(data.refresh_token)
+        if payload.get('type') != 'refresh':
+            raise HttpError(401, 'Invalid token type')
+        user = User.objects.get(id=int(payload['sub']), is_active=True)
+        return AccessTokenResponse(access_token=create_access_token(user))
+    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, User.DoesNotExist, KeyError):
+        raise HttpError(401, 'Invalid or expired token')
+
+
+@router.get('/me', response=UserSchema, auth=jwt_auth)
+def me(request):
+    return request.user
+
+
+@router.get('/me/debug', auth=jwt_auth)
+def me_debug(request):
+    """Temporary: shows raw TPMS lookup results for the logged-in user."""
+    from apps.legacy.models import TpmsEmployee, TpmsAppointment
+    from apps.clients.models import Client
+
+    out: dict = {
+        'dcm_email': request.user.email,
+        'dcm_role': request.user.role,
+        'dcm_tpms_admin_id': request.user.tpms_admin_id,
+    }
+
+    try:
+        emp = TpmsEmployee.objects.using('therapypms').get(login_email=request.user.email)
+        out['tpms_employee_id'] = emp.id
+        out['tpms_employee_name'] = f'{emp.first_name} {emp.last_name}'
+        out['tpms_employee_admin_id'] = emp.admin_id
+
+        appt_client_ids = list(
+            TpmsAppointment.objects.using('therapypms')
+            .filter(provider_id=emp.id)
+            .exclude(status__in=['deleted', 'void', 'voided'])
+            .exclude(client_id__isnull=True)
+            .values_list('client_id', flat=True)
+            .distinct()
+        )
+        out['tpms_appointment_client_ids'] = appt_client_ids
+
+        dcm_clients = list(
+            Client.objects.filter(external_id__in=[str(c) for c in appt_client_ids])
+            .values('id', 'first_name', 'last_name', 'external_id', 'tpms_admin_id')
+        )
+        out['dcm_matching_clients'] = dcm_clients
+    except TpmsEmployee.DoesNotExist:
+        out['tpms_employee_error'] = f'No TpmsEmployee found with login_email={request.user.email!r}'
+    except TpmsEmployee.MultipleObjectsReturned:
+        dupes = list(
+            TpmsEmployee.objects.using('therapypms')
+            .filter(login_email=request.user.email)
+            .values('id', 'first_name', 'last_name', 'admin_id')
+        )
+        out['tpms_employee_error'] = f'Multiple TpmsEmployee records for that email: {dupes}'
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# User management (admin only)
+# ---------------------------------------------------------------------------
+
+@router.get('/users', response=list[UserSchema], auth=jwt_auth)
+def list_users(request):
+    if not request.user.has_role('admin', 'supervisor'):
+        raise HttpError(403, 'Insufficient permissions')
+    return list(User.objects.filter(is_active=True).order_by('last_name', 'first_name'))
+
+
+@router.get('/admin/staffs', response=list[StaffSchema], auth=jwt_auth)
+def list_admin_staffs(request, include_inactive: bool = False):
+    """Return staff from the TPMS employees table for the logged-in admin's practice.
+
+    By default returns only active staff (is_active=1), matching TPMS default view.
+    Pass ?include_inactive=true to include inactive staff as well.
+    """
+    if not request.user.has_role('admin', 'supervisor'):
+        raise HttpError(403, 'Admin or supervisor access required')
+    if request.user.tpms_admin_id is None:
+        return []
+    from apps.legacy.models import TpmsEmployee
+    qs = TpmsEmployee.objects.using('therapypms').filter(
+        admin_id=request.user.tpms_admin_id,
+    )
+    if not include_inactive:
+        qs = qs.filter(is_active=1)
+    return list(qs.order_by('last_name', 'first_name'))
+
+
+@router.post('/users', response={201: UserSchema, 400: ErrorResponse}, auth=jwt_auth)
+def create_user(request, data: UserCreateRequest):
+    if not request.user.has_role('admin'):
+        raise HttpError(403, 'Admin access required')
+    if User.objects.filter(email=data.email).exists():
+        return 400, ErrorResponse(detail='A user with this email already exists')
+    user = User.objects.create_user(
+        email=data.email,
+        first_name=data.first_name,
+        last_name=data.last_name,
+        role=data.role,
+        password=data.password,
+    )
+    return 201, user
+
+
+@router.patch('/users/{user_id}', response=UserSchema, auth=jwt_auth)
+def update_user(request, user_id: int, data: UserUpdateRequest):
+    if not request.user.has_role('admin'):
+        raise HttpError(403, 'Admin access required')
+    try:
+        user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        raise HttpError(404, 'User not found')
+    for field, value in data.dict(exclude_none=True).items():
+        setattr(user, field, value)
+    user.save()
+    return user
+
+
+# ---------------------------------------------------------------------------
+# API key management (admin only)
+# ---------------------------------------------------------------------------
+
+@router.get('/api-keys', response=list[APIKeyListItem], auth=jwt_auth)
+def list_api_keys(request):
+    if not request.user.has_role('admin'):
+        raise HttpError(403, 'Admin access required')
+    return list(APIKey.objects.filter(is_active=True).order_by('-created_at'))
+
+
+@router.post('/api-keys', response={201: APIKeyCreatedResponse}, auth=jwt_auth)
+def create_api_key(request, data: APIKeyCreateRequest):
+    if not request.user.has_role('admin'):
+        raise HttpError(403, 'Admin access required')
+    key_instance, raw_key = APIKey.generate(
+        name=data.name,
+        created_by=request.user,
+        expires_at=data.expires_at,
+    )
+    return 201, APIKeyCreatedResponse(
+        id=key_instance.id,
+        name=key_instance.name,
+        key_prefix=key_instance.key_prefix,
+        raw_key=raw_key,
+        expires_at=key_instance.expires_at,
+    )
+
+
+@router.delete('/api-keys/{key_id}', response={204: None}, auth=jwt_auth)
+def revoke_api_key(request, key_id: int):
+    if not request.user.has_role('admin'):
+        raise HttpError(403, 'Admin access required')
+    try:
+        key = APIKey.objects.get(id=key_id)
+    except APIKey.DoesNotExist:
+        raise HttpError(404, 'API key not found')
+    key.is_active = False
+    key.save(update_fields=['is_active'])
+    return 204, None
