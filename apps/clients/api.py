@@ -26,13 +26,13 @@ def _get_accessible_clients(request):
     """
     qs = Client.objects.all()
 
-    if request.user.tpms_admin_id is not None:
-        qs = qs.filter(tpms_admin_id=request.user.tpms_admin_id)
+    if request.user.external_admin_id is not None:
+        qs = qs.filter(external_admin_id=request.user.external_admin_id)
 
     if request.user.role in ('admin', 'supervisor'):
         return qs
 
-    if request.user.tpms_admin_id is None:
+    if request.user.external_admin_id is None:
         # Native staff: derive accessible clients from ClientStaffAssignment
         assigned_client_ids = ClientStaffAssignment.objects.filter(
             user=request.user, is_active=True,
@@ -41,11 +41,11 @@ def _get_accessible_clients(request):
 
     # Staff: derive accessible clients from their TPMS appointment history
     from apps.legacy.models import TpmsAppointment
-    employee_id = request.user.tpms_employee_id
+    employee_id = request.user.external_employee_id
     if not employee_id:
         return qs.none()
 
-    tpms_client_ids = (
+    external_client_ids = (
         TpmsAppointment.objects.using('therapypms')
         .filter(provider_id=employee_id)
         .exclude(status__in=['deleted', 'void', 'voided'])
@@ -53,7 +53,7 @@ def _get_accessible_clients(request):
         .values_list('client_id', flat=True)
         .distinct()
     )
-    accessible_ext_ids = [str(cid) for cid in tpms_client_ids]
+    accessible_ext_ids = [str(cid) for cid in external_client_ids]
     return qs.filter(external_id__in=accessible_ext_ids)
 
 
@@ -97,13 +97,13 @@ def list_clients(request, include_inactive: bool = False, search: str | None = N
     - Admin/supervisor: all patients in their practice.
     - Staff: only patients they have been explicitly assigned to.
     """
-    if request.user.tpms_admin_id is None:
+    if request.user.external_admin_id is None:
         return _list_native_clients(request, include_inactive, search)
 
     from apps.legacy.models import TpmsClient
 
     tpms_qs = TpmsClient.objects.using('therapypms').filter(
-        admin_id=request.user.tpms_admin_id,
+        admin_id=request.user.external_admin_id,
     )
     if not include_inactive:
         tpms_qs = tpms_qs.filter(is_active_client=1)
@@ -128,10 +128,10 @@ def list_clients(request, include_inactive: bool = False, search: str | None = N
     # For staff: show only clients they have TPMS appointments with
     if request.user.role not in ('admin', 'supervisor'):
         from apps.legacy.models import TpmsAppointment
-        employee_id = request.user.tpms_employee_id
+        employee_id = request.user.external_employee_id
         if not employee_id:
             return []
-        tpms_client_ids = (
+        external_client_ids = (
             TpmsAppointment.objects.using('therapypms')
             .filter(provider_id=employee_id)
             .exclude(status__in=['deleted', 'void', 'voided'])
@@ -139,7 +139,7 @@ def list_clients(request, include_inactive: bool = False, search: str | None = N
             .values_list('client_id', flat=True)
             .distinct()
         )
-        assigned_ext_ids = {str(cid) for cid in tpms_client_ids}
+        assigned_ext_ids = {str(cid) for cid in external_client_ids}
         tpms_clients = [tc for tc in tpms_clients if str(tc.pk) in assigned_ext_ids]
 
     result = []
@@ -166,7 +166,7 @@ def list_clients(request, include_inactive: bool = False, search: str | None = N
                 preferred_name=(tc.client_preferred or '').strip(),
                 date_of_birth=tc.client_dob,
                 status=Client.Status.ACTIVE,
-                tpms_admin_id=tc.admin_id,
+                external_admin_id=tc.admin_id,
             )
         else:
             # Always keep names in sync with TPMS
@@ -280,11 +280,11 @@ def _list_native_client_sessions(
     to_date: date | None,
 ):
     """Native (non-TPMS) equivalent of list_client_sessions — reads the local
-    Appointment table directly (tpms_client_id holds the local Client.id by
+    Appointment table directly (external_client_id holds the local Client.id by
     convention for native-mode appointments) instead of TpmsAppointment."""
     from apps.sessions.models import Appointment as DcmAppointment
 
-    qs = DcmAppointment.objects.filter(tpms_client_id=client.id).annotate(
+    qs = DcmAppointment.objects.filter(external_client_id=client.id).annotate(
         assigned_program_count=Count('lesson__lesson_programs', distinct=True),
     )
     if request.user.role not in ('admin', 'supervisor'):
@@ -321,17 +321,17 @@ def list_client_sessions(
     if not client.external_id:
         return _list_native_client_sessions(request, client, status, from_date, to_date)
 
-    tpms_client_id = int(client.external_id)
+    external_client_id = int(client.external_id)
 
     qs = TpmsAppointment.objects.using('therapypms').filter(
-        client_id=tpms_client_id,
+        client_id=external_client_id,
     ).filter(
         Q(is_break__isnull=True) | Q(is_break=1)
     ).order_by('-schedule_date')
 
     # Staff see only their own appointments for this client
     if request.user.role not in ('admin', 'supervisor'):
-        employee_id = request.user.tpms_employee_id
+        employee_id = request.user.external_employee_id
         if not employee_id:
             return []
         qs = qs.filter(provider_id=employee_id)

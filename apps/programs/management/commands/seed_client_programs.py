@@ -184,8 +184,8 @@ class Command(BaseCommand):
 
         if clear:
             from apps.sessions.models import SessionRun
-            sr_deleted, _ = SessionRun.objects.filter(tpms_client_id=client_id).delete()
-            prog_deleted, _ = Program.objects.filter(tpms_client_id=client_id, is_template=False).delete()
+            sr_deleted, _ = SessionRun.objects.filter(external_client_id=client_id).delete()
+            prog_deleted, _ = Program.objects.filter(external_client_id=client_id, is_template=False).delete()
             self.stdout.write(f'  Cleared {prog_deleted} program(s) and {sr_deleted} session(s)')
 
         # ── Workflow templates ──────────────────────────────────────────────
@@ -234,7 +234,7 @@ class Command(BaseCommand):
                 wf = default_wf
 
             program = Program.objects.create(
-                tpms_client_id=client_id,
+                external_client_id=client_id,
                 is_template=False,
                 name=prog_data['name'],
                 category=prog_data['category'],
@@ -282,7 +282,7 @@ class Command(BaseCommand):
 
         programs = list(
             Program.objects
-            .filter(tpms_client_id=client_id, status='active', is_template=False)
+            .filter(external_client_id=client_id, status='active', is_template=False)
             .prefetch_related('targets')
         )
         if not programs:
@@ -308,7 +308,7 @@ class Command(BaseCommand):
             session_end   = session_start + timedelta(hours=2)
 
             session = SessionRun.objects.create(
-                tpms_client_id=client_id,
+                external_client_id=client_id,
                 staff=staff,
                 status='approved',
                 started_at=session_start,

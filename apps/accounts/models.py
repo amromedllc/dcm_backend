@@ -36,12 +36,12 @@ class User(AbstractBaseUser, PermissionsMixin):
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.STAFF)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
-    # Set when the user authenticates via TherapyPMS — scopes their client/data access
-    tpms_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
-    # TPMS employee pk — set at login for staff/supervisor, null for admin-only logins
-    tpms_employee_id = models.IntegerField(null=True, blank=True, db_index=True)
-    # Set for native (non-TPMS) users — binds them to one Organization/tenant.
-    # Null for TPMS users, who are scoped via tpms_admin_id instead and are
+    # Set when the user authenticates via a linked external PM system — scopes their client/data access
+    external_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
+    # External system employee pk — set at login for staff/supervisor, null for admin-only logins
+    external_employee_id = models.IntegerField(null=True, blank=True, db_index=True)
+    # Set for native (non-linked) users — binds them to one Organization/tenant.
+    # Null for externally-linked users, who are scoped via external_admin_id instead and are
     # exempt from tenant-binding checks (see accounts.auth.user_tenant_mismatch).
     organization = models.ForeignKey(
         'tenants.Organization',

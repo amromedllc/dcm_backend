@@ -114,7 +114,7 @@ def _tpms_auth(email: str, password: str) -> TokenResponse:
                 'first_name': admin.first_name or admin.name or '',
                 'last_name': admin.last_name or '',
                 'dcm_role': User.Role.ADMIN,
-                'tpms_admin_id': _tpms_effective_admin_id(admin),
+                'external_admin_id': _tpms_effective_admin_id(admin),
             })
     except TpmsAdmin.DoesNotExist:
         pass
@@ -129,21 +129,21 @@ def _tpms_auth(email: str, password: str) -> TokenResponse:
                     'first_name': admin.first_name or admin.name or '',
                     'last_name': admin.last_name or '',
                     'dcm_role': User.Role.ADMIN,
-                    'tpms_admin_id': _tpms_effective_admin_id(admin),
+                    'external_admin_id': _tpms_effective_admin_id(admin),
                 })
 
-    tpms_employee_id: int | None = None
+    external_employee_id: int | None = None
     try:
         employee = TpmsEmployee.objects.using('therapypms').get(login_email=email)
         if employee.password:
-            tpms_employee_id = employee.id
+            external_employee_id = employee.id
             candidates.append({
                 'hashed_password': employee.password,
                 'is_active': bool(employee.is_staff_active or employee.is_active),
                 'first_name': employee.first_name or '',
                 'last_name': employee.last_name or '',
                 'dcm_role': _tpms_role_for_employee_type(employee.employee_type),
-                'tpms_admin_id': employee.admin_id,
+                'external_admin_id': employee.admin_id,
             })
     except TpmsEmployee.DoesNotExist:
         pass
@@ -161,12 +161,12 @@ def _tpms_auth(email: str, password: str) -> TokenResponse:
     last_name   = matched['last_name']
     dcm_role    = matched['dcm_role']
     is_active   = matched['is_active']
-    tpms_admin_id = matched['tpms_admin_id']
+    external_admin_id = matched['external_admin_id']
 
     if not is_active:
         raise HttpError(403, 'Account is inactive')
 
-    # Auto-provision DCM user on first TPMS login; keep tpms_admin_id + tpms_employee_id current
+    # Auto-provision DCM user on first TPMS login; keep external_admin_id + external_employee_id current
     with transaction.atomic():
         user, created = User.objects.get_or_create(
             email=email,
@@ -175,8 +175,8 @@ def _tpms_auth(email: str, password: str) -> TokenResponse:
                 'last_name': last_name,
                 'role': dcm_role,
                 'is_active': True,
-                'tpms_admin_id': tpms_admin_id,
-                'tpms_employee_id': tpms_employee_id,
+                'external_admin_id': external_admin_id,
+                'external_employee_id': external_employee_id,
             },
         )
         if created:
@@ -184,12 +184,12 @@ def _tpms_auth(email: str, password: str) -> TokenResponse:
             user.save(update_fields=['password'])
         else:
             update_fields = []
-            if user.tpms_admin_id != tpms_admin_id:
-                user.tpms_admin_id = tpms_admin_id
-                update_fields.append('tpms_admin_id')
-            if user.tpms_employee_id != tpms_employee_id:
-                user.tpms_employee_id = tpms_employee_id
-                update_fields.append('tpms_employee_id')
+            if user.external_admin_id != external_admin_id:
+                user.external_admin_id = external_admin_id
+                update_fields.append('external_admin_id')
+            if user.external_employee_id != external_employee_id:
+                user.external_employee_id = external_employee_id
+                update_fields.append('external_employee_id')
             if user.role != dcm_role:
                 user.role = dcm_role
                 update_fields.append('role')
@@ -228,12 +228,12 @@ def me_debug(request):
     out: dict = {
         'dcm_email': request.user.email,
         'dcm_role': request.user.role,
-        'dcm_tpms_admin_id': request.user.tpms_admin_id,
+        'dcm_external_admin_id': request.user.external_admin_id,
     }
 
     try:
         emp = TpmsEmployee.objects.using('therapypms').get(login_email=request.user.email)
-        out['tpms_employee_id'] = emp.id
+        out['external_employee_id'] = emp.id
         out['tpms_employee_name'] = f'{emp.first_name} {emp.last_name}'
         out['tpms_employee_admin_id'] = emp.admin_id
 
@@ -249,7 +249,7 @@ def me_debug(request):
 
         dcm_clients = list(
             Client.objects.filter(external_id__in=[str(c) for c in appt_client_ids])
-            .values('id', 'first_name', 'last_name', 'external_id', 'tpms_admin_id')
+            .values('id', 'first_name', 'last_name', 'external_id', 'external_admin_id')
         )
         out['dcm_matching_clients'] = dcm_clients
     except TpmsEmployee.DoesNotExist:
@@ -285,11 +285,11 @@ def list_admin_staffs(request, include_inactive: bool = False):
     """
     if not request.user.has_role('admin', 'supervisor'):
         raise HttpError(403, 'Admin or supervisor access required')
-    if request.user.tpms_admin_id is None:
+    if request.user.external_admin_id is None:
         return _list_native_staffs(request, include_inactive)
     from apps.legacy.models import TpmsEmployee
     qs = TpmsEmployee.objects.using('therapypms').filter(
-        admin_id=request.user.tpms_admin_id,
+        admin_id=request.user.external_admin_id,
     )
     if not include_inactive:
         qs = qs.filter(is_active=1)

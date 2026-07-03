@@ -27,7 +27,7 @@ def notify_session_submitted(session_run):
     """Notify all admins/supervisors that a session needs review."""
     from apps.accounts.models import User
     reviewers = User.objects.filter(role__in=['admin', 'supervisor'])
-    client_id = session_run.tpms_client_id
+    client_id = session_run.external_client_id
     staff_name = f'{session_run.staff.first_name} {session_run.staff.last_name}'.strip() if session_run.staff else 'Staff'
     for reviewer in reviewers:
         _create(
@@ -47,8 +47,8 @@ def notify_session_approved(session_run):
         recipient_id=session_run.staff_id,
         event_type='session_approved',
         title='Session approved',
-        body=f'Your session for client #{session_run.tpms_client_id} has been approved.',
-        data={'session_id': session_run.id, 'client_id': session_run.tpms_client_id},
+        body=f'Your session for client #{session_run.external_client_id} has been approved.',
+        data={'session_id': session_run.id, 'client_id': session_run.external_client_id},
     )
 
 
@@ -60,8 +60,8 @@ def notify_session_rejected(session_run):
         recipient_id=session_run.staff_id,
         event_type='session_rejected',
         title='Session rejected',
-        body=f'Your session for client #{session_run.tpms_client_id} was rejected: {session_run.rejection_reason}',
-        data={'session_id': session_run.id, 'client_id': session_run.tpms_client_id,
+        body=f'Your session for client #{session_run.external_client_id} was rejected: {session_run.rejection_reason}',
+        data={'session_id': session_run.id, 'client_id': session_run.external_client_id,
               'reason': session_run.rejection_reason},
     )
 

@@ -14,7 +14,7 @@ class Appointment(TenantAwareModel):
         MANUAL = 'manual', 'Manual'
         SYNCED = 'synced', 'Synced from PM System'
 
-    tpms_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
+    external_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     staff = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -44,10 +44,10 @@ class Appointment(TenantAwareModel):
 
     @property
     def client_id(self):
-        return self.tpms_client_id
+        return self.external_client_id
 
     def __str__(self) -> str:
-        return f'{self.tpms_client_id} | {self.start_time:%Y-%m-%d %H:%M}'
+        return f'{self.external_client_id} | {self.start_time:%Y-%m-%d %H:%M}'
 
 
 class SessionRun(TenantAwareModel):
@@ -66,8 +66,8 @@ class SessionRun(TenantAwareModel):
         APPROVED = 'approved', 'Approved'
         REJECTED = 'rejected', 'Rejected'
 
-    tpms_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
-    tpms_appointment_id = models.BigIntegerField(null=True, blank=True, db_index=True)
+    external_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
+    external_appointment_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     staff = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -106,18 +106,18 @@ class SessionRun(TenantAwareModel):
 
     @property
     def client_id(self):
-        return self.tpms_client_id
+        return self.external_client_id
 
     @property
     def appointment_id(self):
-        return self.tpms_appointment_id
+        return self.external_appointment_id
 
     @property
     def is_editable(self) -> bool:
         return self.status == self.Status.OPEN
 
     def __str__(self) -> str:
-        return f'Session {self.id} [{self.status}] — client {self.tpms_client_id}'
+        return f'Session {self.id} [{self.status}] — client {self.external_client_id}'
 
 
 class TrialEvent(models.Model):

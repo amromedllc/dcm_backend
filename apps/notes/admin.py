@@ -20,14 +20,14 @@ class NoteSignatureInline(TabularInline):
 
 @admin.register(LessonNote)
 class LessonNoteAdmin(ModelAdmin):
-    list_display = ['id', 'tpms_client_id', 'staff_id', 'note_date', 'status', 'submitted_at', 'requires_caregiver_signature']
+    list_display = ['id', 'external_client_id', 'staff_id', 'note_date', 'status', 'submitted_at', 'requires_caregiver_signature']
     list_filter = ['status', 'requires_caregiver_signature']
-    search_fields = ['tpms_client_id']
+    search_fields = ['external_client_id']
     readonly_fields = ['submitted_at', 'approved_by_id', 'approved_at', 'rejected_by_id', 'rejected_at', 'created_at', 'updated_at']
     date_hierarchy = 'note_date'
     inlines = [NoteSignatureInline]
     fieldsets = (
-        ('Identity', {'fields': ('tpms_client_id', 'session_run', 'staff_id', 'template', 'note_date')}),
+        ('Identity', {'fields': ('external_client_id', 'session_run', 'staff_id', 'template', 'note_date')}),
         ('Content', {'fields': ('body',)}),
         ('Workflow', {'fields': ('status', 'submitted_at', 'approved_by_id', 'approved_at', 'rejected_by_id', 'rejected_at', 'rejection_reason')}),
         ('Signatures', {'fields': ('requires_caregiver_signature',)}),
@@ -37,7 +37,7 @@ class LessonNoteAdmin(ModelAdmin):
 
 @admin.register(NoteAssignment)
 class NoteAssignmentAdmin(ModelAdmin):
-    list_display = ['id', 'tpms_appointment_id', 'template', 'is_filled', 'assigned_by', 'created_at']
+    list_display = ['id', 'external_appointment_id', 'template', 'is_filled', 'assigned_by', 'created_at']
     list_filter = ['template']
     readonly_fields = ['note', 'created_at']
 

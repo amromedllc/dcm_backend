@@ -71,7 +71,7 @@ def sync_tpms_clients(admin_id: int | None = None) -> SyncResult:
             'preferred_name': (tpms.client_preferred or '').strip(),
             'date_of_birth': tpms.client_dob,
             'status': Client.Status.ACTIVE,
-            'tpms_admin_id': tpms.admin_id,
+            'external_admin_id': tpms.admin_id,
         }
 
         try:

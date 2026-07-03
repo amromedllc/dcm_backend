@@ -50,7 +50,7 @@ class LessonNote(TenantAwareModel):
         blank=True,
         related_name='note',
     )
-    tpms_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
+    external_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     staff = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -91,20 +91,20 @@ class LessonNote(TenantAwareModel):
 
     @property
     def client_id(self):
-        return self.tpms_client_id
+        return self.external_client_id
 
     def __str__(self) -> str:
-        return f'Note {self.id} [{self.status}] — {self.tpms_client_id} {self.note_date}'
+        return f'Note {self.id} [{self.status}] — {self.external_client_id} {self.note_date}'
 
 
 class NoteAssignment(TenantAwareModel):
     """
-    Admin/supervisor assigns a NoteTemplate to a TPMS appointment.
-    Matches TPMS's docu_seal_templates / session_notes_avails pattern.
+    Admin/supervisor assigns a NoteTemplate to an appointment in the linked external PM system.
+    Matches TherapyPMS's docu_seal_templates / session_notes_avails pattern.
     Staff sees these assignments and fills each one; once filled the note FK is set.
     """
-    tpms_appointment_id = models.BigIntegerField(db_index=True)
-    tpms_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
+    external_appointment_id = models.BigIntegerField(db_index=True)
+    external_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     template = models.ForeignKey(
         NoteTemplate, on_delete=models.CASCADE, related_name='assignments',
     )
@@ -119,7 +119,7 @@ class NoteAssignment(TenantAwareModel):
 
     class Meta:
         app_label = 'notes'
-        unique_together = [('tpms_appointment_id', 'template')]
+        unique_together = [('external_appointment_id', 'template')]
         ordering = ['created_at']
 
     @property
@@ -127,7 +127,7 @@ class NoteAssignment(TenantAwareModel):
         return self.note_id is not None
 
     def __str__(self):
-        return f'Assignment {self.id} — appt {self.tpms_appointment_id} → {self.template.name}'
+        return f'Assignment {self.id} — appt {self.external_appointment_id} → {self.template.name}'
 
 
 class NoteSignature(models.Model):

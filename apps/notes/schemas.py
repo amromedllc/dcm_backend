@@ -119,8 +119,8 @@ class NoteCreateRequest(Schema):
 
 class NoteAssignmentSchema(Schema):
     id: int
-    tpms_appointment_id: int
-    tpms_client_id: int | None
+    external_appointment_id: int
+    external_client_id: int | None
     template_id: int
     template_name: str
     is_filled: bool
@@ -130,9 +130,9 @@ class NoteAssignmentSchema(Schema):
 
 
 class NoteAssignmentCreateRequest(Schema):
-    tpms_appointment_id: int
+    external_appointment_id: int
     template_id: int
-    tpms_client_id: int | None = None
+    external_client_id: int | None = None
 
 
 class NoteUpdateRequest(Schema):

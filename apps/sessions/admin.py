@@ -5,7 +5,7 @@ from .models import Appointment, SessionRun, TrialEvent, BehaviorEvent, ABCEvent
 
 @admin.register(Appointment)
 class AppointmentAdmin(ModelAdmin):
-    list_display = ['tpms_client_id', 'staff_id', 'start_time', 'end_time', 'status', 'source']
+    list_display = ['external_client_id', 'staff_id', 'start_time', 'end_time', 'status', 'source']
     list_filter = ['status', 'source']
     search_fields = ['external_id']
     readonly_fields = ['synced_at', 'created_at', 'updated_at']
@@ -35,9 +35,9 @@ class ABCEventInline(TabularInline):
 
 @admin.register(SessionRun)
 class SessionRunAdmin(ModelAdmin):
-    list_display = ['id', 'tpms_client_id', 'staff_id', 'status', 'started_at', 'submitted_at']
+    list_display = ['id', 'external_client_id', 'staff_id', 'status', 'started_at', 'submitted_at']
     list_filter = ['status']
-    search_fields = ['tpms_client_id']
+    search_fields = ['external_client_id']
     readonly_fields = ['program_snapshot', 'started_at', 'submitted_at', 'reviewed_at', 'created_at', 'updated_at']
     inlines = [TrialEventInline, BehaviorEventInline, ABCEventInline]
     date_hierarchy = 'started_at'

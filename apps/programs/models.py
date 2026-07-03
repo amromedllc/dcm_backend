@@ -58,7 +58,7 @@ class Program(TenantAwareModel):
         MASTERED = 'mastered', 'Mastered'
         ON_HOLD = 'on_hold', 'On Hold'
 
-    tpms_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
+    external_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     is_template = models.BooleanField(default=False, db_index=True)
     name = models.CharField(max_length=200)
     workflow_template = models.ForeignKey(
@@ -90,10 +90,10 @@ class Program(TenantAwareModel):
 
     @property
     def client_id(self):
-        return self.tpms_client_id
+        return self.external_client_id
 
     def __str__(self) -> str:
-        return f'{self.name} ({self.tpms_client_id})'
+        return f'{self.name} ({self.external_client_id})'
 
 
 class TargetQuerySet(models.QuerySet):
@@ -355,7 +355,7 @@ class Lesson(TenantAwareModel):
         SCHEDULED = 'scheduled', 'Scheduled'
         APPOINTMENT_LINKED = 'appointment_linked', 'Appointment Linked'
 
-    tpms_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
+    external_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     name = models.CharField(max_length=200)
     lesson_type = models.CharField(max_length=25, choices=LessonType.choices, default=LessonType.OPEN)
     is_active = models.BooleanField(default=True)
@@ -366,10 +366,10 @@ class Lesson(TenantAwareModel):
 
     @property
     def client_id(self):
-        return self.tpms_client_id
+        return self.external_client_id
 
     def __str__(self) -> str:
-        return f'{self.name} ({self.tpms_client_id})'
+        return f'{self.name} ({self.external_client_id})'
 
 
 class LessonProgram(models.Model):

@@ -35,7 +35,7 @@ class UserSchema(Schema):
     full_name: str
     role: str
     is_active: bool
-    tpms_admin_id: int | None
+    external_admin_id: int | None
     created_at: datetime
 
 

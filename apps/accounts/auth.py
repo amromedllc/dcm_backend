@@ -41,7 +41,7 @@ def user_tenant_mismatch(user: User, request) -> bool:
     True if this user is bound to one Organization (a native user) and the
     tenant resolved for the current request (by hostname, via
     TenantMainMiddleware) isn't it. TPMS users (organization=None) are
-    exempt — they're scoped by tpms_admin_id instead.
+    exempt — they're scoped by external_admin_id instead.
     """
     if user.organization_id is None:
         return False

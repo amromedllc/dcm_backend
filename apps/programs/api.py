@@ -43,7 +43,7 @@ def _require_admin(request):
 def _serialize_program(program: Program, include_targets: bool = False) -> dict:
     data = {
         'id': program.id,
-        'client_id': program.tpms_client_id,
+        'client_id': program.external_client_id,
         'name': program.name,
         'category': program.category,
         'status': program.status,
@@ -73,7 +73,7 @@ def _serialize_program(program: Program, include_targets: bool = False) -> dict:
 
 @router.get('/programs', response=list[ProgramListSchema])
 def list_programs(request, client_id: int, category: str | None = None, status: str | None = None):
-    qs = Program.objects.filter(tpms_client_id=client_id).exclude(status='archived')
+    qs = Program.objects.filter(external_client_id=client_id).exclude(status='archived')
     if category:
         qs = qs.filter(category=category)
     if status:
@@ -96,7 +96,7 @@ def list_programs(request, client_id: int, category: str | None = None, status: 
 def create_program(request, data: ProgramCreateRequest):
     _require_supervisor(request)
     program = Program.objects.create(
-        tpms_client_id=data.client_id,
+        external_client_id=data.client_id,
         name=data.name,
         category=data.category,
         phase=data.phase,
@@ -458,7 +458,7 @@ def _serialize_lesson(lesson: Lesson) -> dict:
     ]
     return {
         'id': lesson.id,
-        'client_id': lesson.tpms_client_id,
+        'client_id': lesson.external_client_id,
         'name': lesson.name,
         'lesson_type': lesson.lesson_type,
         'is_active': lesson.is_active,
@@ -470,7 +470,7 @@ def _serialize_lesson(lesson: Lesson) -> dict:
 
 @router.get('/lessons', response=list[LessonSchema])
 def list_lessons(request, client_id: int):
-    lessons = Lesson.objects.filter(tpms_client_id=client_id, is_active=True)
+    lessons = Lesson.objects.filter(external_client_id=client_id, is_active=True)
     return [_serialize_lesson(l) for l in lessons]
 
 
@@ -478,7 +478,7 @@ def list_lessons(request, client_id: int):
 def create_lesson(request, data: LessonCreateRequest):
     _require_supervisor(request)
     lesson = Lesson.objects.create(
-        tpms_client_id=data.client_id,
+        external_client_id=data.client_id,
         name=data.name,
         lesson_type=data.lesson_type,
         created_by=request.user,
@@ -567,8 +567,8 @@ def _org_qs(request):
     """Return org-template programs scoped to the authenticated user's facility."""
     return Program.objects.filter(
         is_template=True,
-        tpms_client_id__isnull=True,
-        created_by__tpms_admin_id=request.user.tpms_admin_id,
+        external_client_id__isnull=True,
+        created_by__external_admin_id=request.user.external_admin_id,
     )
 
 
@@ -587,7 +587,7 @@ def create_org_program(request, data: OrgProgramCreateRequest):
     _require_admin(request)
     program = Program.objects.create(
         is_template=True,
-        tpms_client_id=None,
+        external_client_id=None,
         name=data.name,
         category=data.category,
         phase=data.phase,
@@ -641,7 +641,7 @@ def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
     """Deep-copy a program (+ all its targets) to a different client."""
     dest = Program.objects.create(
         is_template=False,
-        tpms_client_id=client_id,
+        external_client_id=client_id,
         name=source.name,
         category=source.category,
         phase=source.phase,

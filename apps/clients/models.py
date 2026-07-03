@@ -11,8 +11,8 @@ class Client(TenantAwareModel):
         ON_HOLD = 'on_hold', 'On Hold'
 
     external_id = models.CharField(max_length=100, blank=True, db_index=True)
-    # TPMS admin_id this client belongs to — used to scope access per login
-    tpms_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
+    # admin_id in the linked external PM system this client belongs to — used to scope access per login
+    external_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
     first_name = models.CharField(max_length=100)
     last_name = models.CharField(max_length=100)
     preferred_name = models.CharField(max_length=100, blank=True)

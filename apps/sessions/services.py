@@ -39,7 +39,7 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
     elif not restrict_to_lesson:
         programs_qs = (
             Program.objects
-            .filter(tpms_client_id=client_id, status=Program.Status.ACTIVE)
+            .filter(external_client_id=client_id, status=Program.Status.ACTIVE)
             .prefetch_related('targets__prompting_template')
         )
     else:

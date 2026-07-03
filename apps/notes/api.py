@@ -44,7 +44,7 @@ def _assert_note_access(note: LessonNote, request) -> None:
 def _serialize_note(note: LessonNote) -> dict:
     return {
         'id': note.id,
-        'client_id': note.tpms_client_id,
+        'client_id': note.external_client_id,
         'session_run_id': note.session_run_id,
         'staff_id': note.staff_id,
         'template_id': note.template_id,
@@ -144,7 +144,7 @@ def list_notes(
         qs = qs.filter(staff_id=staff_id)
 
     if client_id:
-        qs = qs.filter(tpms_client_id=client_id)
+        qs = qs.filter(external_client_id=client_id)
     if status:
         qs = qs.filter(status=status)
     if date_from:
@@ -178,12 +178,12 @@ def list_notes(
 @router.post('/notes', response={201: LessonNoteSchema})
 def create_note(request, data: NoteCreateRequest):
     payload = data.dict()
-    tpms_client_id = payload.pop('client_id', None)
+    external_client_id = payload.pop('client_id', None)
     assignment_id = payload.pop('assignment_id', None)
     note = LessonNote.objects.create(
         staff=request.user,
         created_by=request.user,
-        tpms_client_id=tpms_client_id,
+        external_client_id=external_client_id,
         **payload,
     )
     if assignment_id:
@@ -318,7 +318,7 @@ def review_queue(
         .order_by('submitted_at')
     )
     if client_id:
-        qs = qs.filter(tpms_client_id=client_id)
+        qs = qs.filter(external_client_id=client_id)
     if date_from:
         qs = qs.filter(note_date__gte=date_from)
     if date_to:
@@ -346,8 +346,8 @@ def _serialize_assignment(a: NoteAssignment) -> dict:
     assigned_by = a.assigned_by
     return {
         'id': a.id,
-        'tpms_appointment_id': a.tpms_appointment_id,
-        'tpms_client_id': a.tpms_client_id,
+        'external_appointment_id': a.external_appointment_id,
+        'external_client_id': a.external_client_id,
         'template_id': a.template_id,
         'template_name': a.template.name,
         'is_filled': a.is_filled,
@@ -364,7 +364,7 @@ def _serialize_assignment(a: NoteAssignment) -> dict:
 def list_assignments(request, appointment_id: int):
     qs = (
         NoteAssignment.objects
-        .filter(tpms_appointment_id=appointment_id)
+        .filter(external_appointment_id=appointment_id)
         .select_related('template', 'assigned_by')
     )
     return [_serialize_assignment(a) for a in qs]
@@ -379,10 +379,10 @@ def create_assignment(request, data: NoteAssignmentCreateRequest):
         raise HttpError(404, 'Template not found')
 
     assignment, created = NoteAssignment.objects.get_or_create(
-        tpms_appointment_id=data.tpms_appointment_id,
+        external_appointment_id=data.external_appointment_id,
         template=template,
         defaults={
-            'tpms_client_id': data.tpms_client_id,
+            'external_client_id': data.external_client_id,
             'assigned_by': request.user,
             'created_by': request.user,
         },

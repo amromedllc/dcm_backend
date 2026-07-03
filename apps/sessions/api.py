@@ -74,11 +74,11 @@ def _max_score_for_target(snapshot: dict, target_id: int) -> int | None:
     return None
 
 
-def _get_tpms_appointment(tpms_appointment_id: int | None):
-    if not tpms_appointment_id:
+def _get_tpms_appointment(external_appointment_id: int | None):
+    if not external_appointment_id:
         return None
     from apps.legacy.models import TpmsAppointment
-    return TpmsAppointment.objects.using('therapypms').filter(id=tpms_appointment_id).first()
+    return TpmsAppointment.objects.using('therapypms').filter(id=external_appointment_id).first()
 
 
 def _aware(dt):
@@ -91,14 +91,14 @@ def _aware(dt):
 def _serialize_session(session: SessionRun, tpms_appt=None) -> dict:
     staff = session.staff
     staff_name = f'{staff.first_name} {staff.last_name}'.strip() if staff else None
-    if tpms_appt is None and session.tpms_appointment_id:
-        tpms_appt = _get_tpms_appointment(session.tpms_appointment_id)
+    if tpms_appt is None and session.external_appointment_id:
+        tpms_appt = _get_tpms_appointment(session.external_appointment_id)
     return {
         'id': session.id,
-        'client_id': session.tpms_client_id,
+        'client_id': session.external_client_id,
         'staff_id': session.staff_id,
         'staff_name': staff_name or (staff.email if staff else None),
-        'appointment_id': session.tpms_appointment_id,
+        'appointment_id': session.external_appointment_id,
         'appointment_start_time': _aware(tpms_appt.from_time) if tpms_appt else None,
         'appointment_end_time': _aware(tpms_appt.to_time) if tpms_appt else None,
         'lesson_id': session.lesson_id,
@@ -135,7 +135,7 @@ def _tpms_status(raw: str | None) -> str:
 @router.get('/provider-appointments', response=list[AppointmentSchema])
 def list_provider_appointments(
     request,
-    tpms_employee_id: int,
+    external_employee_id: int,
     status: str | None = None,
 ):
     """Return appointments from TPMS directly for a given provider (employee) ID."""
@@ -143,7 +143,7 @@ def list_provider_appointments(
     from django.utils import timezone as tz
 
     qs = list(TpmsAppointment.objects.using('therapypms').filter(
-        provider_id=tpms_employee_id,
+        provider_id=external_employee_id,
     ).order_by('-schedule_date'))
 
     # Batch-fetch activity templates for service names
@@ -216,7 +216,7 @@ def my_schedule(request, date: str | None = None):
 
     target_date = date or dt_date.today().isoformat()
 
-    employee_id = request.user.tpms_employee_id
+    employee_id = request.user.external_employee_id
     if employee_id is None:
         # Native (non-TPMS) staff: read straight from the local Appointment table.
         return list(
@@ -318,7 +318,7 @@ def list_appointments(
 ):
     qs = _appt_qs()
     if client_id:
-        qs = qs.filter(tpms_client_id=client_id)
+        qs = qs.filter(external_client_id=client_id)
     if staff_id:
         qs = qs.filter(staff_id=staff_id)
     if date:
@@ -335,8 +335,8 @@ def create_appointment(request, data: AppointmentCreateRequest):
     if request.user.role not in ('admin', 'supervisor'):
         raise HttpError(403, 'Supervisor or admin access required')
     payload = data.dict()
-    tpms_client_id = payload.pop('client_id', None)
-    appt = Appointment.objects.create(created_by=request.user, tpms_client_id=tpms_client_id, **payload)
+    external_client_id = payload.pop('client_id', None)
+    appt = Appointment.objects.create(created_by=request.user, external_client_id=external_client_id, **payload)
     return 201, appt
 
 
@@ -417,7 +417,7 @@ def assign_appointment_programs(request, appt_id: int, data: AssignProgramsReque
 
         appt = Appointment.objects.create(
             external_id=str(appt_id),
-            tpms_client_id=data.client_id,
+            external_client_id=data.client_id,
             source=Appointment.Source.SYNCED,
             start_time=_aware(tpms_appt.from_time),
             end_time=_aware(tpms_appt.to_time or tpms_appt.from_time),
@@ -433,7 +433,7 @@ def assign_appointment_programs(request, appt_id: int, data: AssignProgramsReque
             lesson = appt.lesson
         else:
             lesson = Lesson.objects.create(
-                tpms_client_id=data.client_id,
+                external_client_id=data.client_id,
                 name=appt.start_time.strftime('Session %b %d, %Y'),
                 created_by=request.user,
             )
@@ -484,9 +484,9 @@ def start_session(request, data: SessionStartRequest):
         restrict_to_lesson=bool(data.appointment_id),
     )
     session = SessionRun.objects.create(
-        tpms_client_id=data.client_id,
+        external_client_id=data.client_id,
         staff=request.user,
-        tpms_appointment_id=data.appointment_id,
+        external_appointment_id=data.appointment_id,
         lesson_id=lesson_id,
         program_snapshot=snapshot,
         created_by=request.user,
@@ -503,7 +503,7 @@ def list_sessions(
 ):
     qs = SessionRun.objects.select_related('staff')
     if client_id:
-        qs = qs.filter(tpms_client_id=client_id)
+        qs = qs.filter(external_client_id=client_id)
     if status:
         qs = qs.filter(status=status)
     if request.user.role == 'staff':
@@ -511,13 +511,13 @@ def list_sessions(
     elif staff_id:
         qs = qs.filter(staff_id=staff_id)
     sessions = list(qs)
-    appt_ids = [s.tpms_appointment_id for s in sessions if s.tpms_appointment_id]
+    appt_ids = [s.external_appointment_id for s in sessions if s.external_appointment_id]
     if appt_ids:
         from apps.legacy.models import TpmsAppointment
         tpms_appts = {a.id: a for a in TpmsAppointment.objects.using('therapypms').filter(id__in=appt_ids)}
     else:
         tpms_appts = {}
-    return [_serialize_session(s, tpms_appts.get(s.tpms_appointment_id)) for s in sessions]
+    return [_serialize_session(s, tpms_appts.get(s.external_appointment_id)) for s in sessions]
 
 
 @router.get('/sessions/{session_id}', response=SessionRunSchema)

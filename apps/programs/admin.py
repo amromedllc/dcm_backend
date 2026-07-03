@@ -16,7 +16,7 @@ class TargetInline(TabularInline):
 
 @admin.register(Program)
 class ProgramAdmin(ModelAdmin):
-    list_display = ['name', 'tpms_client_id', 'category', 'status', 'treatment_area', 'created_at']
+    list_display = ['name', 'external_client_id', 'category', 'status', 'treatment_area', 'created_at']
     list_filter = ['category', 'status']
     search_fields = ['name', 'treatment_area']
     inlines = [TargetInline]
@@ -67,7 +67,7 @@ class LessonProgramInline(TabularInline):
 
 @admin.register(Lesson)
 class LessonAdmin(ModelAdmin):
-    list_display = ['name', 'tpms_client_id', 'lesson_type', 'is_active', 'created_at']
+    list_display = ['name', 'external_client_id', 'lesson_type', 'is_active', 'created_at']
     list_filter = ['lesson_type', 'is_active']
     search_fields = ['name']
     inlines = [LessonProgramInline]
