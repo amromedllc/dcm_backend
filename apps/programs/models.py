@@ -222,6 +222,7 @@ class WorkflowTemplate(TenantAwareModel):
     description = models.TextField(blank=True)
     phases = models.JSONField(default=list)
     is_org_default = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
 
     class Meta:
         app_label = 'programs'
@@ -303,6 +304,7 @@ class TargetStatusChange(TenantAwareModel):
 class TreatmentArea(TenantAwareModel):
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
 
     class Meta:
         app_label = 'programs'
@@ -315,6 +317,7 @@ class TreatmentArea(TenantAwareModel):
 class ProgramTag(TenantAwareModel):
     name = models.CharField(max_length=100)
     color = models.CharField(max_length=7, default='#6366f1')  # hex color
+    is_active = models.BooleanField(default=True)
 
     class Meta:
         app_label = 'programs'
@@ -362,6 +365,7 @@ class ProgramDataField(TenantAwareModel):
     field_type = models.CharField(max_length=20, choices=FieldType.choices, default=FieldType.TEXT)
     field_location = models.CharField(max_length=30, choices=FieldLocation.choices, default=FieldLocation.TREATMENT_TAB)
     display_order = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
 
     class Meta:
         app_label = 'programs'

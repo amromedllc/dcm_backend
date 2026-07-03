@@ -20,6 +20,7 @@ class WorkflowTemplateSchema(Schema):
     description: str
     phases: list[dict[str, Any]]
     is_org_default: bool
+    is_active: bool
     created_at: datetime
 
 
@@ -28,6 +29,7 @@ class WorkflowTemplateCreateRequest(Schema):
     description: str = ''
     phases: list[dict[str, Any]]
     is_org_default: bool = False
+    is_active: bool = True
 
 
 class WorkflowTemplateUpdateRequest(Schema):
@@ -35,6 +37,7 @@ class WorkflowTemplateUpdateRequest(Schema):
     description: str | None = None
     phases: list[dict[str, Any]] | None = None
     is_org_default: bool | None = None
+    is_active: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +389,7 @@ class TreatmentAreaSchema(Schema):
     id: int
     name: str
     description: str
+    is_active: bool
     created_at: datetime
     updated_at: datetime
 
@@ -393,6 +397,7 @@ class TreatmentAreaSchema(Schema):
 class TreatmentAreaRequest(Schema):
     name: str
     description: str = ''
+    is_active: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +408,7 @@ class ProgramTagSchema(Schema):
     id: int
     name: str
     color: str
+    is_active: bool
     created_at: datetime
     updated_at: datetime
 
@@ -410,6 +416,7 @@ class ProgramTagSchema(Schema):
 class ProgramTagRequest(Schema):
     name: str
     color: str = '#6366f1'
+    is_active: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +468,7 @@ class ProgramDataFieldSchema(Schema):
     field_type: str
     field_location: str
     display_order: int
+    is_active: bool
     created_at: datetime
     updated_at: datetime
 
@@ -470,6 +478,7 @@ class ProgramDataFieldRequest(Schema):
     field_type: str = 'text'
     field_location: str = 'treatment_tab'
     display_order: int = 0
+    is_active: bool = True
 
 
 # ---------------------------------------------------------------------------

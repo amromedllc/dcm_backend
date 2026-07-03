@@ -357,8 +357,11 @@ def delete_mastery_template(request, template_id: int):
 # ---------------------------------------------------------------------------
 
 @router.get('/programs/templates/workflow', response=list[WorkflowTemplateSchema])
-def list_workflow_templates(request):
-    return list(WorkflowTemplate.objects.all())
+def list_workflow_templates(request, include_inactive: bool = False):
+    qs = WorkflowTemplate.objects.all()
+    if not include_inactive:
+        qs = qs.filter(is_active=True)
+    return list(qs)
 
 
 @router.post('/programs/templates/workflow', response={201: WorkflowTemplateSchema})
@@ -704,8 +707,11 @@ def copy_program_to_client(request, program_id: int, data: AssignOrgProgramReque
 # ---------------------------------------------------------------------------
 
 @router.get('/programs/settings/treatment-areas', response=list[TreatmentAreaSchema])
-def list_treatment_areas(request):
-    return list(TreatmentArea.objects.all())
+def list_treatment_areas(request, include_inactive: bool = False):
+    qs = TreatmentArea.objects.all()
+    if not include_inactive:
+        qs = qs.filter(is_active=True)
+    return list(qs)
 
 
 @router.post('/programs/settings/treatment-areas', response={201: TreatmentAreaSchema})
@@ -742,8 +748,11 @@ def delete_treatment_area(request, pk: int):
 # ---------------------------------------------------------------------------
 
 @router.get('/programs/settings/tags', response=list[ProgramTagSchema])
-def list_program_tags(request):
-    return list(ProgramTag.objects.all())
+def list_program_tags(request, include_inactive: bool = False):
+    qs = ProgramTag.objects.all()
+    if not include_inactive:
+        qs = qs.filter(is_active=True)
+    return list(qs)
 
 
 @router.post('/programs/settings/tags', response={201: ProgramTagSchema})
@@ -780,18 +789,23 @@ def delete_program_tag(request, pk: int):
 # ---------------------------------------------------------------------------
 
 @router.get('/programs/settings/statuses', response=list[TargetStatusSchema])
-def list_target_statuses(request):
-    return list(TargetStatus.objects.all())
-
+def list_target_statuses(request, include_inactive: bool = False):
+    qs = TargetStatus.objects.all()
+    if not include_inactive:
+        qs = qs.filter(is_active=True)
+    return list(qs)
 
 @router.post('/programs/settings/statuses', response={201: TargetStatusSchema})
 def create_target_status(request, data: TargetStatusRequest):
     _require_admin(request)
     if TargetStatus.objects.filter(key=data.key).exists():
         raise HttpError(409, f'A status with key "{data.key}" already exists')
-    if data.is_default:
+    payload = data.dict()
+    if payload['is_default'] and not payload['is_active']:
+        raise HttpError(400, 'An inactive status cannot be the default')
+    if payload['is_default']:
         TargetStatus.objects.filter(is_default=True).update(is_default=False)
-    return 201, TargetStatus.objects.create(created_by=request.user, **data.dict())
+    return 201, TargetStatus.objects.create(created_by=request.user, **payload)
 
 
 @router.patch('/programs/settings/statuses/{pk}', response=TargetStatusSchema)
@@ -802,6 +816,10 @@ def update_target_status(request, pk: int, data: TargetStatusUpdateRequest):
     except TargetStatus.DoesNotExist:
         raise HttpError(404, 'Not found')
     update = data.dict(exclude_none=True)
+    is_default = update.get('is_default', obj.is_default)
+    is_active = update.get('is_active', obj.is_active)
+    if is_default and not is_active:
+        raise HttpError(400, 'An inactive status cannot be the default')
     if update.get('is_default'):
         TargetStatus.objects.filter(is_default=True).exclude(id=pk).update(is_default=False)
     for k, v in update.items():
@@ -825,8 +843,11 @@ def delete_target_status(request, pk: int):
 # ---------------------------------------------------------------------------
 
 @router.get('/programs/settings/data-fields', response=list[ProgramDataFieldSchema])
-def list_data_fields(request):
-    return list(ProgramDataField.objects.all())
+def list_data_fields(request, include_inactive: bool = False):
+    qs = ProgramDataField.objects.all()
+    if not include_inactive:
+        qs = qs.filter(is_active=True)
+    return list(qs)
 
 
 @router.post('/programs/settings/data-fields', response={201: ProgramDataFieldSchema})
