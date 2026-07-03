@@ -190,6 +190,9 @@ def _tpms_auth(email: str, password: str) -> TokenResponse:
             if user.tpms_employee_id != tpms_employee_id:
                 user.tpms_employee_id = tpms_employee_id
                 update_fields.append('tpms_employee_id')
+            if user.role != dcm_role:
+                user.role = dcm_role
+                update_fields.append('role')
             if update_fields:
                 user.save(update_fields=update_fields)
 
