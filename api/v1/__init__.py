@@ -8,6 +8,7 @@ from apps.notes.api import router as notes_router
 from apps.analytics.api import router as analytics_router
 from apps.exports.api import router as exports_router
 from apps.notifications.api import router as notifications_router
+from apps.integrations.api import router as integrations_router
 
 api = NinjaAPI(
     title='DCM Platform API',
@@ -28,9 +29,7 @@ api.add_router('/', notes_router, tags=['Notes'])
 api.add_router('/', analytics_router, tags=['Analytics'])
 api.add_router('/', exports_router, tags=['Exports'])
 api.add_router('/', notifications_router, tags=['Notifications'])
-
-# Routers added in future stages:
-# from apps.integrations.api import router as integrations_router  # Stage 8
+api.add_router('/integrations', integrations_router, tags=['Integrations'])
 
 
 @api.get('/health', auth=None, tags=['System'])

@@ -146,6 +146,15 @@ JWT_ACCESS_TOKEN_EXPIRE_MINUTES = env.int('JWT_ACCESS_TOKEN_EXPIRE_MINUTES', def
 JWT_REFRESH_TOKEN_EXPIRE_DAYS = env.int('JWT_REFRESH_TOKEN_EXPIRE_DAYS', default=7)
 
 # ---------------------------------------------------------------------------
+# DocuSeal SSO
+# ---------------------------------------------------------------------------
+
+DOCUSEAL_BASE_URL = env('DOCUSEAL_BASE_URL')
+# Matches SSO_JWT_SECRET in docuseal/app/controllers/sso_login_controller.rb —
+# must stay identical on both sides or tokens minted here won't decode there.
+DOCUSEAL_SSO_SECRET = env('DOCUSEAL_SSO_SECRET')
+
+# ---------------------------------------------------------------------------
 # Redis + Celery
 # ---------------------------------------------------------------------------
 
