@@ -17,6 +17,7 @@ APPEND_SLASH = False
 
 SHARED_APPS = [
     'django_tenants',
+    'corsheaders',
     'unfold',
     'unfold.contrib.filters',
     'unfold.contrib.forms',
@@ -59,6 +60,7 @@ TENANT_DOMAIN_MODEL = 'tenants.Domain'
 
 MIDDLEWARE = [
     'django_tenants.middleware.main.TenantMainMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
