@@ -130,3 +130,29 @@ class TpmsAppointment(models.Model):
 
     def __str__(self) -> str:
         return f'TPMS Appointment {self.pk} — client {self.client_id} on {self.schedule_date}'
+
+
+class TpmsDocusealTemplateName(models.Model):
+    """
+    Maps to therapypms `docu_seal_template_names` table.
+
+    Populated by therapypms-api's own DocuSeal sync (SuperAdminSettingController
+    ::forms_builders_table) — DCM only reads it. `docu_seal_template_type` is
+    where an admin classifies a template as Session Note / Patient Intake /
+    Staff Intake from the legacy Forms Builder UI; DocuSeal itself has no
+    concept of that field.
+    """
+    admin_id = models.IntegerField(null=True)
+    template_name = models.CharField(max_length=191, null=True)
+    template_id = models.IntegerField(null=True)
+    docu_seal_template_type = models.CharField(max_length=191, null=True)
+    created_at = models.DateTimeField(null=True)
+    updated_at = models.DateTimeField(null=True)
+
+    class Meta:
+        app_label = 'legacy'
+        db_table = 'docu_seal_template_names'
+        managed = False
+
+    def __str__(self) -> str:
+        return self.template_name or f'DocuSeal Template {self.pk}'

@@ -89,6 +89,13 @@ def submit_session(session_run, staff_user) -> list:
     _assert_editable(session_run)
     if session_run.staff_id != staff_user.id and staff_user.role not in ('admin', 'supervisor'):
         raise HttpError(403, 'Only the session owner or a supervisor can submit')
+
+    # Only sessions where a DocuSeal Session Note template was actually
+    # selected are gated — sessions that never started one submit as before.
+    note = getattr(session_run, 'note', None)
+    if note and note.docuseal_template_id and not note.docuseal_completed_at:
+        raise HttpError(409, 'Session Note must be completed before submitting')
+
     session_run.status = session_run.Status.SUBMITTED
     session_run.submitted_at = timezone.now()
     session_run.ended_at = session_run.ended_at or timezone.now()

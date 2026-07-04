@@ -153,6 +153,9 @@ DOCUSEAL_BASE_URL = env('DOCUSEAL_BASE_URL')
 # Matches SSO_JWT_SECRET in docuseal/app/controllers/sso_login_controller.rb —
 # must stay identical on both sides or tokens minted here won't decode there.
 DOCUSEAL_SSO_SECRET = env('DOCUSEAL_SSO_SECRET')
+# Shared header value DocuSeal's form.completed webhook must send back —
+# provisioned onto each Account's WebhookUrl in docuseal/app/models/account.rb.
+DOCUSEAL_WEBHOOK_SECRET = env('DOCUSEAL_WEBHOOK_SECRET', default='')
 
 # ---------------------------------------------------------------------------
 # Redis + Celery

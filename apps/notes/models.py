@@ -81,6 +81,15 @@ class LessonNote(TenantAwareModel):
     rejection_reason = models.TextField(blank=True)
     requires_caregiver_signature = models.BooleanField(default=False)
 
+    # Set when this note is filled out as a DocuSeal e-sign template rather
+    # than (or in addition to) the JSON `body` above. docuseal_template_id
+    # being set is what makes completing it a prerequisite for submitting the
+    # session — see apps.sessions.services.submit_session.
+    docuseal_template_id = models.IntegerField(null=True, blank=True)
+    docuseal_submitter_id = models.IntegerField(null=True, blank=True, db_index=True)
+    docuseal_slug = models.CharField(max_length=64, blank=True)
+    docuseal_completed_at = models.DateTimeField(null=True, blank=True)
+
     class Meta:
         app_label = 'notes'
         ordering = ['-note_date', '-created_at']
