@@ -27,8 +27,20 @@ router = Router(auth=jwt_auth)
 # ---------------------------------------------------------------------------
 
 def _get_session_or_404(session_id: int, request) -> SessionRun:
+    """
+    Staff may only reach their own sessions (matches the scoping already
+    applied in list_sessions below) — admin/supervisor can reach any session
+    within this tenant's schema. Without this, any staff user could read,
+    edit, or delete another staff member's session (and its trial/behavior/
+    ABC data) purely by guessing/incrementing a session id, since every
+    caller of this helper — get/delete session, trials, behaviors, abc,
+    submit, sync — otherwise had no ownership check at all.
+    """
+    qs = SessionRun.objects.select_related('staff')
+    if request.user.role == 'staff':
+        qs = qs.filter(staff_id=request.user.id)
     try:
-        return SessionRun.objects.select_related('staff').get(id=session_id)
+        return qs.get(id=session_id)
     except SessionRun.DoesNotExist:
         raise HttpError(404, 'Session not found')
 

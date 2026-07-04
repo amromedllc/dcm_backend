@@ -8,12 +8,19 @@ from ninja.security import HttpBearer, APIKeyHeader
 from .models import User, APIKey
 
 
-def create_access_token(user: User) -> str:
+def create_access_token(user: User, tenant_id: int) -> str:
     payload: dict[str, Any] = {
         'sub': str(user.id),
         'email': user.email,
         'role': user.role,
-        'org_id': user.organization_id,
+        # The tenant resolved (by hostname) at the moment this token was
+        # issued — NOT user.organization_id. TPMS-linked users have no
+        # single Organization FK (organization_id is always None for them),
+        # but every login still happens against one specific tenant
+        # hostname, so the token must bind to *that*, or it would validate
+        # identically against every other tenant's Host header. See
+        # token_tenant_mismatch below — there is no exemption from this.
+        'org_id': tenant_id,
         'type': 'access',
         'iat': timezone.now().timestamp(),
         'exp': (timezone.now() + timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)).timestamp(),
@@ -21,10 +28,10 @@ def create_access_token(user: User) -> str:
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
-def create_refresh_token(user: User) -> str:
+def create_refresh_token(user: User, tenant_id: int) -> str:
     payload: dict[str, Any] = {
         'sub': str(user.id),
-        'org_id': user.organization_id,
+        'org_id': tenant_id,
         'type': 'refresh',
         'iat': timezone.now().timestamp(),
         'exp': (timezone.now() + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS)).timestamp(),
@@ -36,17 +43,19 @@ def decode_token(token: str) -> dict[str, Any]:
     return jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
 
 
-def user_tenant_mismatch(user: User, request) -> bool:
+def token_tenant_mismatch(payload: dict[str, Any], request) -> bool:
     """
-    True if this user is bound to one Organization (a native user) and the
-    tenant resolved for the current request (by hostname, via
-    TenantMainMiddleware) isn't it. TPMS users (organization=None) are
-    exempt — they're scoped by external_admin_id instead.
+    True if the tenant this token was issued for (its `org_id` claim — the
+    tenant resolved at login time, for every user, native or TPMS-linked)
+    doesn't match the tenant resolved for the current request's hostname.
+
+    There is deliberately no exemption for any user class: a token minted
+    while authenticated against one tenant's domain must never validate
+    against a different tenant's domain, even if the underlying User row
+    has no single Organization FK (true for TPMS-linked users).
     """
-    if user.organization_id is None:
-        return False
     tenant = getattr(request, 'tenant', None)
-    return tenant is None or tenant.pk != user.organization_id
+    return tenant is None or payload.get('org_id') != tenant.pk
 
 
 class JWTAuth(HttpBearer):
@@ -55,9 +64,9 @@ class JWTAuth(HttpBearer):
             payload = decode_token(token)
             if payload.get('type') != 'access':
                 return None
-            user = User.objects.get(id=int(payload['sub']), is_active=True)
-            if user_tenant_mismatch(user, request):
+            if token_tenant_mismatch(payload, request):
                 return None
+            user = User.objects.get(id=int(payload['sub']), is_active=True)
             request.user = user
             return user
         except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, User.DoesNotExist, KeyError):

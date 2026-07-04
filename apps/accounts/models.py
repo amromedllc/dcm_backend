@@ -40,9 +40,10 @@ class User(AbstractBaseUser, PermissionsMixin):
     external_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
     # External system employee pk — set at login for staff/supervisor, null for admin-only logins
     external_employee_id = models.IntegerField(null=True, blank=True, db_index=True)
-    # Set for native (non-linked) users — binds them to one Organization/tenant.
-    # Null for externally-linked users, who are scoped via external_admin_id instead and are
-    # exempt from tenant-binding checks (see accounts.auth.user_tenant_mismatch).
+    # Set for native (non-linked) users. Null for externally-linked (TPMS)
+    # users, who are additionally scoped via external_admin_id — but every
+    # user's JWT is still bound to the tenant resolved at login time
+    # regardless of this field (see accounts.auth.token_tenant_mismatch).
     organization = models.ForeignKey(
         'tenants.Organization',
         on_delete=models.PROTECT,

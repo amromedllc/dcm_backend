@@ -5,9 +5,10 @@ from ninja import Router
 logger = logging.getLogger(__name__)
 from ninja.errors import HttpError
 from django.db import transaction
+from django.db.models import Q
 
 from .models import User, APIKey
-from .auth import create_access_token, create_refresh_token, decode_token, jwt_auth, user_tenant_mismatch
+from .auth import create_access_token, create_refresh_token, decode_token, jwt_auth, token_tenant_mismatch
 from .schemas import (
     LoginRequest,
     TokenResponse,
@@ -33,7 +34,7 @@ def _verify_tpms_password(plain: str, hashed: str | None) -> bool:
         return False
     try:
         import bcrypt
-        # Laravel uses $2y$; older PHP used $2a$. Python bcrypt expects $2b$.
+        # uses $2y$; older PHP used $2a$. Python bcrypt expects $2b$.
         normalized = hashed.replace('$2y$', '$2b$', 1).replace('$2a$', '$2b$', 1).encode()
         result = bcrypt.checkpw(plain.encode(), normalized)
         return result
@@ -54,10 +55,10 @@ def _tpms_role_for_employee_type(employee_type: str | None) -> str:
 router = Router()
 
 
-def _issue_tokens(user: User) -> TokenResponse:
+def _issue_tokens(user: User, tenant_id: int) -> TokenResponse:
     return TokenResponse(
-        access_token=create_access_token(user),
-        refresh_token=create_refresh_token(user),
+        access_token=create_access_token(user, tenant_id),
+        refresh_token=create_refresh_token(user, tenant_id),
         user_id=user.id,
         email=user.email,
         role=user.role,
@@ -74,12 +75,13 @@ def login(request, data: LoginRequest):
     if native_user and native_user.has_usable_password() and native_user.check_password(data.password):
         if not native_user.is_active:
             raise HttpError(403, 'Account is inactive')
-        return _issue_tokens(native_user)
+        return _issue_tokens(native_user, request.tenant.pk)
 
     # Otherwise authenticate against TPMS — no manual DCM user creation needed.
     # A DCM user record is auto-provisioned transparently on first login so the
-    # JWT system has a user object to reference.
-    return _tpms_auth(data.email, data.password)
+    # JWT system has a user object to reference. The issued token is still
+    # bound to *this* request's tenant, same as the native path above.
+    return _tpms_auth(request, data.email, data.password)
 
 
 def _tpms_effective_admin_id(admin) -> int:
@@ -93,7 +95,7 @@ def _tpms_effective_admin_id(admin) -> int:
     return admin.up_admin_id or admin.id
 
 
-def _tpms_auth(email: str, password: str) -> TokenResponse:
+def _tpms_auth(request, email: str, password: str) -> TokenResponse:
     """Verify credentials against TPMS admins/employees and return a DCM token."""
     from apps.legacy.models import TpmsAdmin, TpmsEmployee
     from django.db.models import Q
@@ -196,7 +198,7 @@ def _tpms_auth(email: str, password: str) -> TokenResponse:
             if update_fields:
                 user.save(update_fields=update_fields)
 
-    return _issue_tokens(user)
+    return _issue_tokens(user, request.tenant.pk)
 
 
 
@@ -206,10 +208,14 @@ def refresh_token(request, data: RefreshRequest):
         payload = decode_token(data.refresh_token)
         if payload.get('type') != 'refresh':
             raise HttpError(401, 'Invalid token type')
-        user = User.objects.get(id=int(payload['sub']), is_active=True)
-        if user_tenant_mismatch(user, request):
+        if token_tenant_mismatch(payload, request):
             raise HttpError(401, 'Invalid or expired token')
-        return AccessTokenResponse(access_token=create_access_token(user))
+        user = User.objects.get(id=int(payload['sub']), is_active=True)
+        # Reuse the tenant this refresh token was issued for — not
+        # request.tenant again — so a refresh can never move a session to a
+        # different tenant even if somehow presented elsewhere (defense in
+        # depth; token_tenant_mismatch above already blocks that case).
+        return AccessTokenResponse(access_token=create_access_token(user, payload['org_id']))
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, User.DoesNotExist, KeyError):
         raise HttpError(401, 'Invalid or expired token')
 
@@ -269,11 +275,35 @@ def me_debug(request):
 # User management (admin only)
 # ---------------------------------------------------------------------------
 
+def _same_practice_q(user: User, prefix: str = '') -> Q:
+    """
+    Scopes a queryset to users in the same practice as `user` — either the
+    same Organization (native users) or the same TPMS external_admin_id
+    (externally-linked users). `prefix` lets this reach through a related
+    field, e.g. _same_practice_q(user, 'created_by__') for APIKey.
+
+    User/APIKey live in SHARED_APPS — one global table for every tenant on
+    the platform, not schema-isolated — so without this filter, these
+    admin-only endpoints would read/modify another tenant's users or keys
+    given nothing more than a role check and a guessable id.
+    """
+    if user.organization_id is not None:
+        return Q(**{f'{prefix}organization_id': user.organization_id})
+    if user.external_admin_id is not None:
+        return Q(**{f'{prefix}external_admin_id': user.external_admin_id})
+    # Neither identifier set — scope to nothing rather than risk matching
+    # every other user who also happens to have both fields null.
+    return Q(**{f'{prefix}pk': None})
+
+
 @router.get('/users', response=list[UserSchema], auth=jwt_auth)
 def list_users(request):
     if not request.user.has_role('admin', 'supervisor'):
         raise HttpError(403, 'Insufficient permissions')
-    return list(User.objects.filter(is_active=True).order_by('last_name', 'first_name'))
+    return list(
+        User.objects.filter(_same_practice_q(request.user), is_active=True)
+        .order_by('last_name', 'first_name')
+    )
 
 
 @router.get('/admin/staffs', response=list[StaffSchema], auth=jwt_auth)
@@ -343,7 +373,7 @@ def update_user(request, user_id: int, data: UserUpdateRequest):
     if not request.user.has_role('admin'):
         raise HttpError(403, 'Admin access required')
     try:
-        user = User.objects.get(id=user_id)
+        user = User.objects.get(_same_practice_q(request.user), id=user_id)
     except User.DoesNotExist:
         raise HttpError(404, 'User not found')
     for field, value in data.dict(exclude_none=True).items():
@@ -360,7 +390,10 @@ def update_user(request, user_id: int, data: UserUpdateRequest):
 def list_api_keys(request):
     if not request.user.has_role('admin'):
         raise HttpError(403, 'Admin access required')
-    return list(APIKey.objects.filter(is_active=True).order_by('-created_at'))
+    return list(
+        APIKey.objects.filter(_same_practice_q(request.user, 'created_by__'), is_active=True)
+        .order_by('-created_at')
+    )
 
 
 @router.post('/api-keys', response={201: APIKeyCreatedResponse}, auth=jwt_auth)
@@ -386,7 +419,7 @@ def revoke_api_key(request, key_id: int):
     if not request.user.has_role('admin'):
         raise HttpError(403, 'Admin access required')
     try:
-        key = APIKey.objects.get(id=key_id)
+        key = APIKey.objects.get(_same_practice_q(request.user, 'created_by__'), id=key_id)
     except APIKey.DoesNotExist:
         raise HttpError(404, 'API key not found')
     key.is_active = False
