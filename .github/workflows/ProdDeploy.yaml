@@ -24,5 +24,6 @@ jobs:
             cd ${{ secrets.PROD_PATH }}
             git pull
             source .venv/bin/activate
+            python manage.py migrate_schemas --shared
             pip install -r requirements/production.txt
             sudo systemctl restart dcm_backend.service
