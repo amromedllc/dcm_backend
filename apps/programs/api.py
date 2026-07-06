@@ -248,6 +248,19 @@ def target_history(request, target_id: int):
     return result
 
 
+
+# FK id fields bulk_update_targets accepts, mapped to the org-scoped manager
+# each must be re-validated against — QuerySet.update() skips Target.save()'s
+# _validate_cross_org_fks(), so a template id belonging to another org (ids
+# are enumerable) would otherwise be written with no check at all.
+_BULK_UPDATE_FK_MODELS = {
+    'prompting_template_id': PromptingTemplate,
+    'mastery_template_id': MasteryTemplate,
+    'workflow_template_id': WorkflowTemplate,
+    'maintenance_schedule_id': MaintenanceSchedule,
+}
+
+
 @router.post('/programs/{program_id}/targets/bulk-update', response=BulkUpdateResult)
 def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest):
     """Update specific fields across multiple targets without touching unspecified fields."""
@@ -255,6 +268,12 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
     updates = data.dict(exclude={'target_ids'}, exclude_none=True)
     if not updates:
         raise HttpError(400, 'No fields to update were provided')
+
+    for field_name, model in _BULK_UPDATE_FK_MODELS.items():
+        fk_id = updates.get(field_name)
+        if fk_id is not None and not model.objects.filter(id=fk_id).exists():
+            raise HttpError(400, f'Invalid {field_name}: {fk_id}')
+
     updates['updated_at'] = timezone.now()
     updated = Target.objects.filter(
         id__in=data.target_ids,

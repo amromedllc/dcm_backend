@@ -41,6 +41,11 @@ class OrganizationScopedMixin(models.Model):
 
     class Meta:
         abstract = True
+        # Without this, forward FK access (e.g. target.prompting_template)
+        # uses Django's plain unfiltered Manager instead of TenantManager,
+        # so a cross-org FK id (however it got written) would silently
+        # return the other org's row instead of raising DoesNotExist.
+        base_manager_name = 'objects'
 
     def _derive_organization_id(self) -> int | None:
         """Override in subclasses whose organization comes from a parent FK
