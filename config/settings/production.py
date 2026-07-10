@@ -18,7 +18,8 @@ else:
     ALLOWED_HOSTS = env.list('ALLOWED_HOSTS')
 
 
-CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=["https://api.progressly.io"])
+
+CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=['https://api.progressly.io'])
 
 # ---------------------------------------------------------------------------
 # Multi-tenant setup (django-tenants, schema-based isolation)
