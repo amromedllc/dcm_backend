@@ -1,5 +1,6 @@
 from django.contrib import admin
 from unfold.admin import ModelAdmin, TabularInline
+from shared.admin import OrganizationScopedAdminMixin
 from .models import (
     Program, Target, PromptingTemplate, MasteryTemplate,
     WorkflowTemplate, MaintenanceSchedule,
@@ -7,7 +8,7 @@ from .models import (
 )
 
 
-class TargetInline(TabularInline):
+class TargetInline(OrganizationScopedAdminMixin, TabularInline):
     model = Target
     extra = 0
     fields = ['name', 'measurement_type', 'status', 'display_order', 'is_visible_to_staff']
@@ -15,7 +16,7 @@ class TargetInline(TabularInline):
 
 
 @admin.register(Program)
-class ProgramAdmin(ModelAdmin):
+class ProgramAdmin(OrganizationScopedAdminMixin, ModelAdmin):
     list_display = ['name', 'external_client_id', 'category', 'status', 'treatment_area', 'created_at']
     list_filter = ['category', 'status']
     search_fields = ['name', 'treatment_area']
@@ -24,7 +25,7 @@ class ProgramAdmin(ModelAdmin):
 
 
 @admin.register(Target)
-class TargetAdmin(ModelAdmin):
+class TargetAdmin(OrganizationScopedAdminMixin, ModelAdmin):
     list_display = ['name', 'program', 'measurement_type', 'status', 'display_order', 'is_visible_to_staff']
     list_filter = ['status', 'measurement_type']
     search_fields = ['name', 'sd_text']
@@ -32,41 +33,41 @@ class TargetAdmin(ModelAdmin):
 
 
 @admin.register(PromptingTemplate)
-class PromptingTemplateAdmin(ModelAdmin):
+class PromptingTemplateAdmin(OrganizationScopedAdminMixin, ModelAdmin):
     list_display = ['name', 'is_org_default', 'created_at']
     list_filter = ['is_org_default']
     search_fields = ['name']
 
 
 @admin.register(MasteryTemplate)
-class MasteryTemplateAdmin(ModelAdmin):
+class MasteryTemplateAdmin(OrganizationScopedAdminMixin, ModelAdmin):
     list_display = ['name', 'is_org_default', 'created_at']
     list_filter = ['is_org_default']
     search_fields = ['name']
 
 
 @admin.register(WorkflowTemplate)
-class WorkflowTemplateAdmin(ModelAdmin):
+class WorkflowTemplateAdmin(OrganizationScopedAdminMixin, ModelAdmin):
     list_display = ['name', 'is_org_default', 'created_at']
     list_filter = ['is_org_default']
     search_fields = ['name']
 
 
 @admin.register(MaintenanceSchedule)
-class MaintenanceScheduleAdmin(ModelAdmin):
+class MaintenanceScheduleAdmin(OrganizationScopedAdminMixin, ModelAdmin):
     list_display = ['name', 'interval_type', 'interval_value', 'episodes', 'success_threshold_pct', 'on_failure', 'is_org_default', 'created_at']
     list_filter = ['interval_type', 'on_failure', 'is_org_default']
     search_fields = ['name']
 
 
-class LessonProgramInline(TabularInline):
+class LessonProgramInline(OrganizationScopedAdminMixin, TabularInline):
     model = LessonProgram
     extra = 0
     ordering = ['display_order']
 
 
 @admin.register(Lesson)
-class LessonAdmin(ModelAdmin):
+class LessonAdmin(OrganizationScopedAdminMixin, ModelAdmin):
     list_display = ['name', 'external_client_id', 'lesson_type', 'is_active', 'created_at']
     list_filter = ['lesson_type', 'is_active']
     search_fields = ['name']
