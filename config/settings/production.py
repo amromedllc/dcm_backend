@@ -247,17 +247,7 @@ else:
 if DEBUG:
     EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 
-# ---------------------------------------------------------------------------
-# Security (production only — these assume HTTPS, which local dev isn't)
-# ---------------------------------------------------------------------------
 
-if not DEBUG:
-    SECURE_SSL_REDIRECT = True
-    SECURE_HSTS_SECONDS = 31536000
-    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-    SECURE_HSTS_PRELOAD = True
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
 
 # ---------------------------------------------------------------------------
 # Sentry (production only — sentry-sdk is a production-only dependency,
