@@ -24,6 +24,11 @@ class NoteTemplateSchema(Schema):
     is_org_default: bool
     is_active: bool
     created_at: datetime
+    template_type: str
+    body_template: str
+    require_completer_signature: bool
+    require_additional_signatures: bool
+    lock_content: bool
 
 
 class NoteTemplateCreateRequest(Schema):
@@ -31,6 +36,11 @@ class NoteTemplateCreateRequest(Schema):
     description: str = ''
     fields: list[dict[str, Any]]
     is_org_default: bool = False
+    template_type: str = 'notes'
+    body_template: str = ''
+    require_completer_signature: bool = False
+    require_additional_signatures: bool = False
+    lock_content: bool = False
 
 
 class NoteTemplateUpdateRequest(Schema):
@@ -39,6 +49,11 @@ class NoteTemplateUpdateRequest(Schema):
     fields: list[dict[str, Any]] | None = None
     is_org_default: bool | None = None
     is_active: bool | None = None
+    template_type: str | None = None
+    body_template: str | None = None
+    require_completer_signature: bool | None = None
+    require_additional_signatures: bool | None = None
+    lock_content: bool | None = None
 
 
 # ---------------------------------------------------------------------------

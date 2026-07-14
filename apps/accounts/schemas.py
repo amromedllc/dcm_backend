@@ -39,6 +39,10 @@ class UserSchema(Schema):
     created_at: datetime
 
 
+class CurrentUserSchema(UserSchema):
+    permissions: dict[str, bool]
+
+
 class UserCreateRequest(Schema):
     email: EmailStr
     first_name: str

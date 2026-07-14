@@ -1,6 +1,6 @@
 import logging
 import jwt
-from ninja import Router
+from ninja import Router, Body
 
 logger = logging.getLogger(__name__)
 from ninja.errors import HttpError
@@ -9,12 +9,14 @@ from django.db.models import Q
 
 from .models import User, APIKey
 from .auth import create_access_token, create_refresh_token, decode_token, jwt_auth, token_tenant_mismatch
+from .permissions import get_user_permissions
 from .schemas import (
     LoginRequest,
     TokenResponse,
     RefreshRequest,
     AccessTokenResponse,
     UserSchema,
+    CurrentUserSchema,
     UserCreateRequest,
     UserUpdateRequest,
     APIKeyCreateRequest,
@@ -230,9 +232,12 @@ def refresh_token(request, data: RefreshRequest):
         raise HttpError(401, 'Invalid or expired token')
 
 
-@router.get('/me', response=UserSchema, auth=jwt_auth)
+@router.get('/me', response=CurrentUserSchema, auth=jwt_auth)
 def me(request):
-    return request.user
+    user = request.user
+    org = user.organization or request.tenant
+    user.permissions = get_user_permissions(user, org)
+    return user
 
 
 @router.get('/me/debug', auth=jwt_auth)
@@ -442,3 +447,49 @@ def get_logs(request, limit: int = 200):
         raise HttpError(403, 'Admin access required')
     from shared.log_buffer import get_recent_logs
     return {'logs': get_recent_logs(limit)}
+
+
+# ---------------------------------------------------------------------------
+# Role permissions (admin only)
+# ---------------------------------------------------------------------------
+
+@router.get('/admin/role-permissions', auth=jwt_auth)
+def get_role_permissions(request):
+    """Return the full permission matrix as {role: {perm_key: bool}}."""
+    if not request.user.has_role('admin'):
+        raise HttpError(403, 'Admin access required')
+    from .models import RolePermission
+
+    # Resolve org: either the native org or the tenant from the request
+    org = request.user.organization or request.tenant
+    rows = RolePermission.objects.filter(organization=org)
+    result: dict = {}
+    for row in rows:
+        result[row.role] = row.permissions
+    return result
+
+
+@router.put('/admin/role-permissions', auth=jwt_auth)
+def save_role_permissions(request, body: dict = Body(...)):
+    """Save the full permission matrix.  Body: {role: {perm_key: bool}}."""
+    if not request.user.has_role('admin'):
+        raise HttpError(403, 'Admin access required')
+    from .models import RolePermission
+
+    org = request.user.organization or request.tenant
+
+    valid_roles = {c[0] for c in User.Role.choices}
+    for role, perms in body.items():
+        if role not in valid_roles:
+            raise HttpError(400, f'Invalid role: {role}')
+        if not isinstance(perms, dict):
+            raise HttpError(400, f'Permissions must be an object for role {role}')
+
+    for role, perms in body.items():
+        RolePermission.objects.update_or_create(
+            organization=org,
+            role=role,
+            defaults={'permissions': perms},
+        )
+
+    return {'ok': True}

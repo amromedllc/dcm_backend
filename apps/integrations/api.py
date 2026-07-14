@@ -5,6 +5,7 @@ from ninja import Router, Schema
 from ninja.errors import HttpError
 
 from apps.accounts.auth import jwt_auth
+from apps.accounts.permissions import require_permission
 from .docuseal import (
     build_sso_redirect_url,
     build_submission_url,
@@ -25,12 +26,14 @@ class SsoUrlResponse(Schema):
 
 @router.get('/docuseal/sso-url', response=SsoUrlResponse)
 def docuseal_sso_url(request):
+    require_permission(request, 'templates')
     return {'url': build_sso_redirect_url(request.user)}
 
 
 @router.get('/docuseal/upload-url', response=SsoUrlResponse)
 def docuseal_upload_url(request):
     """Deep link straight into DocuSeal's upload dialog."""
+    require_permission(request, 'templates')
     return {'url': build_upload_url(request.user)}
 
 
@@ -63,6 +66,7 @@ def list_docuseal_uploaded_templates(request):
 @router.get('/docuseal/uploaded-templates/{template_id}/url', response=SsoUrlResponse)
 def docuseal_uploaded_template_url(request, template_id: int):
     """Deep link straight into this specific uploaded template's preview page."""
+    require_permission(request, 'templates')
     return {'url': build_template_url(request.user, template_id)}
 
 

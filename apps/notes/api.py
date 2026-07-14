@@ -6,6 +6,7 @@ from ninja import Router
 from ninja.errors import HttpError
 
 from apps.accounts.auth import jwt_auth
+from apps.accounts.permissions import require_permission
 from apps.clients.models import Client
 from .models import LessonNote, NoteTemplate, NoteSignature, NoteAssignment
 from .schemas import (
@@ -27,6 +28,11 @@ router = Router(auth=jwt_auth)
 def _require_supervisor(request):
     if request.user.role not in ('admin', 'supervisor'):
         raise HttpError(403, 'Supervisor or admin access required')
+
+
+def _require_template_manager(request):
+    _require_supervisor(request)
+    require_permission(request, 'templates')
 
 
 def _get_note_or_404(note_id: int) -> LessonNote:
@@ -87,7 +93,7 @@ def list_note_templates(request):
 
 @router.post('/templates/notes', response={201: NoteTemplateSchema})
 def create_note_template(request, data: NoteTemplateCreateRequest):
-    _require_supervisor(request)
+    _require_template_manager(request)
     template = NoteTemplate.objects.create(created_by=request.user, **data.dict())
     return 201, template
 
@@ -102,7 +108,7 @@ def get_note_template(request, template_id: int):
 
 @router.patch('/templates/notes/{template_id}', response=NoteTemplateSchema)
 def update_note_template(request, template_id: int, data: NoteTemplateUpdateRequest):
-    _require_supervisor(request)
+    _require_template_manager(request)
     try:
         template = NoteTemplate.objects.get(id=template_id)
     except NoteTemplate.DoesNotExist:
@@ -115,7 +121,7 @@ def update_note_template(request, template_id: int, data: NoteTemplateUpdateRequ
 
 @router.delete('/templates/notes/{template_id}', response={204: None})
 def delete_note_template(request, template_id: int):
-    _require_supervisor(request)
+    _require_template_manager(request)
     try:
         NoteTemplate.objects.get(id=template_id).delete()
     except NoteTemplate.DoesNotExist:
@@ -413,4 +419,3 @@ def delete_assignment(request, assignment_id: int):
         raise HttpError(409, 'Cannot remove an assignment that has already been filled')
     a.delete()
     return 204, None
-
