@@ -30,9 +30,8 @@ def _require_supervisor(request):
         raise HttpError(403, 'Supervisor or admin access required')
 
 
-def _require_template_manager(request):
-    _require_supervisor(request)
-    require_permission(request, 'templates')
+def _require_template_manager(request, action: str = 'view'):
+    require_permission(request, f'templates_{action}')
 
 
 def _get_note_or_404(note_id: int) -> LessonNote:
@@ -93,7 +92,7 @@ def list_note_templates(request):
 
 @router.post('/templates/notes', response={201: NoteTemplateSchema})
 def create_note_template(request, data: NoteTemplateCreateRequest):
-    _require_template_manager(request)
+    _require_template_manager(request, 'create')
     template = NoteTemplate.objects.create(created_by=request.user, **data.dict())
     return 201, template
 
@@ -108,7 +107,7 @@ def get_note_template(request, template_id: int):
 
 @router.patch('/templates/notes/{template_id}', response=NoteTemplateSchema)
 def update_note_template(request, template_id: int, data: NoteTemplateUpdateRequest):
-    _require_template_manager(request)
+    _require_template_manager(request, 'edit')
     try:
         template = NoteTemplate.objects.get(id=template_id)
     except NoteTemplate.DoesNotExist:
@@ -121,7 +120,7 @@ def update_note_template(request, template_id: int, data: NoteTemplateUpdateRequ
 
 @router.delete('/templates/notes/{template_id}', response={204: None})
 def delete_note_template(request, template_id: int):
-    _require_template_manager(request)
+    _require_template_manager(request, 'delete')
     try:
         NoteTemplate.objects.get(id=template_id).delete()
     except NoteTemplate.DoesNotExist:
@@ -184,6 +183,7 @@ def list_notes(
 
 @router.post('/notes', response={201: LessonNoteSchema})
 def create_note(request, data: NoteCreateRequest):
+    require_permission(request, 'notes_create')
     payload = data.dict()
     external_client_id = payload.pop('client_id', None)
     assignment_id = payload.pop('assignment_id', None)
@@ -208,6 +208,7 @@ def get_note(request, note_id: int):
 
 @router.patch('/notes/{note_id}', response=LessonNoteSchema)
 def update_note(request, note_id: int, data: NoteUpdateRequest):
+    require_permission(request, 'notes_edit')
     note = _get_note_or_404(note_id)
     _assert_note_access(note, request)
     if not note.is_editable:
@@ -221,6 +222,7 @@ def update_note(request, note_id: int, data: NoteUpdateRequest):
 
 @router.delete('/notes/{note_id}', response={204: None})
 def delete_note(request, note_id: int):
+    require_permission(request, 'notes_delete')
     note = _get_note_or_404(note_id)
     _assert_note_access(note, request)
     if note.status not in (LessonNote.Status.DRAFT, LessonNote.Status.REJECTED):
@@ -244,7 +246,7 @@ def submit(request, note_id: int):
 
 @router.post('/notes/{note_id}/approve', response=LessonNoteSchema)
 def approve(request, note_id: int):
-    _require_supervisor(request)
+    require_permission(request, 'note_approve')
     note = _get_note_or_404(note_id)
     approve_note(note, request.user)
     note.refresh_from_db()
@@ -253,7 +255,7 @@ def approve(request, note_id: int):
 
 @router.post('/notes/{note_id}/reject', response=LessonNoteSchema)
 def reject(request, note_id: int, data: NoteRejectRequest):
-    _require_supervisor(request)
+    require_permission(request, 'note_approve')
     note = _get_note_or_404(note_id)
     reject_note(note, request.user, data.reason)
     note.refresh_from_db()
@@ -317,7 +319,7 @@ def review_queue(
     date_to: date | None = None,
 ):
     """Returns all submitted notes awaiting supervisory review, oldest first."""
-    _require_supervisor(request)
+    require_permission(request, 'review_queue_view')
     qs = (
         LessonNote.objects
         .filter(status=LessonNote.Status.SUBMITTED)
@@ -387,7 +389,7 @@ def list_assignments(request, appointment_id: int):
 
 @router.post('/notes/assignments', response={201: NoteAssignmentSchema})
 def create_assignment(request, data: NoteAssignmentCreateRequest):
-    _require_supervisor(request)
+    require_permission(request, 'notes_create')
     try:
         template = NoteTemplate.objects.get(id=data.template_id)
     except NoteTemplate.DoesNotExist:
@@ -410,7 +412,7 @@ def create_assignment(request, data: NoteAssignmentCreateRequest):
 
 @router.delete('/notes/assignments/{assignment_id}', response={204: None})
 def delete_assignment(request, assignment_id: int):
-    _require_supervisor(request)
+    require_permission(request, 'notes_delete')
     try:
         a = NoteAssignment.objects.get(id=assignment_id)
     except NoteAssignment.DoesNotExist:
