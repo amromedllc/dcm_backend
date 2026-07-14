@@ -16,10 +16,14 @@ class TenantResolverMiddleware:
 
     def __call__(self, request):
         hostname = request.get_host().split(':')[0]
+        # Ensure the attribute always exists so views can safely reference
+        # `request.tenant` without needing to guard with getattr(..., None).
+        request.tenant = None
         try:
             domain = Domain.objects.select_related('tenant').get(domain=hostname)
             request.tenant = domain.tenant
         except Domain.DoesNotExist:
+            # Leave `request.tenant` as None when no matching domain is found.
             pass
 
         tenant = getattr(request, 'tenant', None)
