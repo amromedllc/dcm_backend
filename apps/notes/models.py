@@ -25,6 +25,17 @@ class NoteTemplate(TenantAwareModel):
     is_org_default = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
 
+    TEMPLATE_TYPES = [
+        ('notes', 'Notes'),
+        ('forms', 'Forms'),
+        ('reports', 'Reports'),
+    ]
+    template_type = models.CharField(max_length=20, choices=TEMPLATE_TYPES, default='notes')
+    body_template = models.TextField(blank=True, default='')
+    require_completer_signature = models.BooleanField(default=False)
+    require_additional_signatures = models.BooleanField(default=False)
+    lock_content = models.BooleanField(default=False)
+
     class Meta:
         app_label = 'notes'
         ordering = ['name']

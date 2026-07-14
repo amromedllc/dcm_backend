@@ -134,3 +134,26 @@ class APIKey(models.Model):
 
     def __str__(self) -> str:
         return f'{self.name} ({self.key_prefix}...)'
+
+
+class RolePermission(models.Model):
+    """
+    Stores which permission keys are granted to a role, per organisation.
+    `permissions` is a JSON object like {"dashboard": true, "review_queue": false, ...}
+    One row per (organization, role) pair.
+    """
+    organization = models.ForeignKey(
+        'tenants.Organization',
+        on_delete=models.CASCADE,
+        related_name='role_permissions',
+    )
+    role = models.CharField(max_length=20, choices=User.Role.choices)
+    permissions = models.JSONField(default=dict)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = 'accounts'
+        unique_together = [('organization', 'role')]
+
+    def __str__(self) -> str:
+        return f'{self.organization} / {self.role}'
