@@ -102,12 +102,15 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
 
     # Only match TPMS records belonging to the practice mapped to this tenant.
     # request.tenant is resolved purely from the Host header (see
-    # shared/middleware.py), so without this check, valid TPMS credentials for
-    # a different practice would authenticate here and receive a token scoped
-    # to *this* tenant — a cross-tenant auth bypass. `tenant_tpms_admin_id is
-    # not None` guards against a tenant with no mapped practice matching a
-    # legacy record whose admin_id also happens to be null.
-    tenant_tpms_admin_id = request.tenant.tpms_admin_id
+    # shared/middleware.py). If no tenant was resolved, reject the login
+    # attempt rather than continuing with a `None` tenant (which would raise
+    # an AttributeError below).
+    tenant = getattr(request, 'tenant', None)
+    if tenant is None:
+        # No tenant could be resolved from the Host header — reject.
+        raise HttpError(400, 'Tenant not found for this request')
+
+    tenant_tpms_admin_id = tenant.tpms_admin_id
 
     # Collect candidate records from both tables, then pick the one whose
     # password verifies. A user can exist in admins (practice owner) AND
