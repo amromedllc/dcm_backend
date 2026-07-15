@@ -5,6 +5,7 @@ switch — instead it sets the shared/tenancy.py contextvar that every
 tenant-scoped model's manager reads. See shared/tenancy.py's module
 docstring for why the contextvar exists at all.
 """
+from django.db import connection
 from apps.tenants.models import Domain, Organization
 
 from .tenancy import tenant_context
@@ -30,6 +31,9 @@ class TenantResolverMiddleware:
             request.tenant = self._get_fallback_org()
 
         tenant = getattr(request, 'tenant', None)
+        if tenant is not None:
+            connection.set_tenant(tenant)
+
         org_id = tenant.pk if tenant else None
         with tenant_context(org_id):
             return self.get_response(request)
