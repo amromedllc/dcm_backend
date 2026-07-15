@@ -117,7 +117,7 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
         admin = TpmsAdmin.objects.using('therapypms').get(
             Q(email=email) | Q(login_email=email)
         )
-        if admin.password and tenant_tpms_admin_id is not None and _tpms_effective_admin_id(admin) == tenant_tpms_admin_id:
+        if admin.password and (tenant_tpms_admin_id is None or _tpms_effective_admin_id(admin) == tenant_tpms_admin_id):
             candidates.append({
                 'hashed_password': admin.password,
                 'is_active': bool(admin.active),
@@ -132,7 +132,7 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
         for admin in TpmsAdmin.objects.using('therapypms').filter(
             Q(email=email) | Q(login_email=email)
         ):
-            if admin.password and tenant_tpms_admin_id is not None and _tpms_effective_admin_id(admin) == tenant_tpms_admin_id:
+            if admin.password and (tenant_tpms_admin_id is None or _tpms_effective_admin_id(admin) == tenant_tpms_admin_id):
                 candidates.append({
                     'hashed_password': admin.password,
                     'is_active': bool(admin.active),
@@ -145,7 +145,7 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
     external_employee_id: int | None = None
     try:
         employee = TpmsEmployee.objects.using('therapypms').get(login_email=email)
-        if employee.password and tenant_tpms_admin_id is not None and employee.admin_id == tenant_tpms_admin_id:
+        if employee.password and (tenant_tpms_admin_id is None or employee.admin_id == tenant_tpms_admin_id):
             external_employee_id = employee.id
             candidates.append({
                 'hashed_password': employee.password,
