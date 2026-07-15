@@ -77,7 +77,7 @@ def login(request, data: LoginRequest):
     if native_user and native_user.has_usable_password() and native_user.check_password(data.password):
         if not native_user.is_active:
             raise HttpError(403, 'Account is inactive')
-        tenant_id = request.tenant.pk if request.tenant else 0
+        tenant_id = request.tenant.pk
         return _issue_tokens(native_user, tenant_id)
 
     # Otherwise authenticate against TPMS — no manual DCM user creation needed.
@@ -209,7 +209,7 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
             if update_fields:
                 user.save(update_fields=update_fields)
 
-    tenant_id = request.tenant.pk if request.tenant else user.external_admin_id or 0
+    tenant_id = request.tenant.pk
     return _issue_tokens(user, tenant_id)
 
 
