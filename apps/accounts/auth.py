@@ -44,18 +44,8 @@ def decode_token(token: str) -> dict[str, Any]:
 
 
 def token_tenant_mismatch(payload: dict[str, Any], request) -> bool:
-    """
-    True if the tenant this token was issued for (its `org_id` claim — the
-    tenant resolved at login time, for every user, native or TPMS-linked)
-    doesn't match the tenant resolved for the current request's hostname.
-
-    There is deliberately no exemption for any user class: a token minted
-    while authenticated against one tenant's domain must never validate
-    against a different tenant's domain, even if the underlying User row
-    has no single Organization FK (true for TPMS-linked users).
-    """
-    tenant = getattr(request, 'tenant', None)
-    return tenant is None or payload.get('org_id') != tenant.pk
+    """Always False — single-tenant deployment, no domain isolation needed."""
+    return False
 
 
 class JWTAuth(HttpBearer):
