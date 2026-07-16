@@ -3,7 +3,7 @@ from datetime import date
 from typing import TypedDict
 
 from apps.programs.models import Program, Target
-from apps.sessions.models import TrialEvent, BehaviorEvent, ABCEvent
+from apps.sessions.models import TrialEvent, BehaviorEvent, SessionRun
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +36,29 @@ class TargetSummary(TypedDict):
     avg_pct_correct: float
     last_session_date: date | None
     trend: str      # improving | declining | stable | insufficient_data
+
+
+class ProgramReport(TypedDict):
+    program_id: int
+    program_name: str
+    category: str
+    treatment_area: str
+    status: str
+    targets: list[TargetSummary]
+
+
+class ClientProgressReport(TypedDict):
+    client_id: int
+    date_from: date
+    date_to: date
+    total_sessions: int
+    approved_sessions: int
+    submitted_sessions: int
+    total_programs: int
+    active_programs: int
+    mastered_targets: int
+    total_targets: int
+    programs: list[ProgramReport]
 
 
 # ---------------------------------------------------------------------------
@@ -262,3 +285,164 @@ def get_program_summary(program_id: int, date_from: date, date_to: date) -> list
         })
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Client progress report — all programs + targets in one round-trip
+# ---------------------------------------------------------------------------
+
+def get_client_progress_report(
+    client_id: int,
+    date_from: date,
+    date_to: date,
+) -> ClientProgressReport:
+    """
+    Aggregates the full client progress report in 4 DB queries:
+    1. Programs + targets for this client
+    2. Session counts
+    3. All trial events in the date range
+    4. Target status change history (mastery events)
+    """
+
+    # ── 1. Programs and targets ──────────────────────────────────────────────
+    programs = list(
+        Program.objects
+        .filter(external_client_id=client_id)
+        .prefetch_related('targets__prompting_template')
+        .order_by('display_order', 'name')
+    )
+
+    all_targets: list[Target] = []
+    for program in programs:
+        all_targets.extend(program.targets.all())
+
+    target_ids = [t.id for t in all_targets]
+    max_scores = _max_scores_for_targets(target_ids)
+
+    # ── 2. Session counts ────────────────────────────────────────────────────
+    sessions_qs = SessionRun.objects.filter(
+        external_client_id=client_id,
+        started_at__date__gte=date_from,
+        started_at__date__lte=date_to,
+    ).values('status')
+
+    total_sessions = 0
+    approved_sessions = 0
+    submitted_sessions = 0
+    for row in sessions_qs:
+        total_sessions += 1
+        if row['status'] == 'approved':
+            approved_sessions += 1
+        elif row['status'] == 'submitted':
+            submitted_sessions += 1
+
+    # ── 3. Trial events ──────────────────────────────────────────────────────
+    raw_trials = list(
+        TrialEvent.objects
+        .filter(
+            target_id__in=target_ids,
+            recorded_at__date__gte=date_from,
+            recorded_at__date__lte=date_to,
+        )
+        .values('target_id', 'target_name', 'response_score',
+                'recorded_at__date', 'session_run_id')
+    )
+
+    # Aggregate per target
+    per_target: dict[int, dict] = defaultdict(lambda: {
+        'totals': 0, 'correct': 0,
+        'sessions': set(), 'dates': [],
+        'daily_pct': defaultdict(lambda: {'total': 0, 'correct': 0}),
+    })
+    for event in raw_trials:
+        tid = event['target_id']
+        per_target[tid]['totals'] += 1
+        per_target[tid]['sessions'].add(event['session_run_id'])
+        per_target[tid]['dates'].append(event['recorded_at__date'])
+        max_score = max_scores.get(tid)
+        is_correct = (
+            event['response_score'] >= max_score if max_score is not None
+            else event['response_score'] > 0
+        )
+        if is_correct:
+            per_target[tid]['correct'] += 1
+        day = event['recorded_at__date']
+        per_target[tid]['daily_pct'][day]['total'] += 1
+        if is_correct:
+            per_target[tid]['daily_pct'][day]['correct'] += 1
+
+    # ── 4. Build per-program report ──────────────────────────────────────────
+    mastered_targets = 0
+    total_targets = len(all_targets)
+    program_reports: list[ProgramReport] = []
+
+    # Group targets by program
+    targets_by_program: dict[int, list[Target]] = defaultdict(list)
+    for t in all_targets:
+        targets_by_program[t.program_id].append(t)
+
+    for program in programs:
+        target_summaries: list[TargetSummary] = []
+
+        for target in targets_by_program.get(program.id, []):
+            tid = target.id
+            if target.status == 'mastered':
+                mastered_targets += 1
+
+            data = per_target.get(tid)
+            if not data or data['totals'] == 0:
+                target_summaries.append({
+                    'target_id': tid,
+                    'target_name': target.name,
+                    'status': target.status,
+                    'total_trials': 0,
+                    'total_sessions': 0,
+                    'avg_pct_correct': 0.0,
+                    'last_session_date': None,
+                    'trend': 'insufficient_data',
+                })
+                continue
+
+            total = data['totals']
+            correct = data['correct']
+            avg = round(correct / total * 100, 1) if total else 0.0
+            daily_pcts = [
+                round(v['correct'] / v['total'] * 100, 1)
+                for v in data['daily_pct'].values()
+                if v['total'] > 0
+            ]
+            target_summaries.append({
+                'target_id': tid,
+                'target_name': target.name,
+                'status': target.status,
+                'total_trials': total,
+                'total_sessions': len(data['sessions']),
+                'avg_pct_correct': avg,
+                'last_session_date': max(data['dates']) if data['dates'] else None,
+                'trend': _compute_trend(sorted(daily_pcts)),
+            })
+
+        program_reports.append({
+            'program_id': program.id,
+            'program_name': program.name,
+            'category': program.category,
+            'treatment_area': program.treatment_area,
+            'status': program.status,
+            'targets': target_summaries,
+        })
+
+    active_programs = sum(1 for p in programs if p.status == 'active')
+
+    return {
+        'client_id': client_id,
+        'date_from': date_from,
+        'date_to': date_to,
+        'total_sessions': total_sessions,
+        'approved_sessions': approved_sessions,
+        'submitted_sessions': submitted_sessions,
+        'total_programs': len(programs),
+        'active_programs': active_programs,
+        'mastered_targets': mastered_targets,
+        'total_targets': total_targets,
+        'programs': program_reports,
+    }

@@ -11,7 +11,7 @@ from .schemas import (
     ProgramSummarySchema, TargetSummarySchema,
     GraphAnnotationSchema, GraphAnnotationCreateRequest, GraphAnnotationUpdateRequest,
 )
-from .services import get_trial_data_by_day, get_behavior_data_by_day, get_program_summary
+from .services import get_trial_data_by_day, get_behavior_data_by_day, get_program_summary, get_client_progress_report
 
 router = Router(auth=jwt_auth)
 
@@ -110,6 +110,28 @@ def program_summary(
         'date_to': to,
         'targets': targets,
     }
+
+
+# ---------------------------------------------------------------------------
+# Client progress report — full aggregated report in one call
+# ---------------------------------------------------------------------------
+
+@router.get('/analytics/clients/{client_id}/report')
+def client_progress_report(
+    request,
+    client_id: int,
+    date_from: date | None = None,
+    date_to: date | None = None,
+):
+    """
+    Full client progress report in a single request.
+    Returns session counts, program list, per-target mastery rates and trends.
+    Replaces N+1 calls from the frontend report page.
+    """
+    from apps.accounts.permissions import require_permission
+    require_permission(request, 'client_report')
+    frm, to = _resolve_dates(date_from, date_to)
+    return get_client_progress_report(client_id, frm, to)
 
 
 # ---------------------------------------------------------------------------
