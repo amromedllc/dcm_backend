@@ -353,6 +353,7 @@ def list_mastery_templates(request):
 @router.post('/programs/templates/mastery', response={201: MasteryTemplateSchema})
 def create_mastery_template(request, data: MasteryTemplateCreateRequest):
     _require_supervisor(request)
+    _require_settings_permission(request, 'settings_mastery_templates')
     template = MasteryTemplate.objects.create(created_by=request.user, **data.dict())
     return 201, template
 
@@ -360,6 +361,7 @@ def create_mastery_template(request, data: MasteryTemplateCreateRequest):
 @router.patch('/programs/templates/mastery/{template_id}', response=MasteryTemplateSchema)
 def update_mastery_template(request, template_id: int, data: MasteryTemplateUpdateRequest):
     _require_supervisor(request)
+    _require_settings_permission(request, 'settings_mastery_templates')
     try:
         template = MasteryTemplate.objects.get(id=template_id)
     except MasteryTemplate.DoesNotExist:
@@ -373,6 +375,7 @@ def update_mastery_template(request, template_id: int, data: MasteryTemplateUpda
 @router.delete('/programs/templates/mastery/{template_id}', response={204: None})
 def delete_mastery_template(request, template_id: int):
     _require_supervisor(request)
+    _require_settings_permission(request, 'settings_mastery_templates')
     try:
         MasteryTemplate.objects.get(id=template_id).delete()
     except MasteryTemplate.DoesNotExist:
@@ -445,6 +448,7 @@ def list_maintenance_schedules(request):
 @router.post('/programs/templates/maintenance', response={201: MaintenanceScheduleSchema})
 def create_maintenance_schedule(request, data: MaintenanceScheduleCreateRequest):
     _require_supervisor(request)
+    _require_settings_permission(request, 'settings_maintenance_schedules')
     schedule = MaintenanceSchedule.objects.create(created_by=request.user, **data.dict())
     return 201, schedule
 
@@ -460,6 +464,7 @@ def get_maintenance_schedule(request, schedule_id: int):
 @router.patch('/programs/templates/maintenance/{schedule_id}', response=MaintenanceScheduleSchema)
 def update_maintenance_schedule(request, schedule_id: int, data: MaintenanceScheduleUpdateRequest):
     _require_supervisor(request)
+    _require_settings_permission(request, 'settings_maintenance_schedules')
     try:
         schedule = MaintenanceSchedule.objects.get(id=schedule_id)
     except MaintenanceSchedule.DoesNotExist:
@@ -473,6 +478,7 @@ def update_maintenance_schedule(request, schedule_id: int, data: MaintenanceSche
 @router.delete('/programs/templates/maintenance/{schedule_id}', response={204: None})
 def delete_maintenance_schedule(request, schedule_id: int):
     _require_supervisor(request)
+    _require_settings_permission(request, 'settings_maintenance_schedules')
     try:
         MaintenanceSchedule.objects.get(id=schedule_id).delete()
     except MaintenanceSchedule.DoesNotExist:
