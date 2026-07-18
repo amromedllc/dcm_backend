@@ -248,46 +248,20 @@ def me_debug(request):
         raise HttpError(403, 'Admin access required')
     if getattr(request, 'tenant', None) and not request.tenant.is_active:
         raise HttpError(403, 'Forbidden')
-    from apps.legacy.models import TpmsEmployee, TpmsAppointment
     from apps.clients.models import Client
 
     out: dict = {
         'dcm_email': request.user.email,
         'dcm_role': request.user.role,
         'dcm_external_admin_id': request.user.external_admin_id,
+        'external_employee_id': request.user.external_employee_id,
     }
 
-    try:
-        emp = TpmsEmployee.objects.using('therapypms').get(login_email=request.user.email)
-        out['external_employee_id'] = emp.id
-        out['tpms_employee_name'] = f'{emp.first_name} {emp.last_name}'
-        out['tpms_employee_admin_id'] = emp.admin_id
-
-        appt_client_ids = list(
-            TpmsAppointment.objects.using('therapypms')
-            .filter(provider_id=emp.id)
-            .exclude(status__in=['deleted', 'void', 'voided'])
-            .exclude(client_id__isnull=True)
-            .values_list('client_id', flat=True)
-            .distinct()
+    if request.user.external_admin_id is not None:
+        out['dcm_practice_clients'] = list(
+            Client.objects.filter(external_admin_id=request.user.external_admin_id)
+            .values('id', 'first_name', 'last_name', 'external_id', 'external_admin_id')[:50]
         )
-        out['tpms_appointment_client_ids'] = appt_client_ids
-
-        dcm_clients = list(
-            Client.objects.filter(external_id__in=[str(c) for c in appt_client_ids])
-            .values('id', 'first_name', 'last_name', 'external_id', 'external_admin_id')
-        )
-        out['dcm_matching_clients'] = dcm_clients
-    except TpmsEmployee.DoesNotExist:
-        out['tpms_employee_error'] = f'No TpmsEmployee found with login_email={request.user.email!r}'
-    except TpmsEmployee.MultipleObjectsReturned:
-        dupes = list(
-            TpmsEmployee.objects.using('therapypms')
-            .filter(login_email=request.user.email)
-            .values('id', 'first_name', 'last_name', 'admin_id')
-        )
-        out['tpms_employee_error'] = f'Multiple TpmsEmployee records for that email: {dupes}'
-
     return out
 
 
@@ -328,22 +302,34 @@ def list_users(request):
 
 @router.get('/admin/staffs', response=list[StaffSchema], auth=jwt_auth)
 def list_admin_staffs(request, include_inactive: bool = False):
-    """Return staff from the TPMS employees table for the logged-in admin's practice.
+    """Return staff for the logged-in admin's practice.
 
-    By default returns only active staff (is_active=1), matching TPMS default view.
-    Pass ?include_inactive=true to include inactive staff as well.
+    TPMS-linked practices use local DCM User rows (synced at login) scoped by
+    external_admin_id. Native practices use Organization membership.
     """
     if not request.user.has_role('admin', 'supervisor'):
         raise HttpError(403, 'Admin or supervisor access required')
     if request.user.external_admin_id is None:
         return _list_native_staffs(request, include_inactive)
-    from apps.legacy.models import TpmsEmployee
-    qs = TpmsEmployee.objects.using('therapypms').filter(
-        admin_id=request.user.external_admin_id,
-    )
+
+    qs = User.objects.filter(external_admin_id=request.user.external_admin_id)
     if not include_inactive:
-        qs = qs.filter(is_active=1)
-    return list(qs.order_by('last_name', 'first_name'))
+        qs = qs.filter(is_active=True)
+    return [
+        StaffSchema(
+            id=u.external_employee_id or u.id,
+            admin_id=u.external_admin_id,
+            first_name=u.first_name,
+            last_name=u.last_name,
+            full_name=u.full_name,
+            login_email=u.email,
+            office_email=None,
+            employee_type=u.role,
+            is_active=u.is_active,
+            dcm_user_id=u.id,
+        )
+        for u in qs.order_by('last_name', 'first_name')
+    ]
 
 
 def _list_native_staffs(request, include_inactive: bool) -> list[StaffSchema]:

@@ -134,7 +134,6 @@ else:
     }
 
 DATABASE_ROUTERS = [
-    'apps.legacy.router.TherapyPmsRouter',
     'django_tenants.routers.TenantSyncRouter',
 ]
 

@@ -31,7 +31,9 @@ def _get_accessible_clients(request):
     Return the client queryset visible to the requesting user.
 
     - Admins/supervisors: all clients in their TPMS practice scope.
-    - Staff: clients they have TPMS appointments with (matched via provider_id).
+    - TPMS-linked staff: same practice scope (patient list is already
+      token-scoped by TherapyPMS; appointment history no longer comes from DB).
+    - Native staff: clients via ClientStaffAssignment.
     """
     qs = Client.objects.all()
 
@@ -41,29 +43,15 @@ def _get_accessible_clients(request):
     if request.user.role in ('admin', 'supervisor'):
         return qs
 
-    if request.user.external_admin_id is None:
-        # Native staff: derive accessible clients from ClientStaffAssignment
-        assigned_client_ids = ClientStaffAssignment.objects.filter(
-            user=request.user, is_active=True,
-        ).values_list('client_id', flat=True)
-        return qs.filter(id__in=assigned_client_ids)
+    if request.user.external_admin_id is not None:
+        # TPMS-linked staff — practice-scoped (TherapyPMS DB removed)
+        return qs
 
-    # Staff: derive accessible clients from their TPMS appointment history
-    from apps.legacy.models import TpmsAppointment
-    employee_id = request.user.external_employee_id
-    if not employee_id:
-        return qs.none()
-
-    external_client_ids = (
-        TpmsAppointment.objects.using('therapypms')
-        .filter(provider_id=employee_id)
-        .exclude(status__in=['deleted', 'void', 'voided'])
-        .exclude(client_id__isnull=True)
-        .values_list('client_id', flat=True)
-        .distinct()
-    )
-    accessible_ext_ids = [str(cid) for cid in external_client_ids]
-    return qs.filter(external_id__in=accessible_ext_ids)
+    # Native staff: derive accessible clients from ClientStaffAssignment
+    assigned_client_ids = ClientStaffAssignment.objects.filter(
+        user=request.user, is_active=True,
+    ).values_list('client_id', flat=True)
+    return qs.filter(id__in=assigned_client_ids)
 
 
 def _get_client_or_404(request, client_id: int) -> Client:

@@ -31,6 +31,9 @@ class AppointmentSchema(Schema):
 class AssignProgramsRequest(Schema):
     program_ids: list[int]
     client_id: int | None = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    service_type: str | None = None
 
 
 class AssignedProgramSchema(Schema):

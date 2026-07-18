@@ -89,8 +89,12 @@ def _max_score_for_target(snapshot: dict, target_id: int) -> int | None:
 def _get_tpms_appointment(external_appointment_id: int | None):
     if not external_appointment_id:
         return None
-    from apps.legacy.models import TpmsAppointment
-    return TpmsAppointment.objects.using('therapypms').filter(id=external_appointment_id).first()
+    return (
+        Appointment.objects
+        .filter(external_id=str(external_appointment_id))
+        .only('start_time', 'end_time')
+        .first()
+    )
 
 
 def _aware(dt):
@@ -100,19 +104,19 @@ def _aware(dt):
     return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
 
 
-def _serialize_session(session: SessionRun, tpms_appt=None) -> dict:
+def _serialize_session(session: SessionRun, dcm_appt=None) -> dict:
     staff = session.staff
     staff_name = f'{staff.first_name} {staff.last_name}'.strip() if staff else None
-    if tpms_appt is None and session.external_appointment_id:
-        tpms_appt = _get_tpms_appointment(session.external_appointment_id)
+    if dcm_appt is None and session.external_appointment_id:
+        dcm_appt = _get_tpms_appointment(session.external_appointment_id)
     return {
         'id': session.id,
         'client_id': session.external_client_id,
         'staff_id': session.staff_id,
         'staff_name': staff_name or (staff.email if staff else None),
         'appointment_id': session.external_appointment_id,
-        'appointment_start_time': _aware(tpms_appt.from_time) if tpms_appt else None,
-        'appointment_end_time': _aware(tpms_appt.to_time) if tpms_appt else None,
+        'appointment_start_time': dcm_appt.start_time if dcm_appt else None,
+        'appointment_end_time': dcm_appt.end_time if dcm_appt else None,
         'lesson_id': session.lesson_id,
         'status': session.status,
         'started_at': session.started_at,
@@ -129,7 +133,7 @@ def _serialize_session(session: SessionRun, tpms_appt=None) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# TPMS-direct provider appointments (read-only, no sync required)
+# TPMS appointments via iOS API (TherapyPMS DB removed)
 # ---------------------------------------------------------------------------
 
 def _tpms_status(raw: str | None) -> str:
@@ -144,170 +148,143 @@ def _tpms_status(raw: str | None) -> str:
     return 'scheduled'
 
 
+def _find_appointment(appt_id: int) -> Appointment | None:
+    """Prefer external_id match (TPMS session id), then local PK."""
+    return (
+        Appointment.objects
+        .filter(external_id=str(appt_id))
+        .select_related('lesson')
+        .first()
+    ) or (
+        Appointment.objects
+        .filter(id=appt_id)
+        .select_related('lesson')
+        .first()
+    )
+
+
 @router.get('/provider-appointments', response=list[AppointmentSchema])
 def list_provider_appointments(
     request,
     external_employee_id: int,
     status: str | None = None,
 ):
-    """Return appointments from TPMS directly for a given provider (employee) ID."""
-    from apps.legacy.models import TpmsAppointment, TpmsActivityTemplate
-    from django.utils import timezone as tz
+    """Return appointments for a provider via the TherapyPMS iOS API."""
+    from apps.clients.models import Client
+    from apps.integrations.tpms_auth_client import (
+        TpmsAuthError,
+        clear_tpms_access_token,
+        get_tpms_access_token,
+        list_recurring_appointments,
+    )
+    from apps.clients.api import _serialize_tpms_api_appointments
 
-    qs = list(TpmsAppointment.objects.using('therapypms').filter(
-        provider_id=external_employee_id,
-    ).order_by('-schedule_date'))
+    token = get_tpms_access_token(request.user.id)
+    if not token:
+        raise HttpError(401, 'TherapyPMS session expired. Please log in again.')
 
-    # Batch-fetch activity templates for service names
-    act_ids = {a.authorization_activity_id for a in qs if a.authorization_activity_id}
-    activity_map = {}
-    if act_ids:
-        for act in TpmsActivityTemplate.objects.using('therapypms').filter(id__in=act_ids):
-            activity_map[act.id] = act.activity_name or ''
-
-    def _aware(dt):
-        if dt is None:
-            return None
-        from django.utils import timezone
-        return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
-
-    from datetime import datetime as dt_cls
-    results = []
-    for appt in qs:
-        if appt.from_time:
-            start = appt.from_time
-        elif appt.schedule_date:
-            start = dt_cls(appt.schedule_date.year, appt.schedule_date.month, appt.schedule_date.day)
-        else:
+    patient_ids: list[int] = []
+    qs = Client.objects.exclude(external_id='').exclude(external_id__isnull=True)
+    if request.user.external_admin_id is not None:
+        qs = qs.filter(external_admin_id=request.user.external_admin_id)
+    for ext in qs.values_list('external_id', flat=True):
+        try:
+            patient_ids.append(int(ext))
+        except (TypeError, ValueError):
             continue
-        mapped_status = _tpms_status(appt.status)
-        if status and mapped_status != status:
-            continue
-        end = appt.to_time or start
 
-        service_name = (
-            activity_map.get(appt.authorization_activity_id)
-            or appt.activity_type
-            or appt.cpt_code
-            or ''
+    if not patient_ids:
+        return []
+
+    try:
+        appointments = list_recurring_appointments(
+            token,
+            patient_ids=patient_ids,
+            provider_ids=[int(external_employee_id)],
         )
-        duration_mins = appt.time_duration
-        if not duration_mins and appt.from_time and appt.to_time:
-            delta = appt.to_time - appt.from_time
-            duration_mins = int(delta.total_seconds() / 60)
+    except TpmsAuthError as exc:
+        if exc.status_code in {401, 403}:
+            clear_tpms_access_token(request.user.id)
+            raise HttpError(401, 'TherapyPMS session expired. Please log in again.') from exc
+        raise HttpError(502, str(exc) or 'Failed to load appointments from TherapyPMS') from exc
 
-        results.append({
-            'id': appt.id,
-            'client_id': appt.client_id or 0,
-            'staff_id': None,
-            'lesson_id': None,
-            'assigned_program_count': 0,
-            'external_id': str(appt.id),
-            'source': 'tpms',
-            'start_time': _aware(start),
-            'end_time': _aware(end),
-            'service_type': service_name,
-            'duration_minutes': duration_mins or 0,
-            'notes': appt.notes or '',
-            'status': mapped_status,
-            'synced_at': None,
-            'created_at': _aware(appt.created_at) or _aware(start),
-        })
-    return results
+    # Use first matching DCM client id as a placeholder; serializer remaps per row via external_id
+    dcm_client_id = 0
+    return _serialize_tpms_api_appointments(
+        appointments=appointments,
+        dcm_client_id=dcm_client_id,
+        status=status,
+        from_date=None,
+        to_date=None,
+    )
 
 
 @router.get('/my-schedule', response=list[AppointmentSchema])
 def my_schedule(request, date: str | None = None):
     """
-    Return TPMS appointments for the logged-in staff member on a given date
-    (defaults to today). Resolves the TPMS employee record via email match.
+    Return appointments for the logged-in staff member on a given date
+    (defaults to today). Uses TherapyPMS iOS API for TPMS-linked users.
     """
-    from apps.legacy.models import TpmsAppointment, TpmsActivityTemplate
-    from django.utils import timezone as tz
     from datetime import date as dt_date
+    from apps.clients.models import Client
+    from apps.integrations.tpms_auth_client import (
+        TpmsAuthError,
+        clear_tpms_access_token,
+        get_tpms_access_token,
+        list_recurring_appointments,
+    )
+    from apps.clients.api import _serialize_tpms_api_appointments
 
     target_date = date or dt_date.today().isoformat()
+    try:
+        target = dt_date.fromisoformat(target_date)
+    except ValueError:
+        raise HttpError(400, 'Invalid date — use YYYY-MM-DD')
 
     employee_id = request.user.external_employee_id
     if employee_id is None:
-        # Native (non-TPMS) staff: read straight from the local Appointment table.
         return list(
             _appt_qs()
-            .filter(staff_id=request.user.id, start_time__date=target_date)
+            .filter(staff_id=request.user.id, start_time__date=target)
             .order_by('start_time')
         )
 
-    qs = list(
-        TpmsAppointment.objects.using('therapypms').filter(
-            provider_id=employee_id,
-            schedule_date=target_date,
-        ).exclude(status__in=['deleted', 'void', 'voided']).order_by('from_time')
-    )
+    token = get_tpms_access_token(request.user.id)
+    if not token:
+        raise HttpError(401, 'TherapyPMS session expired. Please log in again.')
 
-    if not qs:
+    patient_ids: list[int] = []
+    qs = Client.objects.exclude(external_id='').exclude(external_id__isnull=True)
+    if request.user.external_admin_id is not None:
+        qs = qs.filter(external_admin_id=request.user.external_admin_id)
+    for ext in qs.values_list('external_id', flat=True):
+        try:
+            patient_ids.append(int(ext))
+        except (TypeError, ValueError):
+            continue
+
+    if not patient_ids:
         return []
 
-    act_ids = {a.authorization_activity_id for a in qs if a.authorization_activity_id}
-    activity_map: dict[int, str] = {}
-    if act_ids:
-        for act in TpmsActivityTemplate.objects.using('therapypms').filter(id__in=act_ids):
-            activity_map[act.id] = act.activity_name or act.cpt_code or ''
-
-    from apps.legacy.models import TpmsClient
-    client_ids = {a.client_id for a in qs if a.client_id}
-    client_map: dict[int, str] = {}
-    if client_ids:
-        for c in TpmsClient.objects.using('therapypms').filter(id__in=client_ids):
-            client_map[c.id] = (
-                c.client_full_name
-                or f'{c.client_first_name or ""} {c.client_last_name or ""}'.strip()
-                or f'Client {c.id}'
-            )
-
-    def _aware(dt):
-        if dt is None:
-            return None
-        return tz.make_aware(dt) if tz.is_naive(dt) else dt
-
-    from datetime import datetime as dt_cls
-    results = []
-    for appt in qs:
-        if appt.from_time:
-            start = appt.from_time
-        elif appt.schedule_date:
-            start = dt_cls(appt.schedule_date.year, appt.schedule_date.month, appt.schedule_date.day)
-        else:
-            continue
-        end = appt.to_time or start
-        service_name = (
-            activity_map.get(appt.authorization_activity_id)
-            or appt.activity_type or appt.cpt_code or ''
+    try:
+        appointments = list_recurring_appointments(
+            token,
+            patient_ids=patient_ids,
+            provider_ids=[int(employee_id)],
         )
-        duration_mins = appt.time_duration
-        if not duration_mins and appt.from_time and appt.to_time:
-            delta = appt.to_time - appt.from_time
-            duration_mins = int(delta.total_seconds() / 60)
-        results.append({
-            'id': appt.id,
-            'client_id': appt.client_id or 0,
-            'client_name': client_map.get(appt.client_id) if appt.client_id else None,
-            'staff_id': None,
-            'staff_name': None,
-            'lesson_id': None,
-            'assigned_program_count': 0,
-            'external_id': str(appt.id),
-            'source': 'tpms',
-            'start_time': _aware(start),
-            'end_time': _aware(end),
-            'service_type': service_name,
-            'location': appt.location or None,
-            'duration_minutes': duration_mins or 0,
-            'notes': appt.notes or '',
-            'status': _tpms_status(appt.status),
-            'synced_at': None,
-            'created_at': _aware(appt.created_at) or _aware(start),
-        })
-    return results
+    except TpmsAuthError as exc:
+        if exc.status_code in {401, 403}:
+            clear_tpms_access_token(request.user.id)
+            raise HttpError(401, 'TherapyPMS session expired. Please log in again.') from exc
+        raise HttpError(502, str(exc) or 'Failed to load appointments from TherapyPMS') from exc
+
+    return _serialize_tpms_api_appointments(
+        appointments=appointments,
+        dcm_client_id=0,
+        status=None,
+        from_date=target,
+        to_date=target,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -363,10 +340,7 @@ def get_appointment(request, appt_id: int):
 @router.get('/appointments/{appt_id}/programs', response=list[AssignedProgramSchema])
 def get_appointment_programs(request, appt_id: int):
     """Returns programs currently assigned to this appointment."""
-    appt = (
-        Appointment.objects.filter(id=appt_id).select_related('lesson').first()
-        or Appointment.objects.filter(external_id=str(appt_id)).select_related('lesson').first()
-    )
+    appt = _find_appointment(appt_id)
     if not appt:
         return []
     if not appt.lesson_id:
@@ -396,43 +370,31 @@ def assign_appointment_programs(request, appt_id: int, data: AssignProgramsReque
     Creates or reuses a Lesson linked to the appointment, then replaces its program list.
 
     appt_id may be a DCM internal id or a TPMS external id — both are handled.
-    If no DCM Appointment row exists yet, one is created on demand from TPMS data.
+    If no DCM Appointment row exists yet, one is created from the times supplied
+    by the client (from the live TherapyPMS API list) — the TPMS DB is not used.
     """
     if request.user.role not in ('admin', 'supervisor'):
         raise HttpError(403, 'Supervisor or admin access required')
 
-    appt = (
-        Appointment.objects
-        .filter(id=appt_id)
-        .select_related('lesson')
-        .first()
-    ) or (
-        Appointment.objects
-        .filter(external_id=str(appt_id))
-        .select_related('lesson')
-        .first()
-    )
+    appt = _find_appointment(appt_id)
 
     if not appt:
-        # No DCM record yet — create one from TPMS data
-        from apps.legacy.models import TpmsAppointment
-        from django.utils import timezone as tz
-
-        tpms_appt = TpmsAppointment.objects.using('therapypms').filter(id=appt_id).first()
-        if not tpms_appt or not tpms_appt.from_time:
-            raise HttpError(404, 'Appointment not found')
-
-        def _aware(dt):
-            if dt is None:
-                return None
-            return tz.make_aware(dt) if tz.is_naive(dt) else dt
-
+        if not data.client_id:
+            raise HttpError(400, 'client_id is required to assign programs to a new appointment')
+        if not data.start_time:
+            raise HttpError(
+                400,
+                'start_time is required to assign programs to a TherapyPMS appointment '
+                'that has not been linked in DCM yet',
+            )
+        end = data.end_time or data.start_time
         appt = Appointment.objects.create(
             external_id=str(appt_id),
             external_client_id=data.client_id,
             source=Appointment.Source.SYNCED,
-            start_time=_aware(tpms_appt.from_time),
-            end_time=_aware(tpms_appt.to_time or tpms_appt.from_time),
+            start_time=data.start_time,
+            end_time=end,
+            service_type=data.service_type or '',
             status=Appointment.Status.SCHEDULED,
             created_by=request.user,
         )
@@ -445,7 +407,7 @@ def assign_appointment_programs(request, appt_id: int, data: AssignProgramsReque
             lesson = appt.lesson
         else:
             lesson = Lesson.objects.create(
-                external_client_id=data.client_id,
+                external_client_id=data.client_id or appt.external_client_id,
                 name=appt.start_time.strftime('Session %b %d, %Y'),
                 created_by=request.user,
             )
@@ -524,12 +486,16 @@ def list_sessions(
         qs = qs.filter(staff_id=staff_id)
     sessions = list(qs)
     appt_ids = [s.external_appointment_id for s in sessions if s.external_appointment_id]
+    dcm_appts: dict[int, Appointment] = {}
     if appt_ids:
-        from apps.legacy.models import TpmsAppointment
-        tpms_appts = {a.id: a for a in TpmsAppointment.objects.using('therapypms').filter(id__in=appt_ids)}
-    else:
-        tpms_appts = {}
-    return [_serialize_session(s, tpms_appts.get(s.external_appointment_id)) for s in sessions]
+        for a in Appointment.objects.filter(external_id__in=[str(i) for i in appt_ids]).only(
+            'external_id', 'start_time', 'end_time',
+        ):
+            try:
+                dcm_appts[int(a.external_id)] = a
+            except (TypeError, ValueError):
+                continue
+    return [_serialize_session(s, dcm_appts.get(s.external_appointment_id)) for s in sessions]
 
 
 @router.get('/sessions/{session_id}', response=SessionRunSchema)

@@ -23,16 +23,8 @@ SESSION_NOTE_TREATMENT_TYPE = 'Session Note'
 
 def _facility_for_user(user: User) -> tuple[str, str | None]:
     if user.external_admin_id is not None:
-        facility_id = str(user.external_admin_id)
-        facility_name = None
-        try:
-            from apps.legacy.models import TpmsAdmin
-            admin = TpmsAdmin.objects.using('therapypms').filter(id=user.external_admin_id).first()
-            if admin:
-                facility_name = admin.name or admin.first_name
-        except Exception:
-            pass
-        return facility_id, facility_name
+        # TherapyPMS DB removed — facility name is optional for DocuSeal SSO
+        return str(user.external_admin_id), None
 
     if user.organization_id is not None:
         return f'dcm-org-{user.organization_id}', user.organization.name
@@ -87,33 +79,12 @@ def build_upload_url(user: User) -> str:
 
 def list_session_note_templates(user: User) -> list[dict]:
     """
-    Session Note DocuSeal templates for this user's facility, read directly
-    from TPMS's `docu_seal_template_names` table.
+    Session Note DocuSeal templates for this user's facility.
 
-    therapypms-api owns the DocuSeal sync (SuperAdminSettingController
-    ::forms_builders_table) and the Session Note / Patient Intake / Staff
-    Intake classification — DCM only reads the result, scoped to the caller's
-    facility (external_admin_id). Users not linked to a TPMS facility have no
-    DocuSeal templates to show.
+    Previously read from TPMS `docu_seal_template_names`. That database is
+    gone — prefer templates uploaded through DCM's DocuSeal account instead.
     """
-    if user.external_admin_id is None:
-        return []
-
-    from apps.legacy.models import TpmsDocusealTemplateName
-
-    rows = TpmsDocusealTemplateName.objects.using('therapypms').filter(
-        admin_id=user.external_admin_id,
-        docu_seal_template_type=SESSION_NOTE_TREATMENT_TYPE,
-    )
-    return [
-        {
-            'id': row.pk,
-            'external_template_id': str(row.template_id),
-            'name': row.template_name or '',
-            'treatment_type': row.docu_seal_template_type or '',
-        }
-        for row in rows
-    ]
+    return list_uploaded_session_note_templates(user)
 
 
 def _fetch_docuseal_access_token(user: User) -> str | None:
