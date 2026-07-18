@@ -286,34 +286,6 @@ def _upsert_clients_from_patients(
                 continue
         mapped.append(fields)
 
-    unknown_ext_ids = [
-        row['external_id']
-        for row in mapped
-        if row['first_name'] == 'Unknown' or row['last_name'] == 'Unknown'
-    ]
-    if unknown_ext_ids:
-        try:
-            from apps.legacy.models import TpmsClient
-
-            tpms_names = {
-                str(client.pk): client
-                for client in TpmsClient.objects.using('therapypms').filter(pk__in=unknown_ext_ids)
-            }
-            for row in mapped:
-                tpms_client = tpms_names.get(row['external_id'])
-                if tpms_client is None:
-                    continue
-                first = (tpms_client.client_first_name or '').strip()
-                last = (tpms_client.client_last_name or '').strip()
-                if not first and not last:
-                    first, last = _split_patient_name(tpms_client.client_full_name)
-                row['first_name'] = first or row['first_name']
-                row['last_name'] = last or row['last_name']
-                row['preferred_name'] = row['preferred_name'] or (tpms_client.client_preferred or '').strip()
-                row['date_of_birth'] = row['date_of_birth'] or tpms_client.client_dob
-        except Exception:
-            pass
-
     mapped.sort(key=lambda row: (row['last_name'].lower(), row['first_name'].lower()))
     if not mapped:
         return []

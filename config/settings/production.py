@@ -113,31 +113,25 @@ TEMPLATES = [
 # Database — schema-based multi-tenancy via django-tenants
 # ---------------------------------------------------------------------------
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django_tenants.postgresql_backend',
-        'NAME': env('DB_NAME'),
-        'USER': env('DB_USER'),
-        'PASSWORD': env('DB_PASSWORD'),
-        'HOST': env('DB_HOST'),
-        'PORT': env('DB_PORT'),
-        'CONN_MAX_AGE': 60,
-    },
-    # Read-only connection to the TherapyPMS source-of-truth database.
-    # Django never migrates this DB — schema.
-    'therapypms': {
-        'ENGINE': 'apps.legacy.backend',
-        'NAME': env('TPMS_DB_NAME'),
-        'USER': env('TPMS_DB_USER'),
-        'PASSWORD': env('TPMS_DB_PASSWORD'),
-        'HOST': env('TPMS_DB_HOST'),
-        'PORT': env('TPMS_DB_PORT'),
-        'CONN_MAX_AGE': 60,
-        'OPTIONS': {
-            'options': '-c default_transaction_read_only=on',
-        },
-    },
-}
+if env("DB_NAME"):
+    DATABASES = {
+        "default": {
+            "ENGINE": "django_tenants.postgresql_backend",
+            "NAME": env("DB_NAME"),
+            "USER": env("DB_USER"),
+            "PASSWORD": env("DB_PASSWORD"),
+            "HOST": env("DB_HOST"),
+            "PORT": env("DB_PORT"),
+            "CONN_MAX_AGE": 60,
+        }
+    }
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
+    }
 
 DATABASE_ROUTERS = [
     'apps.legacy.router.TherapyPmsRouter',
@@ -178,11 +172,7 @@ TPMS_API_TIMEOUT_SECONDS = env.int('TPMS_API_TIMEOUT_SECONDS', default=20)
 # ---------------------------------------------------------------------------
 
 DOCUSEAL_BASE_URL = env('DOCUSEAL_BASE_URL')
-# Matches SSO_JWT_SECRET in docuseal/app/controllers/sso_login_controller.rb —
-# must stay identical on both sides or tokens minted here won't decode there.
 DOCUSEAL_SSO_SECRET = env('DOCUSEAL_SSO_SECRET')
-# Shared header value DocuSeal's form.completed webhook must send back —
-# provisioned onto each Account's WebhookUrl in docuseal/app/models/account.rb.
 DOCUSEAL_WEBHOOK_SECRET = env('DOCUSEAL_WEBHOOK_SECRET', default='')
 
 # ---------------------------------------------------------------------------
