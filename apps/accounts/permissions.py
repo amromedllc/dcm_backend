@@ -3,6 +3,35 @@ from ninja.errors import HttpError
 from .models import RolePermission, User
 
 
+def resolve_permission_organization(request):
+    """Facility (Organization) that owns role-permission rows for this request.
+
+    Privileges are facility-scoped. Prefer the login tenant from the JWT so
+    TPMS users (who often have ``user.organization=None``) still read/write
+    the matrix for the facility they logged into.
+    """
+    from apps.tenants.models import Organization
+
+    payload = getattr(request, '_jwt_payload', None) or {}
+    org_id = payload.get('org_id')
+    if org_id not in (None, '', 0, '0'):
+        try:
+            return Organization.objects.get(pk=int(org_id))
+        except (Organization.DoesNotExist, TypeError, ValueError):
+            pass
+
+    tenant = getattr(request, 'tenant', None)
+    if tenant is not None:
+        return tenant
+
+    user = getattr(request, 'user', None)
+    org = getattr(user, 'organization', None)
+    if org is not None:
+        return org
+
+    raise HttpError(400, 'No facility context for permissions')
+
+
 PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
     User.Role.ADMIN: {
         # Dashboard
@@ -310,6 +339,6 @@ def user_has_permission(user: User, organization, permission: str) -> bool:
 
 
 def require_permission(request, permission: str) -> None:
-    organization = request.user.organization or request.tenant
+    organization = resolve_permission_organization(request)
     if not user_has_permission(request.user, organization, permission):
         raise HttpError(403, 'Insufficient permissions')

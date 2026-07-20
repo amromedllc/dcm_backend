@@ -40,10 +40,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     external_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
     # External system employee pk — set at login for staff/supervisor, null for admin-only logins
     external_employee_id = models.IntegerField(null=True, blank=True, db_index=True)
-    # Set for native (non-linked) users. Null for externally-linked (TPMS)
-    # users, who are additionally scoped via external_admin_id — but every
-    # user's JWT is still bound to the tenant resolved at login time
-    # regardless of this field (see accounts.auth.token_tenant_mismatch).
+    # Set for native users and TPMS-linked users after login. Privileges
+    # (RolePermission) are keyed by this Organization. JWT is still bound to
+    # the tenant resolved at login (see accounts.auth.token_tenant_mismatch).
     organization = models.ForeignKey(
         'tenants.Organization',
         on_delete=models.PROTECT,
@@ -138,9 +137,13 @@ class APIKey(models.Model):
 
 class RolePermission(models.Model):
     """
-    Stores which permission keys are granted to a role, per organisation.
-    `permissions` is a JSON object like {"dashboard": true, "review_queue": false, ...}
-    One row per (organization, role) pair.
+    Facility-scoped permission matrix for a role.
+
+    ``permissions`` is a JSON object like
+    {"dashboard": true, "settings_tags_create": false, ...}.
+
+    One row per (organization, role) pair — each Organization (facility /
+    tenant) has its own matrix, loaded for the facility the user logged into.
     """
     organization = models.ForeignKey(
         'tenants.Organization',

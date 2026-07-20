@@ -10,7 +10,7 @@ from django.db.models import Q
 
 from .models import User, APIKey
 from .auth import create_access_token, create_refresh_token, decode_token, jwt_auth, token_tenant_mismatch
-from .permissions import get_user_permissions, require_permission
+from .permissions import get_user_permissions, require_permission, resolve_permission_organization
 from .schemas import (
     LoginRequest,
     TokenResponse,
@@ -167,6 +167,9 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
     provision_email = profile.email or email
 
     # Auto-provision DCM user on first TPMS login; keep external ids + role current.
+    # Bind organization to the login tenant so facility-scoped RolePermission
+    # rows resolve correctly (privileges are per Organization).
+    login_org = request.tenant
     with transaction.atomic():
         user, created = User.objects.get_or_create(
             email=provision_email,
@@ -177,6 +180,7 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
                 'is_active': True,
                 'external_admin_id': external_admin_id,
                 'external_employee_id': external_employee_id,
+                'organization': login_org,
             },
         )
         if created:
@@ -199,6 +203,9 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
             if user.role != dcm_role:
                 user.role = dcm_role
                 update_fields.append('role')
+            if login_org is not None and user.organization_id != login_org.pk:
+                user.organization = login_org
+                update_fields.append('organization')
             if not user.is_active:
                 user.is_active = True
                 update_fields.append('is_active')
@@ -261,7 +268,7 @@ def refresh_token(request, data: RefreshRequest):
 @router.get('/me', response=CurrentUserSchema, auth=jwt_auth)
 def me(request):
     user = request.user
-    org = user.organization or request.tenant
+    org = resolve_permission_organization(request)
     user.permissions = get_user_permissions(user, org)
     return user
 
@@ -469,13 +476,15 @@ def get_logs(request, limit: int = 200):
 
 @router.get('/admin/role-permissions', auth=jwt_auth)
 def get_role_permissions(request):
-    """Return the full permission matrix as {role: {perm_key: bool}}."""
+    """Return the full permission matrix as {role: {perm_key: bool}}.
+
+    Rows are loaded for the login facility only (JWT / tenant).
+    """
     require_permission(request, 'admin_privileges')
     from .models import RolePermission
     from .permissions import PERMISSION_DEFAULTS, _apply_role_guarantees
 
-    # Resolve org: either the native org or the tenant from the request
-    org = request.user.organization or request.tenant
+    org = resolve_permission_organization(request)
     result: dict = {
         role: dict(defaults)
         for role, defaults in PERMISSION_DEFAULTS.items()
@@ -491,11 +500,16 @@ def get_role_permissions(request):
 
 @router.put('/admin/role-permissions', auth=jwt_auth)
 def save_role_permissions(request, body: dict = Body(...)):
-    """Save the full permission matrix.  Body: {role: {perm_key: bool}}."""
+    """Save the permission matrix for the login facility.
+
+    Body: {role: {perm_key: bool}}. Persists one RolePermission row per role
+    under the Organization resolved from the logged-in user's JWT/tenant.
+    """
     require_permission(request, 'admin_privileges')
     from .models import RolePermission
+    from .permissions import PERMISSION_DEFAULTS, _apply_role_guarantees
 
-    org = request.user.organization or request.tenant
+    org = resolve_permission_organization(request)
 
     valid_roles = {c[0] for c in User.Role.choices}
     for role, perms in body.items():
@@ -504,6 +518,7 @@ def save_role_permissions(request, body: dict = Body(...)):
         if not isinstance(perms, dict):
             raise HttpError(400, f'Permissions must be an object for role {role}')
 
+    saved: dict = {}
     for role, perms in body.items():
         # Supervisors must retain org-management tools to grant staff access.
         if role == User.Role.SUPERVISOR:
@@ -524,5 +539,11 @@ def save_role_permissions(request, body: dict = Body(...)):
             role=role,
             defaults={'permissions': perms},
         )
+        saved[role] = _apply_role_guarantees(role, {**PERMISSION_DEFAULTS.get(role, {}), **perms})
 
-    return {'ok': True}
+    return {
+        'ok': True,
+        'organization_id': org.pk,
+        'organization_name': org.name,
+        'permissions': saved,
+    }
