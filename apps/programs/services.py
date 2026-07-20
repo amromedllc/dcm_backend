@@ -102,6 +102,9 @@ def _advance_if_criteria_met(target: Target, session_run_id: int) -> bool:
     n_consecutive = criteria.get('consecutive_sessions', 3)
     threshold_pct = criteria.get('threshold_pct', 80)
     min_trials = criteria.get('minimum_trials', 5)
+    # 'min' (Increase Percent Correct): percent must be ≥ threshold
+    # 'max' (Reduce Percentage): percent must be ≤ threshold
+    threshold_direction = str(criteria.get('threshold_direction') or 'min').lower()
 
     from apps.sessions.models import SessionRun, TrialEvent
 
@@ -124,7 +127,11 @@ def _advance_if_criteria_met(target: Target, session_run_id: int) -> bool:
         total, correct = _pass_stats(target, trials)
         if total < min_trials:
             return False
-        if (correct / total * 100) < threshold_pct:
+        pct = correct / total * 100
+        if threshold_direction == 'max':
+            if pct > threshold_pct:
+                return False
+        elif pct < threshold_pct:
             return False
 
     old_status = target.status
