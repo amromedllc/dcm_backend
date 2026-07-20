@@ -97,9 +97,13 @@ def dashboard(request):
         'my_draft_notes': my_draft_notes,
     }
 
-    # Recent audit activity — admin/supervisor only
+    # Recent audit activity, daily activity trend, staff productivity — admin/supervisor only
     if user.has_role('admin', 'supervisor'):
+        from datetime import timedelta
+        from django.db.models.functions import TruncDate
         from apps.audit.models import AuditLog
+        from apps.accounts.models import User
+
         recent = AuditLog.objects.select_related()[:10]
         result['recent_activity'] = [
             {
@@ -110,6 +114,71 @@ def dashboard(request):
                 'timestamp': log.timestamp,
             }
             for log in recent
+        ]
+
+        # 14-day activity trend — sessions/notes submitted vs. approved, by day
+        trend_start = today - timedelta(days=13)
+
+        def _counts_by_day(qs, date_field):
+            return dict(
+                qs.annotate(day=TruncDate(date_field)).values('day')
+                .annotate(c=Count('id')).values_list('day', 'c')
+            )
+
+        sessions_submitted_by_day = _counts_by_day(
+            SessionRun.objects.filter(submitted_at__date__gte=trend_start), 'submitted_at',
+        )
+        sessions_approved_by_day = _counts_by_day(
+            SessionRun.objects.filter(status='approved', reviewed_at__date__gte=trend_start), 'reviewed_at',
+        )
+        notes_submitted_by_day = _counts_by_day(
+            LessonNote.objects.filter(submitted_at__date__gte=trend_start), 'submitted_at',
+        )
+        notes_approved_by_day = _counts_by_day(
+            LessonNote.objects.filter(status='approved', approved_at__date__gte=trend_start), 'approved_at',
+        )
+
+        daily_trend = []
+        for i in range(14):
+            day = trend_start + timedelta(days=i)
+            daily_trend.append({
+                'date': day.isoformat(),
+                'sessions_submitted': sessions_submitted_by_day.get(day, 0),
+                'sessions_approved': sessions_approved_by_day.get(day, 0),
+                'notes_submitted': notes_submitted_by_day.get(day, 0),
+                'notes_approved': notes_approved_by_day.get(day, 0),
+            })
+        result['daily_trend'] = daily_trend
+
+        # Staff productivity — sessions/notes recorded in the last 30 days.
+        # distinct=True on both Counts avoids the join fan-out that would
+        # otherwise inflate counts (session_runs and authored_notes are two
+        # separate reverse FKs joined onto the same User row).
+        productivity_start = today - timedelta(days=29)
+        staff_rows = (
+            User.objects.filter(role='staff', is_active=True)
+            .annotate(
+                sessions_count=Count(
+                    'session_runs',
+                    filter=Q(session_runs__started_at__date__gte=productivity_start),
+                    distinct=True,
+                ),
+                notes_count=Count(
+                    'authored_notes',
+                    filter=Q(authored_notes__note_date__gte=productivity_start),
+                    distinct=True,
+                ),
+            )
+            .order_by('-sessions_count', 'first_name')[:10]
+        )
+        result['staff_productivity'] = [
+            {
+                'staff_id': u.id,
+                'staff_name': f'{u.first_name} {u.last_name}'.strip() or u.email,
+                'sessions_count': u.sessions_count,
+                'notes_count': u.notes_count,
+            }
+            for u in staff_rows
         ]
 
     return result
