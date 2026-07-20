@@ -37,13 +37,11 @@ def _require_supervisor(request):
         raise HttpError(403, 'Supervisor or admin access required')
 
 
-def _require_admin(request):
-    if request.user.role != 'admin':
-        raise HttpError(403, 'Admin access required')
-
-
 def _require_settings_permission(request, permission: str):
-    require_permission(request, 'settings')
+    """Enforce the fine-grained settings privilege (e.g. settings_tags_create).
+
+    Privileges are the source of truth — do not also require role=admin.
+    """
     require_permission(request, permission)
 
 
@@ -310,16 +308,14 @@ def list_prompting_templates(request):
 
 @router.post('/programs/templates/prompting', response={201: PromptingTemplateSchema})
 def create_prompting_template(request, data: PromptingTemplateCreateRequest):
-    _require_supervisor(request)
-    _require_settings_permission(request, 'settings_prompting_templates')
+    _require_settings_permission(request, 'settings_prompting_templates_create')
     template = PromptingTemplate.objects.create(created_by=request.user, **data.dict())
     return 201, template
 
 
 @router.patch('/programs/templates/prompting/{template_id}', response=PromptingTemplateSchema)
 def update_prompting_template(request, template_id: int, data: PromptingTemplateUpdateRequest):
-    _require_supervisor(request)
-    _require_settings_permission(request, 'settings_prompting_templates')
+    _require_settings_permission(request, 'settings_prompting_templates_edit')
     try:
         template = PromptingTemplate.objects.get(id=template_id)
     except PromptingTemplate.DoesNotExist:
@@ -332,8 +328,7 @@ def update_prompting_template(request, template_id: int, data: PromptingTemplate
 
 @router.delete('/programs/templates/prompting/{template_id}', response={204: None})
 def delete_prompting_template(request, template_id: int):
-    _require_supervisor(request)
-    _require_settings_permission(request, 'settings_prompting_templates')
+    _require_settings_permission(request, 'settings_prompting_templates_delete')
     try:
         PromptingTemplate.objects.get(id=template_id).delete()
     except PromptingTemplate.DoesNotExist:
@@ -352,16 +347,14 @@ def list_mastery_templates(request):
 
 @router.post('/programs/templates/mastery', response={201: MasteryTemplateSchema})
 def create_mastery_template(request, data: MasteryTemplateCreateRequest):
-    _require_supervisor(request)
-    _require_settings_permission(request, 'settings_mastery_templates')
+    _require_settings_permission(request, 'settings_mastery_templates_create')
     template = MasteryTemplate.objects.create(created_by=request.user, **data.dict())
     return 201, template
 
 
 @router.patch('/programs/templates/mastery/{template_id}', response=MasteryTemplateSchema)
 def update_mastery_template(request, template_id: int, data: MasteryTemplateUpdateRequest):
-    _require_supervisor(request)
-    _require_settings_permission(request, 'settings_mastery_templates')
+    _require_settings_permission(request, 'settings_mastery_templates_edit')
     try:
         template = MasteryTemplate.objects.get(id=template_id)
     except MasteryTemplate.DoesNotExist:
@@ -374,8 +367,7 @@ def update_mastery_template(request, template_id: int, data: MasteryTemplateUpda
 
 @router.delete('/programs/templates/mastery/{template_id}', response={204: None})
 def delete_mastery_template(request, template_id: int):
-    _require_supervisor(request)
-    _require_settings_permission(request, 'settings_mastery_templates')
+    _require_settings_permission(request, 'settings_mastery_templates_delete')
     try:
         MasteryTemplate.objects.get(id=template_id).delete()
     except MasteryTemplate.DoesNotExist:
@@ -397,8 +389,7 @@ def list_workflow_templates(request, include_inactive: bool = False):
 
 @router.post('/programs/templates/workflow', response={201: WorkflowTemplateSchema})
 def create_workflow_template(request, data: WorkflowTemplateCreateRequest):
-    _require_supervisor(request)
-    _require_settings_permission(request, 'settings_workflows')
+    _require_settings_permission(request, 'settings_workflows_create')
     template = WorkflowTemplate.objects.create(created_by=request.user, **data.dict())
     return 201, template
 
@@ -413,8 +404,7 @@ def get_workflow_template(request, template_id: int):
 
 @router.patch('/programs/templates/workflow/{template_id}', response=WorkflowTemplateSchema)
 def update_workflow_template(request, template_id: int, data: WorkflowTemplateUpdateRequest):
-    _require_supervisor(request)
-    _require_settings_permission(request, 'settings_workflows')
+    _require_settings_permission(request, 'settings_workflows_edit')
     try:
         template = WorkflowTemplate.objects.get(id=template_id)
     except WorkflowTemplate.DoesNotExist:
@@ -427,8 +417,7 @@ def update_workflow_template(request, template_id: int, data: WorkflowTemplateUp
 
 @router.delete('/programs/templates/workflow/{template_id}', response={204: None})
 def delete_workflow_template(request, template_id: int):
-    _require_supervisor(request)
-    _require_settings_permission(request, 'settings_workflows')
+    _require_settings_permission(request, 'settings_workflows_delete')
     try:
         WorkflowTemplate.objects.get(id=template_id).delete()
     except WorkflowTemplate.DoesNotExist:
@@ -447,8 +436,7 @@ def list_maintenance_schedules(request):
 
 @router.post('/programs/templates/maintenance', response={201: MaintenanceScheduleSchema})
 def create_maintenance_schedule(request, data: MaintenanceScheduleCreateRequest):
-    _require_supervisor(request)
-    _require_settings_permission(request, 'settings_maintenance_schedules')
+    _require_settings_permission(request, 'settings_maintenance_schedules_create')
     schedule = MaintenanceSchedule.objects.create(created_by=request.user, **data.dict())
     return 201, schedule
 
@@ -463,8 +451,7 @@ def get_maintenance_schedule(request, schedule_id: int):
 
 @router.patch('/programs/templates/maintenance/{schedule_id}', response=MaintenanceScheduleSchema)
 def update_maintenance_schedule(request, schedule_id: int, data: MaintenanceScheduleUpdateRequest):
-    _require_supervisor(request)
-    _require_settings_permission(request, 'settings_maintenance_schedules')
+    _require_settings_permission(request, 'settings_maintenance_schedules_edit')
     try:
         schedule = MaintenanceSchedule.objects.get(id=schedule_id)
     except MaintenanceSchedule.DoesNotExist:
@@ -477,8 +464,7 @@ def update_maintenance_schedule(request, schedule_id: int, data: MaintenanceSche
 
 @router.delete('/programs/templates/maintenance/{schedule_id}', response={204: None})
 def delete_maintenance_schedule(request, schedule_id: int):
-    _require_supervisor(request)
-    _require_settings_permission(request, 'settings_maintenance_schedules')
+    _require_settings_permission(request, 'settings_maintenance_schedules_delete')
     try:
         MaintenanceSchedule.objects.get(id=schedule_id).delete()
     except MaintenanceSchedule.DoesNotExist:
@@ -618,6 +604,8 @@ def _org_qs(request):
 
 @router.get('/org-programs', response=list[OrgProgramSchema])
 def list_org_programs(request, category: str | None = None, status: str | None = None):
+    # Readable by anyone authenticated — used by Program Library and the
+    # client "From Library" picker. Mutations are gated separately.
     qs = _org_qs(request).exclude(status='archived')
     if category:
         qs = qs.filter(category=category)
@@ -628,7 +616,7 @@ def list_org_programs(request, category: str | None = None, status: str | None =
 
 @router.post('/org-programs', response={201: OrgProgramSchema})
 def create_org_program(request, data: OrgProgramCreateRequest):
-    _require_admin(request)
+    require_permission(request, 'org_programs_create')
     program = Program.objects.create(
         is_template=True,
         external_client_id=None,
@@ -657,7 +645,7 @@ def get_org_program(request, program_id: int):
 
 @router.patch('/org-programs/{program_id}', response=OrgProgramSchema)
 def update_org_program(request, program_id: int, data: ProgramUpdateRequest):
-    _require_admin(request)
+    require_permission(request, 'org_programs_edit')
     try:
         program = _org_qs(request).get(id=program_id)
     except Program.DoesNotExist:
@@ -670,7 +658,7 @@ def update_org_program(request, program_id: int, data: ProgramUpdateRequest):
 
 @router.delete('/org-programs/{program_id}', response={204: None})
 def archive_org_program(request, program_id: int):
-    _require_admin(request)
+    require_permission(request, 'org_programs_delete')
     try:
         program = _org_qs(request).get(id=program_id)
     except Program.DoesNotExist:
@@ -718,7 +706,7 @@ def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
 @router.post('/org-programs/{program_id}/assign', response={201: ProgramSchema})
 def assign_org_program_to_client(request, program_id: int, data: AssignOrgProgramRequest):
     """Copy a facility-level program template to a specific client."""
-    _require_admin(request)
+    require_permission(request, 'client_programs_create')
     try:
         template = _org_qs(request).prefetch_related('targets').get(id=program_id)
     except Program.DoesNotExist:
@@ -753,15 +741,13 @@ def list_treatment_areas(request, include_inactive: bool = False):
 
 @router.post('/programs/settings/treatment-areas', response={201: TreatmentAreaSchema})
 def create_treatment_area(request, data: TreatmentAreaRequest):
-    _require_admin(request)
-    _require_settings_permission(request, 'settings_treatment_areas')
+    _require_settings_permission(request, 'settings_treatment_areas_create')
     return 201, TreatmentArea.objects.create(created_by=request.user, **data.dict())
 
 
 @router.patch('/programs/settings/treatment-areas/{pk}', response=TreatmentAreaSchema)
 def update_treatment_area(request, pk: int, data: TreatmentAreaRequest):
-    _require_admin(request)
-    _require_settings_permission(request, 'settings_treatment_areas')
+    _require_settings_permission(request, 'settings_treatment_areas_edit')
     try:
         obj = TreatmentArea.objects.get(id=pk)
     except TreatmentArea.DoesNotExist:
@@ -774,8 +760,7 @@ def update_treatment_area(request, pk: int, data: TreatmentAreaRequest):
 
 @router.delete('/programs/settings/treatment-areas/{pk}', response={204: None})
 def delete_treatment_area(request, pk: int):
-    _require_admin(request)
-    _require_settings_permission(request, 'settings_treatment_areas')
+    _require_settings_permission(request, 'settings_treatment_areas_delete')
     try:
         TreatmentArea.objects.get(id=pk).delete()
     except TreatmentArea.DoesNotExist:
@@ -797,15 +782,13 @@ def list_program_tags(request, include_inactive: bool = False):
 
 @router.post('/programs/settings/tags', response={201: ProgramTagSchema})
 def create_program_tag(request, data: ProgramTagRequest):
-    _require_admin(request)
-    _require_settings_permission(request, 'settings_tags')
+    _require_settings_permission(request, 'settings_tags_create')
     return 201, ProgramTag.objects.create(created_by=request.user, **data.dict())
 
 
 @router.patch('/programs/settings/tags/{pk}', response=ProgramTagSchema)
 def update_program_tag(request, pk: int, data: ProgramTagRequest):
-    _require_admin(request)
-    _require_settings_permission(request, 'settings_tags')
+    _require_settings_permission(request, 'settings_tags_edit')
     try:
         obj = ProgramTag.objects.get(id=pk)
     except ProgramTag.DoesNotExist:
@@ -818,8 +801,7 @@ def update_program_tag(request, pk: int, data: ProgramTagRequest):
 
 @router.delete('/programs/settings/tags/{pk}', response={204: None})
 def delete_program_tag(request, pk: int):
-    _require_admin(request)
-    _require_settings_permission(request, 'settings_tags')
+    _require_settings_permission(request, 'settings_tags_delete')
     try:
         ProgramTag.objects.get(id=pk).delete()
     except ProgramTag.DoesNotExist:
@@ -840,8 +822,7 @@ def list_target_statuses(request, include_inactive: bool = False):
 
 @router.post('/programs/settings/statuses', response={201: TargetStatusSchema})
 def create_target_status(request, data: TargetStatusRequest):
-    _require_admin(request)
-    _require_settings_permission(request, 'settings_statuses')
+    _require_settings_permission(request, 'settings_statuses_create')
     if TargetStatus.objects.filter(key=data.key).exists():
         raise HttpError(409, f'A status with key "{data.key}" already exists')
     payload = data.dict()
@@ -854,8 +835,7 @@ def create_target_status(request, data: TargetStatusRequest):
 
 @router.patch('/programs/settings/statuses/{pk}', response=TargetStatusSchema)
 def update_target_status(request, pk: int, data: TargetStatusUpdateRequest):
-    _require_admin(request)
-    _require_settings_permission(request, 'settings_statuses')
+    _require_settings_permission(request, 'settings_statuses_edit')
     try:
         obj = TargetStatus.objects.get(id=pk)
     except TargetStatus.DoesNotExist:
@@ -875,8 +855,7 @@ def update_target_status(request, pk: int, data: TargetStatusUpdateRequest):
 
 @router.delete('/programs/settings/statuses/{pk}', response={204: None})
 def delete_target_status(request, pk: int):
-    _require_admin(request)
-    _require_settings_permission(request, 'settings_statuses')
+    _require_settings_permission(request, 'settings_statuses_delete')
     try:
         TargetStatus.objects.get(id=pk).delete()
     except TargetStatus.DoesNotExist:
@@ -898,15 +877,13 @@ def list_data_fields(request, include_inactive: bool = False):
 
 @router.post('/programs/settings/data-fields', response={201: ProgramDataFieldSchema})
 def create_data_field(request, data: ProgramDataFieldRequest):
-    _require_admin(request)
-    _require_settings_permission(request, 'settings_data_fields')
+    _require_settings_permission(request, 'settings_data_fields_create')
     return 201, ProgramDataField.objects.create(created_by=request.user, **data.dict())
 
 
 @router.patch('/programs/settings/data-fields/{pk}', response=ProgramDataFieldSchema)
 def update_data_field(request, pk: int, data: ProgramDataFieldRequest):
-    _require_admin(request)
-    _require_settings_permission(request, 'settings_data_fields')
+    _require_settings_permission(request, 'settings_data_fields_edit')
     try:
         obj = ProgramDataField.objects.get(id=pk)
     except ProgramDataField.DoesNotExist:
@@ -919,8 +896,7 @@ def update_data_field(request, pk: int, data: ProgramDataFieldRequest):
 
 @router.delete('/programs/settings/data-fields/{pk}', response={204: None})
 def delete_data_field(request, pk: int):
-    _require_admin(request)
-    _require_settings_permission(request, 'settings_data_fields')
+    _require_settings_permission(request, 'settings_data_fields_delete')
     try:
         ProgramDataField.objects.get(id=pk).delete()
     except ProgramDataField.DoesNotExist:

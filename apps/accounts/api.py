@@ -384,8 +384,7 @@ def _list_native_staffs(request, include_inactive: bool) -> list[StaffSchema]:
 
 @router.post('/users', response={201: UserSchema, 400: ErrorResponse}, auth=jwt_auth)
 def create_user(request, data: UserCreateRequest):
-    if not request.user.has_role('admin'):
-        raise HttpError(403, 'Admin access required')
+    require_permission(request, 'admin_users_edit')
     if User.objects.filter(email=data.email).exists():
         return 400, ErrorResponse(detail='A user with this email already exists')
     user = User.objects.create_user(
@@ -401,8 +400,7 @@ def create_user(request, data: UserCreateRequest):
 
 @router.patch('/users/{user_id}', response=UserSchema, auth=jwt_auth)
 def update_user(request, user_id: int, data: UserUpdateRequest):
-    if not request.user.has_role('admin'):
-        raise HttpError(403, 'Admin access required')
+    require_permission(request, 'admin_users_edit')
     try:
         user = User.objects.get(_same_practice_q(request.user), id=user_id)
     except User.DoesNotExist:
