@@ -1,8 +1,12 @@
+import json
+import logging
 from datetime import date, datetime
 from typing import Any
 
+import redis
 from ninja import Router
 from ninja.errors import HttpError
+from django.conf import settings
 from django.db.models import Q, Count
 
 from apps.accounts.auth import jwt_auth
@@ -13,6 +17,37 @@ from apps.integrations.tpms_auth_client import (
     list_patients,
     list_recurring_appointments,
 )
+
+logger = logging.getLogger(__name__)
+
+_PATIENT_LIST_CACHE_TTL_SECONDS = 60
+_redis_client: 'redis.Redis | None' = None
+
+
+def _redis() -> 'redis.Redis':
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = redis.from_url(settings.REDIS_URL)
+    return _redis_client
+
+
+def _cached_list_patients(access_token: str, external_admin_id: int) -> list[dict[str, Any]]:
+    cache_key = f'tpms:patient-list:{external_admin_id}'
+    try:
+        cached = _redis().get(cache_key)
+        if cached is not None:
+            return json.loads(cached)
+    except redis.RedisError:
+        logger.warning('Redis unavailable for TPMS patient-list cache; falling back to live fetch', exc_info=True)
+
+    patients = list_patients(access_token, search=None)
+
+    try:
+        _redis().set(cache_key, json.dumps(patients), ex=_PATIENT_LIST_CACHE_TTL_SECONDS)
+    except redis.RedisError:
+        logger.warning('Redis unavailable for TPMS patient-list cache; skipping cache write', exc_info=True)
+
+    return patients
 from apps.sessions.schemas import AppointmentSchema
 from .models import Client, ClientStaffAssignment
 from .schemas import (
@@ -339,7 +374,10 @@ def _sync_clients_from_tpms(
         raise HttpError(401, 'TherapyPMS session expired. Please log in again.')
 
     try:
-        patients = list_patients(token, search=search)
+        if search:
+            patients = list_patients(token, search=search)
+        else:
+            patients = _cached_list_patients(token, request.user.external_admin_id)
     except TpmsAuthError as exc:
         if exc.status_code in {401, 403}:
             clear_tpms_access_token(request.user.id)

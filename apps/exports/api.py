@@ -5,43 +5,46 @@ from ninja import Router
 from ninja.errors import HttpError
 
 from apps.accounts.auth import jwt_auth
+from . import tasks
 from .models import Export
 from .schemas import ExportSchema, ExportCreateRequest, ExportDownloadResponse
 
 router = Router(auth=jwt_auth)
 
-# Map export_type → Celery task function
-_TASK_MAP = {
-    'trial_csv': 'apps.exports.tasks.generate_trial_csv',
-    'behavior_csv': 'apps.exports.tasks.generate_behavior_csv',
-    'abc_csv': 'apps.exports.tasks.generate_abc_csv',
-    'raw_zip': 'apps.exports.tasks.generate_raw_zip',
-    'notes_csv': 'apps.exports.tasks.generate_notes_csv',
-    'sessions_csv': 'apps.exports.tasks.generate_sessions_csv',
+_GENERATE_MAP = {
+    'trial_csv': tasks.generate_trial_csv,
+    'behavior_csv': tasks.generate_behavior_csv,
+    'abc_csv': tasks.generate_abc_csv,
+    'raw_zip': tasks.generate_raw_zip,
+    'notes_csv': tasks.generate_notes_csv,
+    'sessions_csv': tasks.generate_sessions_csv,
 }
 
-_VALID_TYPES = set(_TASK_MAP.keys())
+_VALID_TYPES = set(_GENERATE_MAP.keys())
 
 
-def _get_download_url(export: Export) -> str:
+def _get_download_url(export: Export, request) -> str:
     """
     Returns a URL for downloading the export file.
-    With django-storages + S3, default_storage.url() returns a pre-signed URL.
-    In local dev, it returns a /media/ path served by Django.
+    With django-storages + S3, default_storage.url() returns an already-
+    absolute pre-signed URL (build_absolute_uri leaves it untouched). In
+    local dev, it returns a relative /media/ path — build_absolute_uri
+    qualifies it with the backend's own host, since the frontend runs on a
+    different origin and can't resolve a relative path against itself.
     """
     from django.core.files.storage import default_storage
-    return default_storage.url(export.file_path)
+    return request.build_absolute_uri(default_storage.url(export.file_path))
 
 
 # ---------------------------------------------------------------------------
 # Exports
 # ---------------------------------------------------------------------------
 
-@router.post('/exports', response={202: ExportSchema})
+@router.post('/exports', response={200: ExportSchema})
 def request_export(request, data: ExportCreateRequest):
     """
-    Enqueues an async export job. Returns immediately with status=pending.
-    Poll GET /exports/{id} to check when it's ready.
+    Generates the export inline and returns once it's done (completed or
+    failed — either way the row's final status is in the response).
     """
     if data.export_type not in _VALID_TYPES:
         raise HttpError(400, f'Invalid export_type. Valid: {", ".join(sorted(_VALID_TYPES))}')
@@ -67,11 +70,10 @@ def request_export(request, data: ExportCreateRequest):
         created_by=request.user,
     )
 
-    # Dispatch Celery task
-    from celery import current_app
-    current_app.send_task(_TASK_MAP[data.export_type], args=[export.id])
+    _GENERATE_MAP[data.export_type](export.id)
+    export.refresh_from_db()
 
-    return 202, export
+    return 200, export
 
 
 @router.get('/exports', response=list[ExportSchema])
@@ -117,7 +119,7 @@ def download_export(request, export_id: int):
 
     return ExportDownloadResponse(
         export_id=export.id,
-        download_url=_get_download_url(export),
+        download_url=_get_download_url(export, request),
         expires_in_seconds=3600,
     )
 

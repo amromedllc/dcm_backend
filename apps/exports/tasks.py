@@ -1,18 +1,19 @@
 """
-Celery tasks for async file generation.
+Synchronous file generation for exports — runs inline in the request that
+requested it (no Celery/Redis dependency).
 
-Each task:
+Each function:
 1. Marks the Export row as PROCESSING
 2. Generates the file in memory
 3. Writes to Django's default_storage (local media in dev, S3 in production)
 4. Marks the row COMPLETED with file_path, file_size_bytes, row_count
-5. On any exception: marks the row FAILED with error_message
+5. On any exception: marks the row FAILED with error_message and returns
+   normally (does not raise) — the caller always gets back a row with a
+   final status, whether that's completed or failed.
 """
 import csv
 import io
 import zipfile
-from datetime import date, datetime
-from celery import shared_task
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.utils import timezone
@@ -55,13 +56,12 @@ def _save_file(content: bytes, filename: str) -> tuple[str, int]:
 # Trial CSV
 # ---------------------------------------------------------------------------
 
-@shared_task(bind=True, max_retries=2)
-def generate_trial_csv(self, export_id: int):
+def generate_trial_csv(export_id: int) -> None:
     from .models import Export
     from apps.sessions.models import TrialEvent
 
+    export = Export.objects.get(id=export_id)
     try:
-        export = Export.objects.get(id=export_id)
         _mark_processing(export)
 
         params = export.params
@@ -101,22 +101,19 @@ def generate_trial_csv(self, export_id: int):
         _mark_completed(export, path, size, row_count)
 
     except Exception as exc:
-        export = Export.objects.get(id=export_id)
         _mark_failed(export, str(exc))
-        raise self.retry(exc=exc, countdown=30)
 
 
 # ---------------------------------------------------------------------------
 # Behavior CSV
 # ---------------------------------------------------------------------------
 
-@shared_task(bind=True, max_retries=2)
-def generate_behavior_csv(self, export_id: int):
+def generate_behavior_csv(export_id: int) -> None:
     from .models import Export
     from apps.sessions.models import BehaviorEvent
 
+    export = Export.objects.get(id=export_id)
     try:
-        export = Export.objects.get(id=export_id)
         _mark_processing(export)
         params = export.params
 
@@ -155,22 +152,19 @@ def generate_behavior_csv(self, export_id: int):
         _mark_completed(export, path, size, row_count)
 
     except Exception as exc:
-        export = Export.objects.get(id=export_id)
         _mark_failed(export, str(exc))
-        raise self.retry(exc=exc, countdown=30)
 
 
 # ---------------------------------------------------------------------------
 # ABC CSV
 # ---------------------------------------------------------------------------
 
-@shared_task(bind=True, max_retries=2)
-def generate_abc_csv(self, export_id: int):
+def generate_abc_csv(export_id: int) -> None:
     from .models import Export
     from apps.sessions.models import ABCEvent, SessionRun
 
+    export = Export.objects.get(id=export_id)
     try:
-        export = Export.objects.get(id=export_id)
         _mark_processing(export)
         params = export.params
 
@@ -208,22 +202,19 @@ def generate_abc_csv(self, export_id: int):
         _mark_completed(export, path, size, row_count)
 
     except Exception as exc:
-        export = Export.objects.get(id=export_id)
         _mark_failed(export, str(exc))
-        raise self.retry(exc=exc, countdown=30)
 
 
 # ---------------------------------------------------------------------------
 # Raw data ZIP — trials + behaviors + ABC in one archive
 # ---------------------------------------------------------------------------
 
-@shared_task(bind=True, max_retries=2)
-def generate_raw_zip(self, export_id: int):
+def generate_raw_zip(export_id: int) -> None:
     from .models import Export
-    from apps.sessions.models import TrialEvent, BehaviorEvent, ABCEvent, SessionRun
+    from apps.sessions.models import TrialEvent, BehaviorEvent, ABCEvent
 
+    export = Export.objects.get(id=export_id)
     try:
-        export = Export.objects.get(id=export_id)
         _mark_processing(export)
         params = export.params
         program_id = params.get('program_id')
@@ -297,9 +288,7 @@ def generate_raw_zip(self, export_id: int):
         _mark_completed(export, path, size, total_rows)
 
     except Exception as exc:
-        export = Export.objects.get(id=export_id)
         _mark_failed(export, str(exc))
-        raise self.retry(exc=exc, countdown=30)
 
 
 # ---------------------------------------------------------------------------
@@ -317,13 +306,12 @@ def _target_ids_for_program(program_id: int | None) -> list[int]:
 # Notes CSV — all notes for a client
 # ---------------------------------------------------------------------------
 
-@shared_task(bind=True, max_retries=2)
-def generate_notes_csv(self, export_id: int):
+def generate_notes_csv(export_id: int) -> None:
     from .models import Export
     from apps.notes.models import LessonNote
 
+    export = Export.objects.get(id=export_id)
     try:
-        export = Export.objects.get(id=export_id)
         _mark_processing(export)
         params = export.params
 
@@ -369,23 +357,20 @@ def generate_notes_csv(self, export_id: int):
         _mark_completed(export, path, size, row_count)
 
     except Exception as exc:
-        export = Export.objects.get(id=export_id)
         _mark_failed(export, str(exc))
-        raise self.retry(exc=exc, countdown=30)
 
 
 # ---------------------------------------------------------------------------
 # Sessions CSV — all sessions for a client
 # ---------------------------------------------------------------------------
 
-@shared_task(bind=True, max_retries=2)
-def generate_sessions_csv(self, export_id: int):
+def generate_sessions_csv(export_id: int) -> None:
     from .models import Export
-    from apps.sessions.models import SessionRun, TrialEvent
+    from apps.sessions.models import SessionRun
     from django.db.models import Count
 
+    export = Export.objects.get(id=export_id)
     try:
-        export = Export.objects.get(id=export_id)
         _mark_processing(export)
         params = export.params
 
@@ -433,6 +418,4 @@ def generate_sessions_csv(self, export_id: int):
         _mark_completed(export, path, size, row_count)
 
     except Exception as exc:
-        export = Export.objects.get(id=export_id)
         _mark_failed(export, str(exc))
-        raise self.retry(exc=exc, countdown=30)
