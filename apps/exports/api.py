@@ -36,10 +36,6 @@ def _get_download_url(export: Export, request) -> str:
     return request.build_absolute_uri(default_storage.url(export.file_path))
 
 
-# ---------------------------------------------------------------------------
-# Exports
-# ---------------------------------------------------------------------------
-
 @router.post('/exports', response={200: ExportSchema})
 def request_export(request, data: ExportCreateRequest):
     """
@@ -49,7 +45,6 @@ def request_export(request, data: ExportCreateRequest):
     if data.export_type not in _VALID_TYPES:
         raise HttpError(400, f'Invalid export_type. Valid: {", ".join(sorted(_VALID_TYPES))}')
 
-    # Basic param validation per type
     if data.export_type in ('trial_csv', 'behavior_csv', 'raw_zip') and not data.program_id:
         raise HttpError(400, f'{data.export_type} requires program_id')
     if data.export_type == 'abc_csv' and not data.client_id:
@@ -112,7 +107,6 @@ def download_export(request, export_id: int):
     if export.expires_at and export.expires_at < timezone.now():
         raise HttpError(410, 'This export has expired and must be regenerated')
 
-    # Increment download counter
     export.download_count += 1
     export.last_downloaded_at = timezone.now()
     export.save(update_fields=['download_count', 'last_downloaded_at'])

@@ -21,10 +21,7 @@ else:
 
 CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=['https://api.progressly.io'])
 
-# ---------------------------------------------------------------------------
 # Multi-tenant setup (django-tenants, schema-based isolation)
-# ---------------------------------------------------------------------------
-
 SHARED_APPS = [
     'django_tenants',
     'corsheaders',
@@ -69,10 +66,6 @@ TENANT_MODEL = 'tenants.Organization'
 TENANT_DOMAIN_MODEL = 'tenants.Domain'
 SHOW_PUBLIC_IF_NO_TENANT_FOUND = False
 
-# ---------------------------------------------------------------------------
-# Middleware
-# ---------------------------------------------------------------------------
-
 MIDDLEWARE = [
     'shared.middleware.TenantResolverMiddleware',
     'corsheaders.middleware.CorsMiddleware',
@@ -109,10 +102,7 @@ TEMPLATES = [
     },
 ]
 
-# ---------------------------------------------------------------------------
 # Database — schema-based multi-tenancy via django-tenants
-# ---------------------------------------------------------------------------
-
 if env("DB_NAME"):
     DATABASES = {
         "default": {
@@ -137,10 +127,6 @@ DATABASE_ROUTERS = [
     'django_tenants.routers.TenantSyncRouter',
 ]
 
-# ---------------------------------------------------------------------------
-# Auth
-# ---------------------------------------------------------------------------
-
 AUTH_USER_MODEL = 'accounts.User'
 
 AUTH_PASSWORD_VALIDATORS = [
@@ -150,33 +136,18 @@ AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
 ]
 
-# ---------------------------------------------------------------------------
-# JWT
-# ---------------------------------------------------------------------------
-
 JWT_SECRET_KEY = env('JWT_SECRET_KEY', default=SECRET_KEY)
 JWT_ALGORITHM = 'HS256'
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES = env.int('JWT_ACCESS_TOKEN_EXPIRE_MINUTES', default=15)
 JWT_REFRESH_TOKEN_EXPIRE_DAYS = env.int('JWT_REFRESH_TOKEN_EXPIRE_DAYS', default=7)
 
-# ---------------------------------------------------------------------------
 # TherapyPMS HTTP API (auth — encrypt → login; no direct DB password checks)
-# ---------------------------------------------------------------------------
-
 TPMS_API_BASE_URL = env('TPMS_API_BASE_URL', default='https://app.therapypms.com')
 TPMS_API_TIMEOUT_SECONDS = env.int('TPMS_API_TIMEOUT_SECONDS', default=20)
-
-# ---------------------------------------------------------------------------
-# DocuSeal SSO
-# ---------------------------------------------------------------------------
 
 DOCUSEAL_BASE_URL = env('DOCUSEAL_BASE_URL')
 DOCUSEAL_SSO_SECRET = env('DOCUSEAL_SSO_SECRET')
 DOCUSEAL_WEBHOOK_SECRET = env('DOCUSEAL_WEBHOOK_SECRET', default='')
-
-# ---------------------------------------------------------------------------
-# Redis + Celery
-# ---------------------------------------------------------------------------
 
 REDIS_URL = env('REDIS_URL', default='redis://localhost:6379/0')
 
@@ -188,10 +159,6 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = 'UTC'
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes max per task
-
-# ---------------------------------------------------------------------------
-# Static + Media files
-# ---------------------------------------------------------------------------
 
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
@@ -209,10 +176,6 @@ if not DEBUG and AWS_ACCESS_KEY_ID:
     AWS_S3_FILE_OVERWRITE = False
     AWS_DEFAULT_ACL = 'private'
 
-# ---------------------------------------------------------------------------
-# Internationalisation
-# ---------------------------------------------------------------------------
-
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'UTC'
 USE_I18N = True
@@ -220,20 +183,8 @@ USE_TZ = True
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# ---------------------------------------------------------------------------
-# Tenant base domain (used for subdomain routing)
-# ---------------------------------------------------------------------------
-
 TENANT_BASE_DOMAIN = env('TENANT_BASE_DOMAIN', default='localhost')
 
-# ---------------------------------------------------------------------------
-# CORS (configured per environment)
-# ---------------------------------------------------------------------------
-
-# CORS_ALLOWED_ORIGINS = env.list(
-#     'CORS_ALLOWED_ORIGINS',
-#     default=['http://localhost:5173', 'http://127.0.0.1:5173','https://app.progressly.io'],
-# )
 CORS_ALLOWED_ORIGINS = env.list(
     'CORS_ALLOWED_ORIGINS',
     default=[
@@ -244,22 +195,13 @@ CORS_ALLOWED_ORIGINS = env.list(
         'https://app.progressly.io',
     ],
 )
-# CORS_ALLOWED_ORIGINS = env.list('CORS_ALLOWED_ORIGINS', default=['https://api.progressly.io'])
-# ---------------------------------------------------------------------------
-# Email
-# ---------------------------------------------------------------------------
 
 if DEBUG:
     EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 
-
-
-# ---------------------------------------------------------------------------
-# Sentry (production only — sentry-sdk is a production-only dependency,
-# requirements/production.txt — import deferred inside this block so local
-# dev, which doesn't install it, never tries to import it)
-# ---------------------------------------------------------------------------
-
+# Sentry is a production-only dependency (requirements/production.txt);
+# the import is deferred inside this block so local dev, which doesn't
+# install it, never tries to import it.
 if not DEBUG:
     SENTRY_DSN = env('SENTRY_DSN', default='')
     if SENTRY_DSN:
@@ -273,10 +215,6 @@ if not DEBUG:
             traces_sample_rate=0.1,
             send_default_pii=False,
         )
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 
 if DEBUG:
     LOGGING = {
@@ -311,7 +249,7 @@ else:
                 'class': 'logging.StreamHandler',
                 'formatter': 'json',
             },
-            # Backs GET /auth/admin/logs — see shared/log_buffer.py. Same
+            # Backs GET /auth/admin/logs — see shared/log_buffer.py.
             'ringbuffer': {
                 'class': 'shared.log_buffer.RingBufferHandler',
                 'formatter': 'json',
@@ -322,10 +260,6 @@ else:
             'level': 'INFO',
         },
     }
-
-# ---------------------------------------------------------------------------
-# Unfold admin theme
-# ---------------------------------------------------------------------------
 
 UNFOLD = {
     'SITE_TITLE': 'DCM Admin',

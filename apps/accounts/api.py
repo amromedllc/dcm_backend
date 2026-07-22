@@ -74,33 +74,23 @@ def login(request, data: LoginRequest):
 def _tpms_auth(request, email: str, password: str) -> TokenResponse:
     """Verify credentials via TherapyPMS iOS encrypt/login APIs and issue a DCM token."""
     tenant = getattr(request, 'tenant', None)
-    # print(f'[DCM LOGIN] email={email!r} password_len={len(password)}')
-    # print(
-    #     f'[DCM LOGIN] tenant={getattr(tenant, "schema_name", None)!r} '
-    #     f'tpms_admin_id={getattr(tenant, "tpms_admin_id", None)!r}'
-    # )
     if tenant is None:
-        # print('[DCM LOGIN] ✗ reject: no tenant resolved from Host')
         raise HttpError(401, 'Invalid email or password')
 
     tenant_tpms_admin_id = tenant.tpms_admin_id
     if tenant_tpms_admin_id is None:
         # Fail closed — without a practice mapping we cannot safely scope the session.
-        # print('[DCM LOGIN] ✗ reject: tenant.tpms_admin_id is not set')
         raise HttpError(401, 'Invalid email or password')
 
     try:
-        # print('[DCM LOGIN] calling TherapyPMS API (encrypt → login) …')
         profile = tpms_authenticate(email, password)
     except TpmsAuthError as exc:
         message = str(exc) or 'Invalid email or password'
-        # print(f'[DCM LOGIN] ✗ TPMS auth error: {message!r} payload={getattr(exc, "payload", None)}')
         if 'unavailable' in message.lower() or 'invalid response' in message.lower():
             raise HttpError(502, message) from exc
         raise HttpError(401, 'Invalid email or password') from exc
 
     if not profile.is_active:
-        # print('[DCM LOGIN] ✗ reject: TPMS profile is inactive')
         raise HttpError(403, 'Account is inactive')
 
     external_admin_id = profile.external_admin_id
@@ -108,38 +98,18 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
         existing = User.objects.filter(email__iexact=profile.email or email).first()
         if existing and existing.external_admin_id is not None:
             external_admin_id = existing.external_admin_id
-            # print(
-            #     '[DCM LOGIN] practice id missing in TPMS login payload; '
-            #     f'using stored user.external_admin_id={external_admin_id}'
-            # )
         elif profile.access_token:
             try:
                 external_admin_id = resolve_practice_admin_id(profile.access_token)
-            except Exception as exc:
-                # print(f'[DCM LOGIN] practice-id probe error: {exc!r}')
+            except Exception:
                 external_admin_id = None
-            if external_admin_id is not None:
-                # print(
-                #     '[DCM LOGIN] practice id missing in TPMS login payload; '
-                #     f'resolved via TPMS API admin_id={external_admin_id}'
-                # )
-                pass
 
         if external_admin_id is None and not profile.is_admin:
             # Staff/provider tokens are already practice-scoped by TherapyPMS;
             # bind first-time staff to this hostname's mapped practice.
             external_admin_id = tenant_tpms_admin_id
-            # print(
-            #     '[DCM LOGIN] practice id still missing after probes; '
-            #     f'binding provider to tenant.tpms_admin_id={external_admin_id}'
-            # )
 
         if external_admin_id is None:
-            # print(
-            #     '[DCM LOGIN] ✗ reject: TPMS login OK but practice id missing; '
-            #     f'raw keys={sorted(profile.raw.keys()) if isinstance(profile.raw, dict) else type(profile.raw)} '
-            #     f'raw={profile.raw}'
-            # )
             logger.warning(
                 'TPMS login succeeded but practice id missing for email=%s keys=%s',
                 email,
@@ -149,13 +119,7 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
 
     # Tenant binding (C-01): only accept users belonging to this org's practice.
     if external_admin_id != tenant_tpms_admin_id:
-        # print(
-        #     f'[DCM LOGIN] ✗ reject: practice mismatch '
-        #     f'tpms_admin_id={external_admin_id} != tenant.tpms_admin_id={tenant_tpms_admin_id}'
-        # )
         raise HttpError(401, 'Invalid email or password')
-
-    # print(f'[DCM LOGIN] ✓ practice match admin_id={external_admin_id}; issuing DCM JWT')
 
     dcm_role = _tpms_role_for_employee_type(
         profile.employee_type,
@@ -214,9 +178,6 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
 
     if profile.access_token:
         store_tpms_access_token(user.id, profile.access_token)
-    else:
-        # print('[DCM LOGIN] ⚠ TPMS login OK but access_token missing from payload')
-        pass
 
     return _issue_tokens(user, tenant.pk)
 
@@ -296,10 +257,6 @@ def me_debug(request):
         )
     return out
 
-
-# ---------------------------------------------------------------------------
-# User management (admin only)
-# ---------------------------------------------------------------------------
 
 def _same_practice_q(user: User, prefix: str = '') -> Q:
     """
@@ -418,10 +375,6 @@ def update_user(request, user_id: int, data: UserUpdateRequest):
     return user
 
 
-# ---------------------------------------------------------------------------
-# API key management (admin only)
-# ---------------------------------------------------------------------------
-
 @router.get('/api-keys', response=list[APIKeyListItem], auth=jwt_auth)
 def list_api_keys(request):
     if not request.user.has_role('admin'):
@@ -469,10 +422,6 @@ def get_logs(request, limit: int = 200):
     from shared.log_buffer import get_recent_logs
     return {'logs': get_recent_logs(limit)}
 
-
-# ---------------------------------------------------------------------------
-# Role permissions (admin only)
-# ---------------------------------------------------------------------------
 
 @router.get('/admin/role-permissions', auth=jwt_auth)
 def get_role_permissions(request):

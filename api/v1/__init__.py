@@ -54,36 +54,29 @@ def dashboard(request):
     user = request.user
     today = timezone.now().date()
 
-    # Sessions pending review
     sessions_pending = SessionRun.objects.filter(status='submitted').count()
 
-    # My open sessions (staff)
     my_open_sessions = (
         SessionRun.objects.filter(staff_id=user.id, status='open').count()
         if user.role == 'staff' else None
     )
 
-    # Notes pending review
     notes_pending = LessonNote.objects.filter(status='submitted').count()
 
-    # My draft notes (staff)
     my_draft_notes = (
         LessonNote.objects.filter(staff_id=user.id, status='draft').count()
         if user.role == 'staff' else None
     )
 
-    # Active clients
     active_clients = Client.objects.filter(status='active').count()
 
     # Total clients (all statuses) — the admin dashboard's "Total clients" card
     total_clients = Client.objects.count()
 
-    # Unread notifications for this user
     unread_notifications = Notification.objects.filter(
         recipient_id=user.id, read_at__isnull=True
     ).count()
 
-    # Today's sessions
     sessions_today = SessionRun.objects.filter(started_at__date=today).count()
 
     result = {

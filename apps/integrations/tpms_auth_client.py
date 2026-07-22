@@ -95,7 +95,6 @@ def store_tpms_access_token(user_id: int, token: str) -> None:
         return
     ttl = _ttl_from_token(raw)
     _redis().setex(_tpms_token_key(user_id), ttl, raw)
-    # print(f'[TPMS AUTH] stored access token for user_id={user_id} ttl={ttl}s')
 
 
 def get_tpms_access_token(user_id: int) -> str | None:
@@ -117,21 +116,6 @@ def _request(
     debug_label: str = '',
 ) -> dict[str, Any]:
     url = f'{_base_url()}{path}'
-    label = debug_label or path
-
-    safe_body = None
-    if body is not None:
-        safe_body = {
-            key: f'<redacted len={len(value)}>' if isinstance(value, str) else value
-            for key, value in body.items()
-        }
-    # print(f'[TPMS AUTH] → {method.upper()} {url}')
-    if safe_body is not None:
-        # print(f'[TPMS AUTH]   request body ({label}): {safe_body}')
-        pass
-    if params:
-        # print(f'[TPMS AUTH]   params ({label}): {params}')
-        pass
 
     headers = {
         'Accept': 'application/json',
@@ -153,18 +137,10 @@ def _request(
             timeout=getattr(settings, 'TPMS_API_TIMEOUT_SECONDS', DEFAULT_TIMEOUT_SECONDS),
         )
     except requests.RequestException as exc:
-        # print(f'[TPMS AUTH] ✗ request FAILED ({label}): {exc!r}')
         logger.warning('TPMS request failed (%s %s): %s', method, path, exc)
         raise TpmsAuthError('TherapyPMS authentication service unavailable') from exc
 
     raw_text = response.text
-    safe_text = raw_text
-    if 'Bearer ' in raw_text:
-        safe_text = raw_text[: raw_text.find('Bearer ') + 20] + '...REDACTED'
-    # print(f'[TPMS AUTH] ← status={response.status_code} ({label})')
-    if '/encrypt' not in path:
-        # print(f'[TPMS AUTH]   raw response ({label}): {safe_text[:1000]}')
-        pass
 
     try:
         payload = response.json() if raw_text else {}
@@ -209,8 +185,6 @@ def encrypt_credentials(email: str, password: str) -> tuple[str, str]:
     Send plain email and password to /ios/encrypt (separate calls) and return
     the two ciphertexts for /ios/login.
     """
-    # print(f'[TPMS AUTH] step 1/2 encrypt via API email={email!r} password_len={len(password)}')
-
     email_payload = _post(
         '/api/v1/ios/encrypt',
         {'data': email},
@@ -224,17 +198,11 @@ def encrypt_credentials(email: str, password: str) -> tuple[str, str]:
 
     enc_email = _cipher_from_encrypt_response(email_payload, 'email')
     enc_password = _cipher_from_encrypt_response(password_payload, 'password')
-    # print(
-    #     f'[TPMS AUTH] encrypt ok — email_cipher_len={len(enc_email)} '
-    #     f'password_cipher_len={len(enc_password)}'
-    # )
     return enc_email, enc_password
 
 
 def login_with_encrypted(encrypted_email: str, encrypted_password: str) -> dict[str, Any]:
     """POST /ios/login with encrypt response values as email + password."""
-    # print('[TPMS AUTH] step 2/2 login with encrypt response values')
-
     payload = _post(
         '/api/v1/ios/login',
         {'email': encrypted_email, 'password': encrypted_password},
@@ -248,27 +216,16 @@ def login_with_encrypted(encrypted_email: str, encrypted_password: str) -> dict[
             message = next(iter(message.values()), ['Invalid email or password'])
             if isinstance(message, list):
                 message = message[0] if message else 'Invalid email or password'
-        # print(f'[TPMS AUTH] ✗ Login failed: {message}')
         raise TpmsAuthError(str(message), payload=payload)
 
-    # print('[TPMS AUTH] ✓ Login successful')
     return payload
 
 
 def authenticate(email: str, password: str) -> TpmsAuthProfile:
     """encrypt (email) + encrypt (password) → login → normalized profile."""
-    # print(f'[TPMS AUTH] ========== authenticate start email={email!r} ==========')
     enc_email, enc_password = encrypt_credentials(email, password)
     payload = login_with_encrypted(enc_email, enc_password)
     profile = normalize_login_payload(email, payload)
-    # print(
-    #     '[TPMS AUTH] normalized profile: '
-    #     f'email={profile.email!r} admin_id={profile.external_admin_id} '
-    #     f'employee_id={profile.external_employee_id} is_admin={profile.is_admin} '
-    #     f'active={profile.is_active} has_token={bool(profile.access_token)} '
-    #     f'name={profile.first_name!r} {profile.last_name!r}'
-    # )
-    # print('[TPMS AUTH] ========== authenticate end ==========')
     return profile
 
 
@@ -316,24 +273,20 @@ def resolve_practice_admin_id(access_token: str) -> int | None:
                 access_token=access_token,
                 debug_label=label,
             )
-        except TpmsAuthError as exc:
-            # print(f'[TPMS AUTH] practice-id probe {label} failed: {exc}')
+        except TpmsAuthError:
             continue
         found = _practice_id_from_payload(payload)
         if found is not None:
-            # print(f'[TPMS AUTH] practice id={found} resolved via {label}')
             return found
 
     try:
         _, rows, _ = _fetch_patient_list_page(access_token, 1)
-    except TpmsAuthError as exc:
-        # print(f'[TPMS AUTH] practice-id probe patient-list failed: {exc}')
+    except TpmsAuthError:
         return None
 
     for row in rows[:20]:
         found = _practice_id_from_payload(row)
         if found is not None:
-            # print(f'[TPMS AUTH] practice id={found} resolved via patient-list')
             return found
     return None
 
@@ -441,7 +394,6 @@ def list_patients(access_token: str, *, search: str | None = None) -> list[dict[
     for page in range(1, last_page + 1):
         patients.extend(pages.get(page, []))
 
-    # print(f'[TPMS AUTH] patient list fetched count={len(patients)} pages={last_page}')
     return patients
 
 
@@ -478,10 +430,6 @@ def list_recurring_appointments(
         'appointment_list',
         'data',
     )
-    # print(
-    #     f'[TPMS AUTH] recurring appointments fetched count={len(appointments)} '
-    #     f'patient_ids={patient_ids} provider_ids={provider_ids}'
-    # )
     return appointments
 
 

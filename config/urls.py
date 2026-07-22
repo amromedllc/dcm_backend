@@ -13,7 +13,6 @@ def health(request):
     checks = {}
     http_status = 200
 
-    # Database
     try:
         t = time.monotonic()
         connection.ensure_connection()
@@ -22,7 +21,6 @@ def health(request):
         checks['db'] = {'status': 'error', 'detail': str(e)}
         http_status = 503
 
-    # Cache / Redis
     try:
         from django.core.cache import cache
         t = time.monotonic()

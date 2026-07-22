@@ -143,7 +143,6 @@ def list_notes(
 ):
     qs = LessonNote.objects.all()
 
-    # Scope to the requesting user's accessible records
     if request.user.role == 'staff':
         qs = qs.filter(staff_id=request.user.id)
     elif staff_id:
@@ -287,7 +286,6 @@ def sign_note(request, note_id: int, data: SignNoteRequest):
         if note.status != LessonNote.Status.APPROVED:
             raise HttpError(409, 'Staff and supervisor signatures require an approved note')
 
-    # Prevent duplicate signature by the same person and type
     if NoteSignature.objects.filter(note_id=note_id, signer_id=request.user.id, signature_type=data.signature_type).exists():
         raise HttpError(409, 'You have already signed this note with this signature type')
 

@@ -232,7 +232,6 @@ class Command(BaseCommand):
         total_targets = 0
 
         for i, prog_data in enumerate(PROGRAMS):
-            # Pick workflow
             if prog_data['category'] == 'behavior_reduction':
                 wf = behavior_wf
             elif prog_data['category'] == 'abc_recording':
@@ -296,7 +295,6 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING('No active programs to seed sessions for.'))
             return
 
-        # Build the program snapshot once
         snapshot = build_program_snapshot(client_id=client_id)
 
         now = datetime.now(tz=timezone.utc)

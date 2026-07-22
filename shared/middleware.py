@@ -35,7 +35,6 @@ def _is_rate_limited(key: str) -> bool:
     now = time.monotonic()
     with _rate_lock:
         hits = _rate_store[key]
-        # drop hits outside the window
         _rate_store[key] = [t for t in hits if now - t < _RATE_LIMIT_WINDOW]
         if len(_rate_store[key]) >= _RATE_LIMIT_MAX:
             return True
@@ -91,7 +90,6 @@ class TenantResolverMiddleware:
         from apps.audit.middleware import set_current_request
         set_current_request(request)
 
-        # Rate limit auth endpoints
         if request.path in _RATE_LIMITED_PATHS:
             ip = request.META.get('HTTP_X_FORWARDED_FOR', request.META.get('REMOTE_ADDR', '')).split(',')[0].strip()
             key = hashlib.sha256(f'{request.path}:{ip}'.encode()).hexdigest()[:16]

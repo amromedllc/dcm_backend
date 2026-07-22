@@ -556,8 +556,8 @@ def list_sessions(
             except (TypeError, ValueError):
                 continue
 
-    # behavior/abc counts each used to be computed per-row) — see
-    # _trial_summaries_for_sessions for why that mattered.
+    # Batched trial/behavior/abc counts instead of computing them per-row —
+    # see _trial_summaries_for_sessions for why that mattered.
     session_ids = [s.id for s in sessions]
     trial_summaries = _trial_summaries_for_sessions(sessions)
     behavior_counts = dict(
