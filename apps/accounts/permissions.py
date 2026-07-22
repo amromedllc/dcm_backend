@@ -78,6 +78,8 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'org_programs_create': True,
         'org_programs_edit': True,
         'org_programs_delete': True,
+        # Exports
+        'exports_view': True,
         # Settings
         'settings_view': True,
         'settings_treatment_areas_view': True,
@@ -162,6 +164,8 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'org_programs_create': False,
         'org_programs_edit': False,
         'org_programs_delete': False,
+        # Exports
+        'exports_view': True,
         # Settings
         'settings_view': False,
         'settings_treatment_areas_view': False,
@@ -246,6 +250,8 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'org_programs_create': False,
         'org_programs_edit': False,
         'org_programs_delete': False,
+        # Exports
+        'exports_view': False,
         # Settings
         'settings_view': False,
         'settings_treatment_areas_view': False,

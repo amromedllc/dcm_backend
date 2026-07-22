@@ -1,3 +1,5 @@
+from datetime import date
+
 from django.utils import timezone
 from ninja import Router
 from ninja.errors import HttpError
@@ -55,6 +57,9 @@ def request_export(request, data: ExportCreateRequest):
         raise HttpError(400, f'{data.export_type} requires client_id')
 
     params = data.dict(exclude={'export_type'}, exclude_none=True)
+    for key in ('date_from', 'date_to'):
+        if isinstance(params.get(key), date):
+            params[key] = params[key].isoformat()
 
     export = Export.objects.create(
         export_type=data.export_type,
