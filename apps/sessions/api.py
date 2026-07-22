@@ -10,6 +10,7 @@ from .schemas import (
     AppointmentSchema, AppointmentCreateRequest, AppointmentUpdateRequest,
     AssignProgramsRequest, AssignedProgramSchema,
     SessionRunSchema, SessionStartRequest, SessionSubmitRequest, SessionRejectRequest,
+    SessionLinkAppointmentRequest,
     SessionSubmitResponse, TargetAdvancedSchema,
     TrialEventSchema, TrialEventCreateRequest,
     BehaviorEventSchema, BehaviorEventCreateRequest,
@@ -583,6 +584,30 @@ def list_sessions(
 @router.get('/sessions/{session_id}', response=SessionRunSchema)
 def get_session(request, session_id: int):
     session = _get_session_or_404(session_id, request)
+    return _serialize_session(session)
+
+
+@router.post('/sessions/{session_id}/link-appointment', response=SessionRunSchema)
+def link_session_appointment(request, session_id: int, data: SessionLinkAppointmentRequest):
+    """
+    Supervisor links a walk-in recording (no appointment_id) to an appointment
+    after the fact — e.g. staff started the session ad-hoc instead of from
+    the schedule, or the appointment wasn't in the schedule yet when they
+    recorded. Web-only; moves the session out of the client's "Walk-in
+    Recordings" bucket and under that appointment's date group instead.
+    """
+    if request.user.role not in ('admin', 'supervisor'):
+        raise HttpError(403, 'Supervisor or admin access required')
+
+    session = _get_session_or_404(session_id, request)
+    appt = _find_appointment(data.appointment_id)
+    if not appt:
+        raise HttpError(404, 'Appointment not found')
+    if appt.external_client_id != session.external_client_id:
+        raise HttpError(400, "That appointment belongs to a different client than this session")
+
+    session.external_appointment_id = data.appointment_id
+    session.save(update_fields=['external_appointment_id'])
     return _serialize_session(session)
 
 

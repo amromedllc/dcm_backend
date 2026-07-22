@@ -103,6 +103,10 @@ class SessionStartRequest(Schema):
     lesson_id: int | None = None
 
 
+class SessionLinkAppointmentRequest(Schema):
+    appointment_id: int
+
+
 class SessionSubmitRequest(Schema):
     ended_at: datetime | None = None
 
