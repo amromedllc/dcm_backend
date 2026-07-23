@@ -39,6 +39,27 @@ class MasteryTemplate(TenantAwareModel):
         return self.name
 
 
+class FadingTemplate(TenantAwareModel):
+    """
+    Defines prompt-fading advancement/regression rules applied to a target's
+    current prompt level (an index into its PromptingTemplate.levels), evaluated
+    at whichever level the target currently sits.
+    Example rules: {"consecutive_sessions": 3, "threshold_pct": 90, "minimum_trials": 5,
+                     "regression_threshold_pct": 50}
+    """
+    name = models.CharField(max_length=200)
+    description = models.TextField(blank=True)
+    rules = models.JSONField(default=dict)
+    is_org_default = models.BooleanField(default=False)
+
+    class Meta:
+        app_label = 'programs'
+        ordering = ['name']
+
+    def __str__(self) -> str:
+        return self.name
+
+
 class Program(TenantAwareModel):
     class Category(models.TextChoices):
         SKILL_ACQUISITION = 'skill_acquisition', 'Skill Acquisition'
@@ -74,6 +95,12 @@ class Program(TenantAwareModel):
         null=True, blank=True,
         related_name='programs',
     )
+    fading_template = models.ForeignKey(
+        'FadingTemplate',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='programs',
+    )
     category = models.CharField(max_length=30, choices=Category.choices, default=Category.SKILL_ACQUISITION)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
     phase = models.CharField(max_length=20, choices=Phase.choices, default=Phase.TEACHING, blank=True)
@@ -85,7 +112,7 @@ class Program(TenantAwareModel):
     display_order = models.PositiveIntegerField(default=0, db_index=True)
     archived_at = models.DateTimeField(null=True, blank=True)
 
-    _org_scoped_fk_fields = ('workflow_template', 'maintenance_schedule')
+    _org_scoped_fk_fields = ('workflow_template', 'maintenance_schedule', 'fading_template')
 
     class Meta:
         app_label = 'programs'
@@ -119,6 +146,10 @@ class Target(TenantAwareModel):
         DISCONTINUED = 'discontinued', 'Discontinued'
 
     class MasteryMode(models.TextChoices):
+        MANUAL    = 'manual',    'Manual'
+        AUTOMATIC = 'automatic', 'Automatic'
+
+    class FadingMode(models.TextChoices):
         MANUAL    = 'manual',    'Manual'
         AUTOMATIC = 'automatic', 'Automatic'
 
@@ -183,7 +214,17 @@ class Target(TenantAwareModel):
         null=True, blank=True,
         related_name='targets',
     )
+    fading_template = models.ForeignKey(
+        'FadingTemplate',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='targets',
+    )
     maintenance_episodes_completed = models.PositiveIntegerField(default=0)
+    fading_mode = models.CharField(max_length=10, choices=FadingMode.choices, default=FadingMode.MANUAL)
+    # 0-based index into prompting_template.levels — most-intrusive-first
+    # (index 0 = e.g. Full Physical). Meaningless if prompting_template is null.
+    current_prompt_level_index = models.PositiveSmallIntegerField(default=0)
     sd_text = models.TextField(blank=True, verbose_name='Discriminative Stimulus')
     teaching_instructions = models.TextField(blank=True)
     # No longer choice-constrained — status keys are org-configurable via TargetStatus.
@@ -197,7 +238,10 @@ class Target(TenantAwareModel):
     # to a different organization than its Program, so derive rather than
     # rely on the ambient tenant context (which could theoretically be
     # wrong if this is ever created from a background job).
-    _org_scoped_fk_fields = ('prompting_template', 'mastery_template', 'workflow_template', 'maintenance_schedule')
+    _org_scoped_fk_fields = (
+        'prompting_template', 'mastery_template', 'workflow_template',
+        'maintenance_schedule', 'fading_template',
+    )
 
     def _derive_organization_id(self) -> int | None:
         return self.program.organization_id
@@ -318,6 +362,42 @@ class TargetStatusChange(TenantAwareModel):
 
     def __str__(self) -> str:
         return f'Target {self.target_id}: {self.from_status} → {self.to_status} ({self.trigger})'
+
+
+class TargetPromptLevelChange(TenantAwareModel):
+    """
+    Immutable audit record of every target prompt-level (fading) transition.
+    created_by is null for automatic (fading-driven) changes; set for manual changes.
+
+    from_level_label/to_level_label are stored alongside the indices so historical
+    rows stay readable even if PromptingTemplate.levels is later edited/reordered —
+    same reasoning as TrialEvent.target_name existing alongside target_id.
+    """
+    class Trigger(models.TextChoices):
+        MANUAL = 'manual', 'Manual'
+        AUTO_FADING = 'auto_fading', 'Automatic — Fading Criteria Met'
+
+    target = models.ForeignKey(
+        Target,
+        on_delete=models.CASCADE,
+        related_name='prompt_level_changes',
+    )
+    from_level_index = models.PositiveSmallIntegerField()
+    to_level_index = models.PositiveSmallIntegerField()
+    from_level_label = models.CharField(max_length=100)
+    to_level_label = models.CharField(max_length=100)
+    trigger = models.CharField(max_length=20, choices=Trigger.choices)
+    session_run_id = models.PositiveIntegerField(null=True, blank=True)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.target.organization_id
+
+    class Meta:
+        app_label = 'programs'
+        ordering = ['-created_at']
+
+    def __str__(self) -> str:
+        return f'Target {self.target_id}: {self.from_level_label} → {self.to_level_label} ({self.trigger})'
 
 
 class TreatmentArea(TenantAwareModel):

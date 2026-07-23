@@ -81,10 +81,13 @@ def _assert_editable(session_run) -> None:
         raise HttpError(409, f'Session is {session_run.status} and cannot be modified')
 
 
-def submit_session(session_run, staff_user) -> list:
-    """Move a session from open → submitted, then evaluate target workflow advancement.
+def submit_session(session_run, staff_user) -> tuple[list, list]:
+    """Move a session from open → submitted, then evaluate target workflow
+    advancement and prompt-level fading.
 
-    Returns the list of Target objects whose status was automatically advanced.
+    Returns (advanced_targets, faded_targets) — the Target objects whose
+    status was automatically advanced, and whose prompt level was automatically
+    faded, respectively.
     """
     _assert_editable(session_run)
     if session_run.staff_id != staff_user.id and staff_user.role not in ('admin', 'supervisor'):
@@ -104,8 +107,10 @@ def submit_session(session_run, staff_user) -> list:
     from apps.notifications.service import notify_session_submitted
     notify_session_submitted(session_run)
 
-    from apps.programs.services import evaluate_session_mastery
-    return evaluate_session_mastery(session_run)
+    from apps.programs.services import evaluate_session_mastery, evaluate_session_fading
+    advanced = evaluate_session_mastery(session_run)
+    faded = evaluate_session_fading(session_run)
+    return advanced, faded
 
 
 def approve_session(session_run, reviewer) -> None:

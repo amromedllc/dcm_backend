@@ -6,10 +6,10 @@ from apps.accounts.auth import jwt_auth
 from apps.accounts.permissions import require_permission
 from .models import (
     Program, Target, PromptingTemplate, MasteryTemplate,
-    WorkflowTemplate, MaintenanceSchedule,
+    WorkflowTemplate, MaintenanceSchedule, FadingTemplate,
     Lesson, LessonProgram,
     TreatmentArea, ProgramTag, ProgramDataField, TargetStatus,
-    TargetStatusChange,
+    TargetStatusChange, TargetPromptLevelChange,
 )
 from .schemas import (
     ProgramSchema, ProgramListSchema, ProgramCreateRequest, ProgramUpdateRequest,
@@ -19,13 +19,14 @@ from .schemas import (
     MasteryTemplateSchema, MasteryTemplateCreateRequest, MasteryTemplateUpdateRequest,
     WorkflowTemplateSchema, WorkflowTemplateCreateRequest, WorkflowTemplateUpdateRequest,
     MaintenanceScheduleSchema, MaintenanceScheduleCreateRequest, MaintenanceScheduleUpdateRequest,
+    FadingTemplateSchema, FadingTemplateCreateRequest, FadingTemplateUpdateRequest,
     LessonSchema, LessonCreateRequest, LessonUpdateRequest, AddProgramToLessonRequest,
     LessonProgramSchema,
     OrgProgramSchema, OrgProgramCreateRequest, AssignOrgProgramRequest,
     TreatmentAreaSchema, TreatmentAreaRequest,
     ProgramTagSchema, ProgramTagRequest,
     ProgramDataFieldSchema, ProgramDataFieldRequest,
-    TargetStatusChangeSchema,
+    TargetStatusChangeSchema, TargetPromptLevelChangeSchema,
     TargetStatusSchema, TargetStatusRequest, TargetStatusUpdateRequest,
 )
 
@@ -60,6 +61,7 @@ def _serialize_program(program: Program, include_targets: bool = False) -> dict:
         'instructions': program.instructions,
         'workflow_template_id': program.workflow_template_id,
         'maintenance_schedule_id': program.maintenance_schedule_id,
+        'fading_template_id': program.fading_template_id,
         'display_order': program.display_order,
         'archived_at': program.archived_at,
         'created_at': program.created_at,
@@ -112,6 +114,7 @@ def create_program(request, data: ProgramCreateRequest):
         instructions=data.instructions,
         workflow_template_id=data.workflow_template_id,
         maintenance_schedule_id=data.maintenance_schedule_id,
+        fading_template_id=data.fading_template_id,
         display_order=data.display_order,
         created_by=request.user,
     )
@@ -140,6 +143,8 @@ def update_program(request, program_id: int, data: ProgramUpdateRequest):
     program.save()
     if 'workflow_template_id' in updates:
         program.targets.update(workflow_template_id=program.workflow_template_id)
+    if 'fading_template_id' in updates:
+        program.targets.update(fading_template_id=program.fading_template_id)
     return {**_serialize_program(program, include_targets=True)}
 
 
@@ -182,6 +187,8 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
     target_data = data.dict()
     if program.workflow_template_id and not target_data.get('workflow_template_id'):
         target_data['workflow_template_id'] = program.workflow_template_id
+    if program.fading_template_id and not target_data.get('fading_template_id'):
+        target_data['fading_template_id'] = program.fading_template_id
     if not target_data.get('status'):
         default_status = TargetStatus.objects.filter(is_default=True).first()
         target_data['status'] = default_status.key if default_status else Target.Status.WAITING
@@ -208,8 +215,13 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
         target = Target.objects.get(id=target_id)
     except Target.DoesNotExist:
         raise HttpError(404, 'Target not found')
-    for field, value in data.dict(exclude_none=True).items():
+    updates = data.dict(exclude_none=True)
+    for field, value in updates.items():
         setattr(target, field, value)
+    if 'prompting_template_id' in updates:
+        # Swapping the level hierarchy invalidates whatever level index the
+        # target was previously faded to — reset to the most-intrusive level.
+        target.current_prompt_level_index = 0
     target.save()
     return target
 
@@ -252,6 +264,37 @@ def target_history(request, target_id: int):
     return result
 
 
+@router.get('/targets/{target_id}/prompt-level-history', response=list[TargetPromptLevelChangeSchema])
+def target_prompt_level_history(request, target_id: int):
+    qs = (
+        TargetPromptLevelChange.objects
+        .filter(target_id=target_id)
+        .select_related('created_by')
+        .order_by('-created_at')[:50]
+    )
+    result = []
+    for entry in qs:
+        changed_by = None
+        if entry.created_by_id:
+            u = entry.created_by
+            changed_by = (
+                f'{u.first_name} {u.last_name}'.strip()
+                or u.email
+            )
+        result.append(TargetPromptLevelChangeSchema(
+            id=entry.id,
+            from_level_index=entry.from_level_index,
+            to_level_index=entry.to_level_index,
+            from_level_label=entry.from_level_label,
+            to_level_label=entry.to_level_label,
+            trigger=entry.trigger,
+            session_run_id=entry.session_run_id,
+            changed_by=changed_by,
+            created_at=entry.created_at,
+        ))
+    return result
+
+
 
 # FK id fields bulk_update_targets accepts, mapped to the org-scoped manager
 # each must be re-validated against — QuerySet.update() skips Target.save()'s
@@ -262,6 +305,7 @@ _BULK_UPDATE_FK_MODELS = {
     'mastery_template_id': MasteryTemplate,
     'workflow_template_id': WorkflowTemplate,
     'maintenance_schedule_id': MaintenanceSchedule,
+    'fading_template_id': FadingTemplate,
 }
 
 
@@ -278,6 +322,8 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
         if fk_id is not None and not model.objects.filter(id=fk_id).exists():
             raise HttpError(400, f'Invalid {field_name}: {fk_id}')
 
+    if 'prompting_template_id' in updates:
+        updates['current_prompt_level_index'] = 0
     updates['updated_at'] = timezone.now()
     updated = Target.objects.filter(
         id__in=data.target_ids,
@@ -371,6 +417,45 @@ def delete_mastery_template(request, template_id: int):
     try:
         MasteryTemplate.objects.get(id=template_id).delete()
     except MasteryTemplate.DoesNotExist:
+        raise HttpError(404, 'Template not found')
+    return 204, None
+
+
+# ---------------------------------------------------------------------------
+# Fading templates
+# ---------------------------------------------------------------------------
+
+@router.get('/programs/templates/fading', response=list[FadingTemplateSchema])
+def list_fading_templates(request):
+    return list(FadingTemplate.objects.all())
+
+
+@router.post('/programs/templates/fading', response={201: FadingTemplateSchema})
+def create_fading_template(request, data: FadingTemplateCreateRequest):
+    _require_settings_permission(request, 'settings_fading_templates_create')
+    template = FadingTemplate.objects.create(created_by=request.user, **data.dict())
+    return 201, template
+
+
+@router.patch('/programs/templates/fading/{template_id}', response=FadingTemplateSchema)
+def update_fading_template(request, template_id: int, data: FadingTemplateUpdateRequest):
+    _require_settings_permission(request, 'settings_fading_templates_edit')
+    try:
+        template = FadingTemplate.objects.get(id=template_id)
+    except FadingTemplate.DoesNotExist:
+        raise HttpError(404, 'Template not found')
+    for field, value in data.dict(exclude_none=True).items():
+        setattr(template, field, value)
+    template.save()
+    return template
+
+
+@router.delete('/programs/templates/fading/{template_id}', response={204: None})
+def delete_fading_template(request, template_id: int):
+    _require_settings_permission(request, 'settings_fading_templates_delete')
+    try:
+        FadingTemplate.objects.get(id=template_id).delete()
+    except FadingTemplate.DoesNotExist:
         raise HttpError(404, 'Template not found')
     return 204, None
 
@@ -628,6 +713,7 @@ def create_org_program(request, data: OrgProgramCreateRequest):
         objective=data.objective,
         instructions=data.instructions,
         workflow_template_id=data.workflow_template_id,
+        fading_template_id=data.fading_template_id,
         display_order=data.display_order,
         created_by=request.user,
     )

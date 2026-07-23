@@ -11,7 +11,7 @@ from .schemas import (
     AssignProgramsRequest, AssignedProgramSchema,
     SessionRunSchema, SessionStartRequest, SessionSubmitRequest, SessionRejectRequest,
     SessionLinkAppointmentRequest,
-    SessionSubmitResponse, TargetAdvancedSchema,
+    SessionSubmitResponse, TargetAdvancedSchema, TargetFadedSchema,
     TrialEventSchema, TrialEventCreateRequest,
     BehaviorEventSchema, BehaviorEventCreateRequest,
     ABCEventSchema, ABCEventCreateRequest,
@@ -759,7 +759,7 @@ def submit(request, session_id: int, data: SessionSubmitRequest):
     session = _get_session_or_404(session_id, request)
     if data.ended_at:
         session.ended_at = data.ended_at
-    advanced = submit_session(session, request.user)
+    advanced, faded = submit_session(session, request.user)
     return {
         'session': _serialize_session(session),
         'advanced_targets': [
@@ -769,6 +769,14 @@ def submit(request, session_id: int, data: SessionSubmitRequest):
                 to_status=t.status,
             )
             for t in advanced
+        ],
+        'faded_targets': [
+            TargetFadedSchema(
+                name=t.name,
+                from_level_label=t._pre_fade_from_label,
+                to_level_label=t._pre_fade_to_label,
+            )
+            for t in faded
         ],
     }
 

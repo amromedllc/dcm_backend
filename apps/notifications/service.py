@@ -83,3 +83,27 @@ def notify_target_advanced(target, session_run):
                 'session_id': session_run.id,
             },
         )
+
+
+def notify_target_prompt_level_changed(target, session_run, direction: str, new_level_label: str):
+    """Notify admins/supervisors that a target's prompt level auto-faded.
+
+    direction: 'advanced' or 'regressed'.
+    """
+    from apps.accounts.models import User
+    reviewers = User.objects.filter(role__in=['admin', 'supervisor'])
+    for reviewer in reviewers:
+        _create(
+            recipient_id=reviewer.id,
+            event_type='target_prompt_level_changed',
+            title=f'Target prompt level {direction}: {target.name}',
+            body=f'"{target.name}" {direction} to prompt level "{new_level_label}" automatically.',
+            data={
+                'target_id': target.id,
+                'target_name': target.name,
+                'direction': direction,
+                'new_level_index': target.current_prompt_level_index,
+                'new_level_label': new_level_label,
+                'session_id': session_run.id,
+            },
+        )

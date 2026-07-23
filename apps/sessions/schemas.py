@@ -117,9 +117,16 @@ class TargetAdvancedSchema(Schema):
     to_status: str
 
 
+class TargetFadedSchema(Schema):
+    name: str
+    from_level_label: str
+    to_level_label: str
+
+
 class SessionSubmitResponse(Schema):
     session: SessionRunSchema
     advanced_targets: list[TargetAdvancedSchema] = []
+    faded_targets: list[TargetFadedSchema] = []
 
 
 class SessionRejectRequest(Schema):

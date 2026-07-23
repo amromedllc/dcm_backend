@@ -138,6 +138,33 @@ class MasteryTemplateUpdateRequest(Schema):
 
 
 # ---------------------------------------------------------------------------
+# Fading templates
+# ---------------------------------------------------------------------------
+
+class FadingTemplateSchema(Schema):
+    id: int
+    name: str
+    description: str
+    rules: dict[str, Any]
+    is_org_default: bool
+    created_at: datetime
+
+
+class FadingTemplateCreateRequest(Schema):
+    name: str
+    description: str = ''
+    rules: dict[str, Any]
+    is_org_default: bool = False
+
+
+class FadingTemplateUpdateRequest(Schema):
+    name: str | None = None
+    description: str | None = None
+    rules: dict[str, Any] | None = None
+    is_org_default: bool | None = None
+
+
+# ---------------------------------------------------------------------------
 # Programs
 # ---------------------------------------------------------------------------
 
@@ -163,6 +190,7 @@ class ProgramSchema(Schema):
     instructions: str = ''
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
+    fading_template_id: int | None = None
     display_order: int
     archived_at: datetime | None
     created_at: datetime
@@ -181,6 +209,7 @@ class ProgramListSchema(Schema):
     tags: list[str] = []
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
+    fading_template_id: int | None = None
     display_order: int
     target_count: int = 0
     target_status_counts: dict[str, int] = {}
@@ -200,6 +229,7 @@ class ProgramCreateRequest(Schema):
     instructions: str = ''
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
+    fading_template_id: int | None = None
     display_order: int = 0
 
 
@@ -215,6 +245,7 @@ class ProgramUpdateRequest(Schema):
     instructions: str | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
+    fading_template_id: int | None = None
     display_order: int | None = None
 
 
@@ -232,11 +263,14 @@ class TargetSchema(Schema):
     mastery_template_id: int | None
     workflow_template_id: int | None
     maintenance_schedule_id: int | None
+    fading_template_id: int | None
     maintenance_episodes_completed: int
     sd_text: str
     teaching_instructions: str
     status: str
     mastery_mode: str
+    fading_mode: str
+    current_prompt_level_index: int
     display_order: int
     is_visible_to_staff: bool
     created_at: datetime
@@ -251,6 +285,7 @@ class TargetCreateRequest(Schema):
     mastery_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
+    fading_template_id: int | None = None
     sd_text: str = ''
     teaching_instructions: str = ''
     status: str = ''  # empty = resolve server-side to the org's default TargetStatus
@@ -266,10 +301,13 @@ class TargetUpdateRequest(Schema):
     mastery_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
+    fading_template_id: int | None = None
     sd_text: str | None = None
     teaching_instructions: str | None = None
     status: str | None = None
     mastery_mode: str | None = None
+    fading_mode: str | None = None
+    current_prompt_level_index: int | None = None
     display_order: int | None = None
     is_visible_to_staff: bool | None = None
 
@@ -280,6 +318,7 @@ class BulkUpdateTargetsRequest(Schema):
     # Only fields present (non-null) will be written — preserves other fields
     name: str | None = None
     mastery_mode: str | None = None
+    fading_mode: str | None = None
     status: str | None = None
     measurement_type: str | None = None
     sd_text: str | None = None
@@ -288,6 +327,7 @@ class BulkUpdateTargetsRequest(Schema):
     mastery_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
+    fading_template_id: int | None = None
     is_visible_to_staff: bool | None = None
 
 
@@ -357,6 +397,7 @@ class OrgProgramSchema(Schema):
     instructions: str
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
+    fading_template_id: int | None = None
     display_order: int
     target_count: int = 0
     targets: list[TargetSummarySchema] = []
@@ -374,6 +415,7 @@ class OrgProgramCreateRequest(Schema):
     instructions: str = ''
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
+    fading_template_id: int | None = None
     display_order: int = 0
 
 
@@ -489,6 +531,18 @@ class TargetStatusChangeSchema(Schema):
     id: int
     from_status: str
     to_status: str
+    trigger: str
+    session_run_id: int | None
+    changed_by: str | None
+    created_at: datetime
+
+
+class TargetPromptLevelChangeSchema(Schema):
+    id: int
+    from_level_index: int
+    to_level_index: int
+    from_level_label: str
+    to_level_label: str
     trigger: str
     session_run_id: int | None
     changed_by: str | None
