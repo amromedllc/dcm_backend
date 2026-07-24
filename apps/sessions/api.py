@@ -31,17 +31,45 @@ router = Router(auth=jwt_auth)
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _accessible_external_client_ids(request) -> set[int]:
+    """
+    Practice/staff-assignment boundary translated into the loose
+    external_client_id convention Appointment/SessionRun store (either a TPMS
+    patient id, or for native appointments the local Client.id — by
+    convention, see project memory on native mode). Reuses
+    _get_accessible_clients so appointments/sessions are bound by the exact
+    same practice/assignment rule the client list already enforces, instead
+    of only checking role/staff-ownership — otherwise, in a tenant schema
+    serving more than one TPMS practice, any staff/admin/supervisor from one
+    practice could read or act on another practice's appointments/sessions
+    purely by id.
+    """
+    from apps.clients.api import _get_accessible_clients
+
+    ids: set[int] = set()
+    for client_id, external_id in _get_accessible_clients(request).values_list('id', 'external_id'):
+        ids.add(client_id)
+        if external_id:
+            try:
+                ids.add(int(external_id))
+            except (TypeError, ValueError):
+                pass
+    return ids
+
+
 def _get_session_or_404(session_id: int, request) -> SessionRun:
     """
     Staff may only reach their own sessions (matches the scoping already
     applied in list_sessions below) — admin/supervisor can reach any session
-    within this tenant's schema. Without this, any staff user could read,
-    edit, or delete another staff member's session (and its trial/behavior/
-    ABC data) purely by guessing/incrementing a session id, since every
-    caller of this helper — get/delete session, trials, behaviors, abc,
-    submit, sync — otherwise had no ownership check at all.
+    for a client in their accessible-clients scope. Without this, any staff
+    user could read, edit, or delete another staff member's session (and its
+    trial/behavior/ABC data) purely by guessing/incrementing a session id,
+    since every caller of this helper — get/delete session, trials,
+    behaviors, abc, submit, sync — otherwise had no ownership check at all.
     """
-    qs = SessionRun.objects.select_related('staff')
+    qs = SessionRun.objects.select_related('staff').filter(
+        external_client_id__in=_accessible_external_client_ids(request),
+    )
     if request.user.role == 'staff':
         qs = qs.filter(staff_id=request.user.id)
     try:
@@ -363,12 +391,13 @@ def _appt_qs():
 
 def _get_appointment_or_404(request, appt_id: int) -> Appointment:
     """
-    Same staff-ownership rule list_appointments already applies — staff may
-    only reach their own appointments, admin/supervisor reach any. Without
-    this, any staff user could read another staff member's appointment
-    (client, notes, schedule) purely by guessing/incrementing an id.
+    Same staff-ownership + accessible-client rule list_appointments already
+    applies — staff may only reach their own appointments, and every role is
+    bound to the accessible-clients practice/assignment scope. Without this,
+    any staff user could read another staff member's appointment (client,
+    notes, schedule) purely by guessing/incrementing an id.
     """
-    qs = _appt_qs()
+    qs = _appt_qs().filter(external_client_id__in=_accessible_external_client_ids(request))
     if request.user.role == 'staff':
         qs = qs.filter(staff_id=request.user.id)
     try:
@@ -385,7 +414,7 @@ def list_appointments(
     date: str | None = None,
     status: str | None = None,
 ):
-    qs = _appt_qs()
+    qs = _appt_qs().filter(external_client_id__in=_accessible_external_client_ids(request))
     if client_id:
         qs = qs.filter(external_client_id=client_id)
     if staff_id:
@@ -402,6 +431,8 @@ def list_appointments(
 @router.post('/appointments', response={201: AppointmentSchema})
 def create_appointment(request, data: AppointmentCreateRequest):
     require_permission(request, 'appointments_create')
+    if data.client_id not in _accessible_external_client_ids(request):
+        raise HttpError(404, 'Client not found')
     payload = data.dict()
     external_client_id = payload.pop('client_id', None)
     appt = Appointment.objects.create(created_by=request.user, external_client_id=external_client_id, **payload)
@@ -417,7 +448,10 @@ def get_appointment(request, appt_id: int):
 def get_appointment_programs(request, appt_id: int):
     """Returns programs currently assigned to this appointment."""
     appt = _find_appointment(appt_id)
-    if not appt or (request.user.role == 'staff' and appt.staff_id != request.user.id):
+    accessible_ids = _accessible_external_client_ids(request)
+    if not appt or appt.external_client_id not in accessible_ids or (
+        request.user.role == 'staff' and appt.staff_id != request.user.id
+    ):
         return []
     if not appt.lesson_id:
         return []
@@ -451,11 +485,16 @@ def assign_appointment_programs(request, appt_id: int, data: AssignProgramsReque
     """
     require_permission(request, 'appointments_edit')
 
+    accessible_ids = _accessible_external_client_ids(request)
     appt = _find_appointment(appt_id)
+    if appt and appt.external_client_id not in accessible_ids:
+        raise HttpError(404, 'Appointment not found')
 
     if not appt:
         if not data.client_id:
             raise HttpError(400, 'client_id is required to assign programs to a new appointment')
+        if data.client_id not in accessible_ids:
+            raise HttpError(404, 'Client not found')
         if not data.start_time:
             raise HttpError(
                 400,
@@ -504,7 +543,10 @@ def assign_appointment_programs(request, appt_id: int, data: AssignProgramsReque
 def update_appointment(request, appt_id: int, data: AppointmentUpdateRequest):
     require_permission(request, 'appointments_edit')
     try:
-        appt = Appointment.objects.get(id=appt_id)
+        appt = Appointment.objects.get(
+            id=appt_id,
+            external_client_id__in=_accessible_external_client_ids(request),
+        )
     except Appointment.DoesNotExist:
         raise HttpError(404, 'Appointment not found')
     for field, value in data.dict(exclude_none=True).items():
@@ -523,6 +565,8 @@ def start_session(request, data: SessionStartRequest):
     Creates a new SessionRun and immediately captures the program snapshot.
     client_id is the TPMS client (patient) ID; appointment_id is the TPMS appointment ID.
     """
+    if data.client_id not in _accessible_external_client_ids(request):
+        raise HttpError(404, 'Client not found')
     lesson_id = data.lesson_id
     if not lesson_id and data.appointment_id:
         lesson_id = Appointment.objects.filter(id=data.appointment_id).values_list('lesson_id', flat=True).first()
@@ -549,7 +593,9 @@ def list_sessions(
     status: str | None = None,
     staff_id: int | None = None,
 ):
-    qs = SessionRun.objects.select_related('staff')
+    qs = SessionRun.objects.select_related('staff').filter(
+        external_client_id__in=_accessible_external_client_ids(request),
+    )
     if client_id:
         qs = qs.filter(external_client_id=client_id)
     if status:
