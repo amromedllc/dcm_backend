@@ -6,6 +6,7 @@ from ninja.files import UploadedFile
 from ninja.errors import HttpError
 
 from apps.accounts.auth import jwt_auth
+from apps.accounts.permissions import require_permission
 from .models import Appointment, SessionRun, TrialEvent, BehaviorEvent, ABCEvent, SessionMedia, SessionMediaComment
 from .schemas import (
     AppointmentSchema, AppointmentCreateRequest, AppointmentUpdateRequest,
@@ -360,6 +361,22 @@ def _appt_qs():
     )
 
 
+def _get_appointment_or_404(request, appt_id: int) -> Appointment:
+    """
+    Same staff-ownership rule list_appointments already applies — staff may
+    only reach their own appointments, admin/supervisor reach any. Without
+    this, any staff user could read another staff member's appointment
+    (client, notes, schedule) purely by guessing/incrementing an id.
+    """
+    qs = _appt_qs()
+    if request.user.role == 'staff':
+        qs = qs.filter(staff_id=request.user.id)
+    try:
+        return qs.get(id=appt_id)
+    except Appointment.DoesNotExist:
+        raise HttpError(404, 'Appointment not found')
+
+
 @router.get('/appointments', response=list[AppointmentSchema])
 def list_appointments(
     request,
@@ -394,17 +411,14 @@ def create_appointment(request, data: AppointmentCreateRequest):
 
 @router.get('/appointments/{appt_id}', response=AppointmentSchema)
 def get_appointment(request, appt_id: int):
-    try:
-        return _appt_qs().get(id=appt_id)
-    except Appointment.DoesNotExist:
-        raise HttpError(404, 'Appointment not found')
+    return _get_appointment_or_404(request, appt_id)
 
 
 @router.get('/appointments/{appt_id}/programs', response=list[AssignedProgramSchema])
 def get_appointment_programs(request, appt_id: int):
     """Returns programs currently assigned to this appointment."""
     appt = _find_appointment(appt_id)
-    if not appt:
+    if not appt or (request.user.role == 'staff' and appt.staff_id != request.user.id):
         return []
     if not appt.lesson_id:
         return []
@@ -786,8 +800,7 @@ def submit(request, session_id: int, data: SessionSubmitRequest):
 
 @router.post('/sessions/{session_id}/approve', response=SessionRunSchema)
 def approve(request, session_id: int):
-    if request.user.role not in ('admin', 'supervisor'):
-        raise HttpError(403, 'Supervisor or admin access required')
+    require_permission(request, 'session_approve')
     session = _get_session_or_404(session_id, request)
     approve_session(session, request.user)
     return _serialize_session(session)
@@ -795,8 +808,7 @@ def approve(request, session_id: int):
 
 @router.post('/sessions/{session_id}/reject', response=SessionRunSchema)
 def reject(request, session_id: int, data: SessionRejectRequest):
-    if request.user.role not in ('admin', 'supervisor'):
-        raise HttpError(403, 'Supervisor or admin access required')
+    require_permission(request, 'session_approve')
     session = _get_session_or_404(session_id, request)
     reject_session(session, request.user, data.reason)
     return _serialize_session(session)

@@ -10,6 +10,7 @@ from django.conf import settings
 from django.db.models import Q, Count
 
 from apps.accounts.auth import jwt_auth
+from apps.accounts.permissions import require_permission
 from apps.integrations.tpms_auth_client import (
     TpmsAuthError,
     clear_tpms_access_token,
@@ -412,8 +413,7 @@ def list_clients(request, include_inactive: bool = False, search: str | None = N
 
 @router.post('', response={201: ClientSchema})
 def create_client(request, data: ClientCreateRequest):
-    if not request.user.role in ('admin', 'supervisor'):
-        raise HttpError(403, 'Supervisor or admin access required')
+    require_permission(request, 'clients_create')
     client = Client.objects.create(
         created_by=request.user,
         **data.dict(),
@@ -428,8 +428,7 @@ def get_client(request, client_id: int):
 
 @router.patch('/{client_id}', response=ClientSchema)
 def update_client(request, client_id: int, data: ClientUpdateRequest):
-    if not request.user.role in ('admin', 'supervisor'):
-        raise HttpError(403, 'Supervisor or admin access required')
+    require_permission(request, 'clients_edit')
     client = _get_client_or_404(request, client_id)
     for field, value in data.dict(exclude_none=True).items():
         setattr(client, field, value)
@@ -443,16 +442,14 @@ def update_client(request, client_id: int, data: ClientUpdateRequest):
 
 @router.get('/{client_id}/staff', response=list[StaffAssignmentSchema])
 def list_staff(request, client_id: int):
-    if not request.user.role in ('admin', 'supervisor'):
-        raise HttpError(403, 'Supervisor or admin access required')
+    require_permission(request, 'clients_edit')
     _get_client_or_404(request, client_id)
     return list(ClientStaffAssignment.objects.filter(client_id=client_id, is_active=True))
 
 
 @router.post('/{client_id}/staff', response={201: StaffAssignmentSchema})
 def add_staff(request, client_id: int, data: AddStaffAssignmentRequest):
-    if not request.user.role in ('admin', 'supervisor'):
-        raise HttpError(403, 'Supervisor or admin access required')
+    require_permission(request, 'clients_edit')
     _get_client_or_404(request, client_id)
     assignment, created = ClientStaffAssignment.objects.get_or_create(
         client_id=client_id,
@@ -468,8 +465,7 @@ def add_staff(request, client_id: int, data: AddStaffAssignmentRequest):
 
 @router.delete('/{client_id}/staff/{assignment_id}', response={204: None})
 def remove_staff(request, client_id: int, assignment_id: int):
-    if not request.user.role in ('admin', 'supervisor'):
-        raise HttpError(403, 'Supervisor or admin access required')
+    require_permission(request, 'clients_edit')
     _get_client_or_404(request, client_id)
     try:
         assignment = ClientStaffAssignment.objects.get(id=assignment_id, client_id=client_id)
