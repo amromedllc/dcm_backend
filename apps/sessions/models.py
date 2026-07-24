@@ -3,6 +3,10 @@ from django.db import models
 from shared.models import OrganizationScopedMixin, TenantAwareModel
 
 
+def _session_media_upload_path(instance, filename):
+    return f'session_media/{instance.session_run_id}/{filename}'
+
+
 class Appointment(TenantAwareModel):
     class Status(models.TextChoices):
         SCHEDULED = 'scheduled', 'Scheduled'
@@ -237,3 +241,87 @@ class ABCEvent(OrganizationScopedMixin):
 
     def __str__(self) -> str:
         return f'ABC @ {self.occurred_at:%H:%M} — {self.behavior_description[:40]}'
+
+
+class SessionMedia(TenantAwareModel):
+    """
+    A photo or video attached to a session, optionally scoped to one target
+    within it — supports HIPAA-relevant documentation and asynchronous
+    supervision review (a supervisor watches later and leaves timestamped
+    comments via SessionMediaComment, rather than needing to be on-site).
+
+    Storage: `file` goes through Django's configured storage backend —
+    local filesystem in dev, S3 in production (see config/settings/production.py)
+    — same mechanism Export already relies on for generated files.
+    """
+    class MediaType(models.TextChoices):
+        PHOTO = 'photo', 'Photo'
+        VIDEO = 'video', 'Video'
+
+    class ReviewStatus(models.TextChoices):
+        PENDING = 'pending', 'Pending Review'
+        REVIEWED = 'reviewed', 'Reviewed'
+
+    session_run = models.ForeignKey(
+        SessionRun,
+        on_delete=models.CASCADE,
+        related_name='media',
+    )
+    # Snapshot value, same reasoning as TrialEvent.target_name — readable even
+    # if the live Target row is later archived or renamed. Null = whole-session clip.
+    target_id = models.PositiveIntegerField(null=True, blank=True, db_index=True)
+    target_name = models.CharField(max_length=200, blank=True)
+    media_type = models.CharField(max_length=10, choices=MediaType.choices)
+    file = models.FileField(upload_to=_session_media_upload_path, max_length=500)
+    duration_seconds = models.PositiveIntegerField(null=True, blank=True)  # video only
+    caption = models.CharField(max_length=300, blank=True)
+    review_status = models.CharField(
+        max_length=10, choices=ReviewStatus.choices, default=ReviewStatus.PENDING, db_index=True,
+    )
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='reviewed_session_media',
+        db_constraint=False,
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    _org_scoped_fk_fields = ('session_run',)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.session_run.organization_id
+
+    class Meta:
+        app_label = 'dcm_sessions'
+        ordering = ['-created_at']
+
+    def __str__(self) -> str:
+        return f'{self.media_type} on session {self.session_run_id} [{self.review_status}]'
+
+
+class SessionMediaComment(TenantAwareModel):
+    """
+    Timestamped supervisor feedback on a SessionMedia clip — the async-review
+    equivalent of leaning over an RBT's shoulder mid-session. `timestamp_seconds`
+    anchors the comment to a moment in the video; null for a general/photo comment.
+    """
+    session_media = models.ForeignKey(
+        SessionMedia,
+        on_delete=models.CASCADE,
+        related_name='comments',
+    )
+    timestamp_seconds = models.PositiveIntegerField(null=True, blank=True)
+    body = models.TextField()
+
+    _org_scoped_fk_fields = ('session_media',)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.session_media.organization_id
+
+    class Meta:
+        app_label = 'dcm_sessions'
+        ordering = ['created_at']
+
+    def __str__(self) -> str:
+        return f'Comment on media {self.session_media_id} @ {self.timestamp_seconds}s'

@@ -218,6 +218,46 @@ class ABCEventCreateRequest(Schema):
 
 
 # ---------------------------------------------------------------------------
+# Session media — photo/video attachments + async supervision review
+# ---------------------------------------------------------------------------
+
+class SessionMediaCommentSchema(Schema):
+    id: int
+    session_media_id: int
+    timestamp_seconds: int | None = None
+    body: str
+    author: str | None = None
+    created_at: datetime
+
+
+class SessionMediaCommentCreateRequest(Schema):
+    timestamp_seconds: int | None = None
+    body: str
+
+
+class SessionMediaSchema(Schema):
+    id: int
+    session_run_id: int
+    target_id: int | None = None
+    target_name: str
+    media_type: str
+    file_url: str
+    duration_seconds: int | None = None
+    caption: str
+    review_status: str
+    reviewed_by: str | None = None
+    reviewed_at: datetime | None = None
+    uploaded_by: str | None = None
+    created_at: datetime
+    comment_count: int = 0
+
+
+class SessionMediaUpdateRequest(Schema):
+    caption: str | None = None
+    review_status: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # Offline batch sync — mobile submits everything in one payload
 # ---------------------------------------------------------------------------
 

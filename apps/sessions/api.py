@@ -1,11 +1,12 @@
 from datetime import date
 from django.db.models import Count
 from django.utils import timezone
-from ninja import Router
+from ninja import Router, Form, File
+from ninja.files import UploadedFile
 from ninja.errors import HttpError
 
 from apps.accounts.auth import jwt_auth
-from .models import Appointment, SessionRun, TrialEvent, BehaviorEvent, ABCEvent
+from .models import Appointment, SessionRun, TrialEvent, BehaviorEvent, ABCEvent, SessionMedia, SessionMediaComment
 from .schemas import (
     AppointmentSchema, AppointmentCreateRequest, AppointmentUpdateRequest,
     AssignProgramsRequest, AssignedProgramSchema,
@@ -17,6 +18,8 @@ from .schemas import (
     ABCEventSchema, ABCEventCreateRequest,
     SessionSyncPayload, SessionSyncResult,
     TrialSummaryItem,
+    SessionMediaSchema, SessionMediaUpdateRequest,
+    SessionMediaCommentSchema, SessionMediaCommentCreateRequest,
 )
 from .services import build_program_snapshot, submit_session, approve_session, reject_session
 
@@ -862,4 +865,142 @@ def sync_session(request, session_id: int, data: SessionSyncPayload):
         behaviors_created=behaviors_created,
         abc_created=abc_created,
         submitted=submitted,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Session media — photo/video attachments + async supervision review
+# ---------------------------------------------------------------------------
+
+def _serialize_media(media: SessionMedia, request) -> SessionMediaSchema:
+    return SessionMediaSchema(
+        id=media.id,
+        session_run_id=media.session_run_id,
+        target_id=media.target_id,
+        target_name=media.target_name,
+        media_type=media.media_type,
+        file_url=request.build_absolute_uri(media.file.url),
+        duration_seconds=media.duration_seconds,
+        caption=media.caption,
+        review_status=media.review_status,
+        reviewed_by=media.reviewed_by.email if media.reviewed_by_id else None,
+        reviewed_at=media.reviewed_at,
+        uploaded_by=media.created_by.email if media.created_by_id else None,
+        created_at=media.created_at,
+        comment_count=media.comments.count(),
+    )
+
+
+def _get_media_or_404(media_id: int, request) -> SessionMedia:
+    """Same ownership rule as _get_session_or_404 — staff only reach media on their own sessions."""
+    qs = SessionMedia.objects.select_related('session_run', 'created_by', 'reviewed_by')
+    if request.user.role == 'staff':
+        qs = qs.filter(session_run__staff_id=request.user.id)
+    try:
+        return qs.get(id=media_id)
+    except SessionMedia.DoesNotExist:
+        raise HttpError(404, 'Media not found')
+
+
+@router.get('/sessions/{session_id}/media', response=list[SessionMediaSchema])
+def list_session_media(request, session_id: int):
+    session = _get_session_or_404(session_id, request)
+    media = session.media.select_related('created_by', 'reviewed_by')
+    return [_serialize_media(m, request) for m in media]
+
+
+@router.post('/sessions/{session_id}/media', response={201: SessionMediaSchema})
+def upload_session_media(
+    request,
+    session_id: int,
+    file: UploadedFile = File(...),
+    media_type: str = Form(...),
+    target_id: int | None = Form(None),
+    target_name: str = Form(''),
+    caption: str = Form(''),
+    duration_seconds: int | None = Form(None),
+):
+    session = _get_session_or_404(session_id, request)
+    if media_type not in SessionMedia.MediaType.values:
+        raise HttpError(400, f'media_type must be one of {SessionMedia.MediaType.values}')
+
+    media = SessionMedia.objects.create(
+        session_run=session,
+        target_id=target_id,
+        target_name=target_name,
+        media_type=media_type,
+        file=file,
+        duration_seconds=duration_seconds,
+        caption=caption,
+        created_by=request.user,
+    )
+    return 201, _serialize_media(media, request)
+
+
+@router.patch('/media/{media_id}', response=SessionMediaSchema)
+def update_session_media(request, media_id: int, data: SessionMediaUpdateRequest):
+    media = _get_media_or_404(media_id, request)
+    is_reviewer = request.user.role in ('admin', 'supervisor')
+    is_uploader = media.created_by_id == request.user.id
+
+    if data.review_status is not None:
+        if not is_reviewer:
+            raise HttpError(403, 'Only a supervisor or admin can change review status')
+        if data.review_status not in SessionMedia.ReviewStatus.values:
+            raise HttpError(400, f'review_status must be one of {SessionMedia.ReviewStatus.values}')
+        media.review_status = data.review_status
+        media.reviewed_by = request.user
+        media.reviewed_at = timezone.now()
+
+    if data.caption is not None:
+        if not (is_reviewer or is_uploader):
+            raise HttpError(403, 'Only the uploader, a supervisor, or an admin can edit the caption')
+        media.caption = data.caption
+
+    media.save()
+    return _serialize_media(media, request)
+
+
+@router.delete('/media/{media_id}', response={204: None})
+def delete_session_media(request, media_id: int):
+    media = _get_media_or_404(media_id, request)
+    if not (request.user.role in ('admin', 'supervisor') or media.created_by_id == request.user.id):
+        raise HttpError(403, 'Only the uploader, a supervisor, or an admin can delete this')
+    media.file.delete(save=False)
+    media.delete()
+    return 204, None
+
+
+@router.get('/media/{media_id}/comments', response=list[SessionMediaCommentSchema])
+def list_media_comments(request, media_id: int):
+    media = _get_media_or_404(media_id, request)
+    return [
+        SessionMediaCommentSchema(
+            id=c.id,
+            session_media_id=c.session_media_id,
+            timestamp_seconds=c.timestamp_seconds,
+            body=c.body,
+            author=c.created_by.email if c.created_by_id else None,
+            created_at=c.created_at,
+        )
+        for c in media.comments.select_related('created_by')
+    ]
+
+
+@router.post('/media/{media_id}/comments', response={201: SessionMediaCommentSchema})
+def create_media_comment(request, media_id: int, data: SessionMediaCommentCreateRequest):
+    media = _get_media_or_404(media_id, request)
+    comment = SessionMediaComment.objects.create(
+        session_media=media,
+        timestamp_seconds=data.timestamp_seconds,
+        body=data.body,
+        created_by=request.user,
+    )
+    return 201, SessionMediaCommentSchema(
+        id=comment.id,
+        session_media_id=comment.session_media_id,
+        timestamp_seconds=comment.timestamp_seconds,
+        body=comment.body,
+        author=request.user.email,
+        created_at=comment.created_at,
     )
