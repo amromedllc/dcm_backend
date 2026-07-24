@@ -401,8 +401,7 @@ def list_appointments(
 
 @router.post('/appointments', response={201: AppointmentSchema})
 def create_appointment(request, data: AppointmentCreateRequest):
-    if request.user.role not in ('admin', 'supervisor'):
-        raise HttpError(403, 'Supervisor or admin access required')
+    require_permission(request, 'appointments_create')
     payload = data.dict()
     external_client_id = payload.pop('client_id', None)
     appt = Appointment.objects.create(created_by=request.user, external_client_id=external_client_id, **payload)
@@ -450,8 +449,7 @@ def assign_appointment_programs(request, appt_id: int, data: AssignProgramsReque
     If no DCM Appointment row exists yet, one is created from the times supplied
     by the client (from the live TherapyPMS API list) — the TPMS DB is not used.
     """
-    if request.user.role not in ('admin', 'supervisor'):
-        raise HttpError(403, 'Supervisor or admin access required')
+    require_permission(request, 'appointments_edit')
 
     appt = _find_appointment(appt_id)
 
@@ -504,8 +502,7 @@ def assign_appointment_programs(request, appt_id: int, data: AssignProgramsReque
 
 @router.patch('/appointments/{appt_id}', response=AppointmentSchema)
 def update_appointment(request, appt_id: int, data: AppointmentUpdateRequest):
-    if request.user.role not in ('admin', 'supervisor'):
-        raise HttpError(403, 'Supervisor or admin access required')
+    require_permission(request, 'appointments_edit')
     try:
         appt = Appointment.objects.get(id=appt_id)
     except Appointment.DoesNotExist:
@@ -613,8 +610,7 @@ def link_session_appointment(request, session_id: int, data: SessionLinkAppointm
     recorded. Web-only; moves the session out of the client's "Walk-in
     Recordings" bucket and under that appointment's date group instead.
     """
-    if request.user.role not in ('admin', 'supervisor'):
-        raise HttpError(403, 'Supervisor or admin access required')
+    require_permission(request, 'appointments_edit')
 
     session = _get_session_or_404(session_id, request)
     appt = _find_appointment(data.appointment_id)

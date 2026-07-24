@@ -52,6 +52,9 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'client_history': True,
         'client_progress': True,
         'client_report': True,
+        # Appointments
+        'appointments_create': True,
+        'appointments_edit': True,
         # Sessions
         'sessions_view': True,
         'sessions_create': True,
@@ -138,6 +141,9 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'client_history': True,
         'client_progress': True,
         'client_report': True,
+        # Appointments
+        'appointments_create': True,
+        'appointments_edit': True,
         # Sessions
         'sessions_view': True,
         'sessions_create': True,
@@ -224,6 +230,9 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'client_history': True,
         'client_progress': True,
         'client_report': False,
+        # Appointments
+        'appointments_create': False,
+        'appointments_edit': False,
         # Sessions
         'sessions_view': True,
         'sessions_create': True,
