@@ -783,7 +783,9 @@ def list_client_sessions(
 
     Uses POST /api/v1/ios/appointment/recurring/list with:
     - patient_ids: the selected client's TPMS patient id (`Client.external_id`)
-    - provider_ids: the logged-in user's TPMS provider id (`User.external_employee_id`)
+    - provider_ids: the logged-in user's TPMS provider id (`User.external_employee_id`),
+      except for admin/supervisor who see all providers' sessions for the client
+      (client_id-scoped only, irrespective of provider_id)
     """
     client = _get_client_or_404(request, client_id)
 
@@ -800,10 +802,11 @@ def list_client_sessions(
         raise HttpError(401, 'TherapyPMS session expired. Please log in again.')
 
     provider_ids: list[int] = []
-    if request.user.external_employee_id is not None:
-        provider_ids = [int(request.user.external_employee_id)]
-    elif request.user.role not in ('admin', 'supervisor'):
-        return []
+    if request.user.role not in ('admin', 'supervisor'):
+        if request.user.external_employee_id is not None:
+            provider_ids = [int(request.user.external_employee_id)]
+        else:
+            return []
 
     try:
         appointments = list_recurring_appointments(
