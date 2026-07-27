@@ -81,6 +81,9 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'org_programs_create': True,
         'org_programs_edit': True,
         'org_programs_delete': True,
+        # Central library
+        'central_library_view': True,
+        'central_library_import': True,
         # Exports
         'exports_view': True,
         # Settings
@@ -170,6 +173,9 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'org_programs_create': False,
         'org_programs_edit': False,
         'org_programs_delete': False,
+        # Central library
+        'central_library_view': True,
+        'central_library_import': True,
         # Exports
         'exports_view': True,
         # Settings
@@ -259,6 +265,9 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'org_programs_create': False,
         'org_programs_edit': False,
         'org_programs_delete': False,
+        # Central library
+        'central_library_view': False,
+        'central_library_import': False,
         # Exports
         'exports_view': False,
         # Settings

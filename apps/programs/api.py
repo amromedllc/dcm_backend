@@ -1,9 +1,12 @@
-from ninja import Router
+from ninja import Router, File
 from ninja.errors import HttpError
+from ninja.files import UploadedFile
+from django.core.files.base import ContentFile
 from django.utils import timezone
 
 from apps.accounts.auth import jwt_auth
 from apps.accounts.permissions import require_permission
+from apps.central_library.models import CentralProgram
 from .models import (
     Program, Target, PromptingTemplate,
     WorkflowTemplate, MaintenanceSchedule, FadingTemplate,
@@ -614,7 +617,7 @@ def remove_program_from_lesson(request, lesson_id: int, program_id: int):
 # Org-level program library (facility-wide templates)
 # ---------------------------------------------------------------------------
 
-def _serialize_org_program(program: Program, include_targets: bool = False) -> dict:
+def _serialize_org_program(program: Program, request, include_targets: bool = False) -> dict:
     targets = list(program.targets.all().values(
         'id', 'name', 'status', 'display_order', 'is_visible_to_staff',
     )) if include_targets else []
@@ -629,6 +632,7 @@ def _serialize_org_program(program: Program, include_targets: bool = False) -> d
         'tags': program.tags,
         'objective': program.objective,
         'instructions': program.instructions,
+        'image_url': request.build_absolute_uri(program.image.url) if program.image else None,
         'display_order': program.display_order,
         'target_count': program.targets.count(),
         'targets': targets,
@@ -655,7 +659,7 @@ def list_org_programs(request, category: str | None = None, status: str | None =
         qs = qs.filter(category=category)
     if status:
         qs = qs.filter(status=status)
-    return [_serialize_org_program(p) for p in qs.prefetch_related('targets')]
+    return [_serialize_org_program(p, request) for p in qs.prefetch_related('targets')]
 
 
 @router.post('/org-programs', response={201: OrgProgramSchema})
@@ -676,7 +680,7 @@ def create_org_program(request, data: OrgProgramCreateRequest):
         display_order=data.display_order,
         created_by=request.user,
     )
-    return 201, _serialize_org_program(program, include_targets=True)
+    return 201, _serialize_org_program(program, request, include_targets=True)
 
 
 @router.get('/org-programs/{program_id}', response=OrgProgramSchema)
@@ -685,7 +689,7 @@ def get_org_program(request, program_id: int):
         program = _org_qs(request).prefetch_related('targets').get(id=program_id)
     except Program.DoesNotExist:
         raise HttpError(404, 'Program not found')
-    return _serialize_org_program(program, include_targets=True)
+    return _serialize_org_program(program, request, include_targets=True)
 
 
 @router.patch('/org-programs/{program_id}', response=OrgProgramSchema)
@@ -698,7 +702,19 @@ def update_org_program(request, program_id: int, data: ProgramUpdateRequest):
     for field, value in data.dict(exclude_none=True).items():
         setattr(program, field, value)
     program.save()
-    return _serialize_org_program(program, include_targets=True)
+    return _serialize_org_program(program, request, include_targets=True)
+
+
+@router.post('/org-programs/{program_id}/image', response=OrgProgramSchema)
+def upload_org_program_image(request, program_id: int, file: UploadedFile = File(...)):
+    require_permission(request, 'org_programs_edit')
+    try:
+        program = _org_qs(request).get(id=program_id)
+    except Program.DoesNotExist:
+        raise HttpError(404, 'Program not found')
+    program.image = file
+    program.save(update_fields=['image'])
+    return _serialize_org_program(program, request, include_targets=True)
 
 
 @router.delete('/org-programs/{program_id}', response={204: None})
@@ -712,6 +728,16 @@ def archive_org_program(request, program_id: int):
     program.archived_at = timezone.now()
     program.save(update_fields=['status', 'archived_at'])
     return 204, None
+
+
+def _copy_image(source_image, dest) -> None:
+    """Duplicates an image file's bytes onto `dest.image` (own storage key,
+    own upload path) rather than pointing at the source's file — so later
+    replacing/deleting one copy never affects the other."""
+    if not source_image:
+        return
+    filename = source_image.name.rsplit('/', 1)[-1]
+    dest.image.save(filename, ContentFile(source_image.read()), save=True)
 
 
 def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
@@ -730,6 +756,7 @@ def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
         display_order=source.display_order,
         created_by=user,
     )
+    _copy_image(source.image, dest)
     for t in source.targets.all():
         Target.objects.create(
             program=dest,
@@ -769,6 +796,140 @@ def copy_program_to_client(request, program_id: int, data: AssignOrgProgramReque
         raise HttpError(404, 'Program not found')
     dest = _copy_program_to_client(source, data.client_id, request.user)
     return 201, {**_serialize_program(dest, include_targets=True)}
+
+
+# ---------------------------------------------------------------------------
+# Central library (platform-owned reference programs, importable by any org)
+#
+# Backed by apps.central_library.CentralProgram/CentralTarget — a plain
+# shared-schema model (SHARED_APPS), not a tenant-scoped one. There's exactly
+# one catalog, authored by superusers via Django admin; no per-org schema
+# switching is needed to read it, unlike apps.programs (still a TENANT_APP).
+# ---------------------------------------------------------------------------
+
+def _central_qs():
+    return CentralProgram.objects.filter(status=CentralProgram.Status.ACTIVE)
+
+
+def _imported_central_program_ids() -> set[int]:
+    """Central program ids already cloned into the caller's org — used to
+    show "Already in Library" up front rather than only erroring on click."""
+    return set(
+        Program.objects.filter(source_central_program_id__isnull=False)
+        .values_list('source_central_program_id', flat=True)
+    )
+
+
+def _serialize_central_program(
+    program: CentralProgram, request, include_targets: bool = False, imported_ids: set[int] = frozenset(),
+) -> dict:
+    targets = []
+    if include_targets:
+        targets = [
+            {
+                'id': t['id'], 'name': t['name'], 'status': 'waiting',
+                'display_order': t['display_order'], 'is_visible_to_staff': t['is_visible_to_staff'],
+            }
+            for t in program.targets.all().values('id', 'name', 'display_order', 'is_visible_to_staff')
+        ]
+    return {
+        'id': program.id,
+        'is_template': True,
+        'name': program.name,
+        'category': program.category,
+        'status': program.status,
+        'phase': program.phase,
+        'treatment_area': program.treatment_area,
+        'tags': program.tags,
+        'objective': program.objective,
+        'instructions': program.instructions,
+        'image_url': request.build_absolute_uri(program.image.url) if program.image else None,
+        'already_imported': program.id in imported_ids,
+        'display_order': program.display_order,
+        'target_count': program.targets.count(),
+        'targets': targets,
+        'created_at': program.created_at,
+        'updated_at': program.updated_at,
+    }
+
+
+@router.get('/central-programs', response=list[OrgProgramSchema])
+def list_central_programs(request, category: str | None = None):
+    require_permission(request, 'central_library_view')
+    qs = _central_qs()
+    if category:
+        qs = qs.filter(category=category)
+    imported_ids = _imported_central_program_ids()
+    return [_serialize_central_program(p, request, imported_ids=imported_ids) for p in qs.prefetch_related('targets')]
+
+
+@router.get('/central-programs/{program_id}', response=OrgProgramSchema)
+def get_central_program(request, program_id: int):
+    require_permission(request, 'central_library_view')
+    try:
+        program = _central_qs().prefetch_related('targets').get(id=program_id)
+    except CentralProgram.DoesNotExist:
+        raise HttpError(404, 'Program not found')
+    return _serialize_central_program(program, request, include_targets=True, imported_ids=_imported_central_program_ids())
+
+
+def _clone_central_program(program_id: int, user) -> Program:
+    """Deep-copies a Central Library program (+ targets) into the calling
+    user's own organization. A target's optional `prompting_levels` becomes
+    a new org-owned PromptingTemplate — PromptingTemplate is tenant-scoped,
+    so cloning (not referencing) is the only option, and it also means each
+    org gets its own editable copy rather than a shared read-only one.
+    """
+    try:
+        source = _central_qs().prefetch_related('targets').get(id=program_id)
+    except CentralProgram.DoesNotExist:
+        raise HttpError(404, 'Program not found')
+
+    if Program.objects.filter(source_central_program_id=program_id).exists():
+        raise HttpError(409, f'"{source.name}" is already in your Program Library.')
+
+    dest = Program.objects.create(
+        is_template=True,
+        external_client_id=None,
+        status=Program.Status.ACTIVE,
+        name=source.name,
+        category=source.category,
+        phase=source.phase,
+        treatment_area=source.treatment_area,
+        tags=source.tags,
+        objective=source.objective,
+        instructions=source.instructions,
+        source_central_program_id=source.id,
+        display_order=source.display_order,
+        created_by=user,
+    )
+    _copy_image(source.image, dest)
+    for t in source.targets.all():
+        prompting_template = None
+        if t.prompting_levels:
+            prompting_template = PromptingTemplate.objects.create(name=f'{t.name} Prompting', levels=t.prompting_levels)
+        Target.objects.create(
+            program=dest,
+            name=t.name,
+            measurement_type=t.measurement_type,
+            sub_items=t.sub_items,
+            sd_text=t.sd_text,
+            teaching_instructions=t.teaching_instructions,
+            display_order=t.display_order,
+            is_visible_to_staff=t.is_visible_to_staff,
+            prompting_template=prompting_template,
+            created_by=user,
+        )
+    dest.refresh_from_db()
+    return dest
+
+
+@router.post('/central-programs/{program_id}/import', response={201: OrgProgramSchema})
+def import_central_program(request, program_id: int):
+    """Import a Central Library program into the caller's own org library."""
+    require_permission(request, 'central_library_import')
+    dest = _clone_central_program(program_id, request.user)
+    return 201, _serialize_org_program(dest, request, include_targets=True)
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,12 @@
+import uuid
+
 from django.db import models
 from shared.models import OrganizationScopedMixin, TenantAwareModel
 from shared.tenancy import TenantManager, TenantQuerySet
+
+
+def _program_upload_path(instance, filename):
+    return f'programs/{uuid.uuid4().hex}/{filename}'
 
 
 class PromptingTemplate(TenantAwareModel):
@@ -64,6 +70,13 @@ class Program(TenantAwareModel):
 
     external_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     is_template = models.BooleanField(default=False, db_index=True)
+    # Loose reference to apps.central_library.CentralProgram.id — not a real
+    # FK (that model lives in the public schema, shared across every org, so
+    # a per-schema FK constraint here isn't meaningful; same convention as
+    # external_client_id above). Set only when this row was created by
+    # importing from the Central Library — lets us block re-importing the
+    # same central program into this org twice.
+    source_central_program_id = models.PositiveIntegerField(null=True, blank=True, db_index=True)
     name = models.CharField(max_length=200)
     workflow_template = models.ForeignKey(
         'WorkflowTemplate',
@@ -91,6 +104,7 @@ class Program(TenantAwareModel):
     baseline_notes = models.TextField(blank=True)
     objective = models.TextField(blank=True)
     instructions = models.TextField(blank=True)
+    image = models.ImageField(upload_to=_program_upload_path, max_length=500, blank=True, null=True)
     display_order = models.PositiveIntegerField(default=0, db_index=True)
     archived_at = models.DateTimeField(null=True, blank=True)
 

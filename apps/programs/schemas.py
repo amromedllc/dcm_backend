@@ -367,6 +367,8 @@ class OrgProgramSchema(Schema):
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
+    image_url: str | None = None
+    already_imported: bool = False
     display_order: int
     target_count: int = 0
     targets: list[TargetSummarySchema] = []

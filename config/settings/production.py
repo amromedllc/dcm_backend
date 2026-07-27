@@ -37,6 +37,8 @@ SHARED_APPS = [
     # Platform shared apps
     'apps.tenants',
     'apps.accounts',
+    # Platform-owned reference content, shared across every organization
+    'apps.central_library',
     # Read-only mirror of the TherapyPMS source database
     'apps.legacy',
 ]
@@ -167,8 +169,9 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+USE_S3 = env.bool('USE_S3', default=False)
 AWS_ACCESS_KEY_ID = env('AWS_ACCESS_KEY_ID', default='')
-if not DEBUG and AWS_ACCESS_KEY_ID:
+if USE_S3:
     DEFAULT_FILE_STORAGE = 'storages.backends.s3boto3.S3Boto3Storage'
     AWS_SECRET_ACCESS_KEY = env('AWS_SECRET_ACCESS_KEY')
     AWS_STORAGE_BUCKET_NAME = env('AWS_STORAGE_BUCKET_NAME')
@@ -183,7 +186,7 @@ USE_TZ = True
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-TENANT_BASE_DOMAIN = env('TENANT_BASE_DOMAIN', default='localhost')
+TENANT_BASE_DOMAIN = env('TENANT_BASE_DOMAIN')
 
 CORS_ALLOWED_ORIGINS = env.list(
     'CORS_ALLOWED_ORIGINS',
