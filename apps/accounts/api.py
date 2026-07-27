@@ -77,8 +77,8 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
     if tenant is None:
         raise HttpError(401, 'Invalid email or password')
 
-    tenant_tpms_admin_id = tenant.tpms_admin_id
-    if tenant_tpms_admin_id is None:
+    tenant_admin_ids = set(tenant.tpms_admin_ids.values_list('admin_id', flat=True))
+    if not tenant_admin_ids:
         # Fail closed — without a practice mapping we cannot safely scope the session.
         raise HttpError(401, 'Invalid email or password')
 
@@ -104,10 +104,11 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
             except Exception:
                 external_admin_id = None
 
-        if external_admin_id is None and not profile.is_admin:
+        if external_admin_id is None and not profile.is_admin and len(tenant_admin_ids) == 1:
             # Staff/provider tokens are already practice-scoped by TherapyPMS;
-            # bind first-time staff to this hostname's mapped practice.
-            external_admin_id = tenant_tpms_admin_id
+            # bind first-time staff to this hostname's mapped practice — only
+            # safe to guess when the org fronts exactly one TPMS practice.
+            external_admin_id = next(iter(tenant_admin_ids))
 
         if external_admin_id is None:
             logger.warning(
@@ -117,8 +118,8 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
             )
             raise HttpError(401, 'Invalid email or password')
 
-    # Tenant binding (C-01): only accept users belonging to this org's practice.
-    if external_admin_id != tenant_tpms_admin_id:
+    # Tenant binding (C-01): only accept users belonging to one of this org's practices.
+    if external_admin_id not in tenant_admin_ids:
         raise HttpError(401, 'Invalid email or password')
 
     dcm_role = _tpms_role_for_employee_type(
