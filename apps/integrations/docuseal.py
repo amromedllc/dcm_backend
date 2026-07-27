@@ -136,7 +136,9 @@ def list_uploaded_session_note_templates(user: User) -> list[dict]:
     return [
         {
             'id': template['id'],
+            'external_template_id': str(template['id']),
             'name': template.get('name', ''),
+            'treatment_type': SESSION_NOTE_TREATMENT_TYPE,
             'folder_name': template.get('folder_name', ''),
             'created_at': template.get('created_at', ''),
         }
