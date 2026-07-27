@@ -90,6 +90,8 @@ class SessionRun(TenantAwareModel):
     )
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN, db_index=True)
     started_at = models.DateTimeField(auto_now_add=True)
+    start_latitude = models.FloatField(null=True, blank=True)
+    start_longitude = models.FloatField(null=True, blank=True)
     ended_at = models.DateTimeField(null=True, blank=True)
     submitted_at = models.DateTimeField(null=True, blank=True)
     reviewed_by = models.ForeignKey(

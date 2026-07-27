@@ -90,6 +90,8 @@ class SessionRunSchema(Schema):
     lesson_id: int | None
     status: str
     started_at: datetime
+    start_latitude: float | None = None
+    start_longitude: float | None = None
     ended_at: datetime | None
     submitted_at: datetime | None
     reviewed_at: datetime | None
@@ -105,6 +107,8 @@ class SessionStartRequest(Schema):
     client_id: int
     appointment_id: int | None = None
     lesson_id: int | None = None
+    latitude: float | None = None
+    longitude: float | None = None
 
 
 class SessionLinkAppointmentRequest(Schema):

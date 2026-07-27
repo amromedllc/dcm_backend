@@ -213,6 +213,8 @@ def _serialize_session(
         'lesson_id': session.lesson_id,
         'status': session.status,
         'started_at': session.started_at,
+        'start_latitude': session.start_latitude,
+        'start_longitude': session.start_longitude,
         'ended_at': session.ended_at,
         'submitted_at': session.submitted_at,
         'reviewed_at': session.reviewed_at,
@@ -582,6 +584,8 @@ def start_session(request, data: SessionStartRequest):
         external_appointment_id=data.appointment_id,
         lesson_id=lesson_id,
         program_snapshot=snapshot,
+        start_latitude=data.latitude,
+        start_longitude=data.longitude,
         created_by=request.user,
     )
     return 201, _serialize_session(session)
