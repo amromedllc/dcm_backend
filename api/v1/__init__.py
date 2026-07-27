@@ -1,4 +1,7 @@
+from django.core.exceptions import ObjectDoesNotExist
+from django.db.utils import IntegrityError
 from ninja import NinjaAPI
+from shared.tenancy import CrossOrganizationReferenceError
 from apps.accounts.api import router as accounts_router
 from apps.accounts.auth import jwt_auth, api_key_auth
 from apps.clients.api import router as clients_router
@@ -21,6 +24,32 @@ api = NinjaAPI(
     docs_url='/docs',
     auth=[jwt_auth, api_key_auth],
 )
+
+@api.exception_handler(ObjectDoesNotExist)
+def _related_object_does_not_exist(request, exc: ObjectDoesNotExist):
+    """Every *explicit* `Model.objects.get(...)` call in this codebase already
+    catches its own `DoesNotExist` and raises a clean HttpError. The only way
+    this handler fires is an *implicit* FK descriptor access — e.g.
+    `target.workflow_template` inside OrganizationScopedMixin's
+    `_validate_cross_org_fks()` — when a submitted *_id references a row that
+    doesn't exist at all. That's caller error, not a server error."""
+    return api.create_response(request, {'detail': 'One or more referenced ids do not exist'}, status=400)
+
+
+@api.exception_handler(CrossOrganizationReferenceError)
+def _cross_organization_reference(request, exc: CrossOrganizationReferenceError):
+    """Raised by OrganizationScopedMixin.save() when a submitted *_id exists
+    but belongs to a different organization than the row being saved."""
+    return api.create_response(request, {'detail': str(exc)}, status=400)
+
+
+@api.exception_handler(IntegrityError)
+def _integrity_error(request, exc: IntegrityError):
+    """Safety net for unique-constraint races that slip past an endpoint's
+    own pre-check (e.g. two concurrent requests creating the same-named
+    settings entity) — surfaces as a clean conflict instead of a raw 500."""
+    return api.create_response(request, {'detail': 'This conflicts with existing data'}, status=409)
+
 
 api.add_router('/auth', accounts_router, tags=['Authentication'])
 api.add_router('/clients', clients_router, tags=['Clients'])

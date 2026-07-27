@@ -22,6 +22,7 @@ class PromptingTemplate(TenantAwareModel):
     class Meta:
         app_label = 'programs'
         ordering = ['name']
+        unique_together = [('organization', 'name')]
 
     def __str__(self) -> str:
         return self.name
@@ -43,6 +44,7 @@ class FadingTemplate(TenantAwareModel):
     class Meta:
         app_label = 'programs'
         ordering = ['name']
+        unique_together = [('organization', 'name')]
 
     def __str__(self) -> str:
         return self.name
@@ -276,6 +278,7 @@ class WorkflowTemplate(TenantAwareModel):
     class Meta:
         app_label = 'programs'
         ordering = ['name']
+        unique_together = [('organization', 'name')]
 
     def __str__(self) -> str:
         return self.name
@@ -318,6 +321,7 @@ class MaintenanceSchedule(TenantAwareModel):
     class Meta:
         app_label = 'programs'
         ordering = ['name']
+        unique_together = [('organization', 'name')]
 
     def __str__(self) -> str:
         return self.name
@@ -397,6 +401,7 @@ class TreatmentArea(TenantAwareModel):
     class Meta:
         app_label = 'programs'
         ordering = ['name']
+        unique_together = [('organization', 'name')]
 
     def __str__(self):
         return self.name
@@ -410,6 +415,7 @@ class ProgramTag(TenantAwareModel):
     class Meta:
         app_label = 'programs'
         ordering = ['name']
+        unique_together = [('organization', 'name')]
 
     def __str__(self):
         return self.name
@@ -462,6 +468,7 @@ class ProgramDataField(TenantAwareModel):
     class Meta:
         app_label = 'programs'
         ordering = ['display_order', 'name']
+        unique_together = [('organization', 'name')]
 
     def __str__(self):
         return self.name

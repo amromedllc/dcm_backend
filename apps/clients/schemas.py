@@ -1,6 +1,9 @@
 from datetime import date, datetime
 from ninja import Schema
 
+from shared.schema_types import NonEmptyStr
+from .models import Client
+
 
 class ClientSchema(Schema):
     id: int
@@ -18,22 +21,22 @@ class ClientSchema(Schema):
 
 
 class ClientCreateRequest(Schema):
-    first_name: str
-    last_name: str
+    first_name: NonEmptyStr
+    last_name: NonEmptyStr
     preferred_name: str = ''
     external_id: str = ''
     date_of_birth: date | None = None
-    status: str = 'active'
+    status: Client.Status = Client.Status.ACTIVE
     intake_date: date | None = None
 
 
 class ClientUpdateRequest(Schema):
-    first_name: str | None = None
-    last_name: str | None = None
+    first_name: NonEmptyStr | None = None
+    last_name: NonEmptyStr | None = None
     preferred_name: str | None = None
     external_id: str | None = None
     date_of_birth: date | None = None
-    status: str | None = None
+    status: Client.Status | None = None
     intake_date: date | None = None
     discharge_date: date | None = None
     internal_notes: str | None = None

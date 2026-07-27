@@ -1,6 +1,9 @@
 from datetime import datetime
 from ninja import Schema
-from pydantic import EmailStr
+from pydantic import EmailStr, Field
+
+from shared.schema_types import NonEmptyStr
+from .models import User
 
 
 class LoginRequest(Schema):
@@ -45,16 +48,16 @@ class CurrentUserSchema(UserSchema):
 
 class UserCreateRequest(Schema):
     email: EmailStr
-    first_name: str
-    last_name: str
-    role: str
-    password: str
+    first_name: NonEmptyStr
+    last_name: NonEmptyStr
+    role: User.Role
+    password: str = Field(min_length=8)
 
 
 class UserUpdateRequest(Schema):
-    first_name: str | None = None
-    last_name: str | None = None
-    role: str | None = None
+    first_name: NonEmptyStr | None = None
+    last_name: NonEmptyStr | None = None
+    role: User.Role | None = None
     is_active: bool | None = None
 
 

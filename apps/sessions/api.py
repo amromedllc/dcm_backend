@@ -7,6 +7,7 @@ from ninja.errors import HttpError
 
 from apps.accounts.auth import jwt_auth
 from apps.accounts.permissions import require_permission
+from shared.uploads import validate_media_upload
 from .models import Appointment, SessionRun, TrialEvent, BehaviorEvent, ABCEvent, SessionMedia, SessionMediaComment
 from .schemas import (
     AppointmentSchema, AppointmentCreateRequest, AppointmentUpdateRequest,
@@ -977,6 +978,7 @@ def upload_session_media(
     session = _get_session_or_404(session_id, request)
     if media_type not in SessionMedia.MediaType.values:
         raise HttpError(400, f'media_type must be one of {SessionMedia.MediaType.values}')
+    validate_media_upload(file, media_type)
 
     media = SessionMedia.objects.create(
         session_run=session,

@@ -432,6 +432,8 @@ def update_client(request, client_id: int, data: ClientUpdateRequest):
     client = _get_client_or_404(request, client_id)
     for field, value in data.dict(exclude_none=True).items():
         setattr(client, field, value)
+    if client.discharge_date and client.intake_date and client.discharge_date < client.intake_date:
+        raise HttpError(400, 'discharge_date cannot be before intake_date')
     client.save()
     return client
 

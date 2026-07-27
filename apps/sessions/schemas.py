@@ -1,6 +1,10 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from ninja import Schema
+from pydantic import Field
+
+from shared.schema_types import NonEmptyStr
+from .models import BehaviorEvent
 
 
 # ---------------------------------------------------------------------------
@@ -182,9 +186,9 @@ class BehaviorEventCreateRequest(Schema):
     target_id: int
     target_name: str
     occurred_at: datetime
-    duration_seconds: int | None = None
-    frequency_count: int = 1
-    severity: str = ''
+    duration_seconds: int | None = Field(default=None, ge=0)
+    frequency_count: int = Field(default=1, ge=0)
+    severity: BehaviorEvent.Severity | Literal[''] = ''
     notes: str = ''
     client_event_id: str | None = None
 
@@ -208,9 +212,9 @@ class ABCEventSchema(Schema):
 
 class ABCEventCreateRequest(Schema):
     occurred_at: datetime
-    antecedent: str
-    behavior_description: str
-    consequence: str
+    antecedent: NonEmptyStr
+    behavior_description: NonEmptyStr
+    consequence: NonEmptyStr
     setting: str = ''
     staff_response: str = ''
     notes: str = ''
@@ -231,8 +235,8 @@ class SessionMediaCommentSchema(Schema):
 
 
 class SessionMediaCommentCreateRequest(Schema):
-    timestamp_seconds: int | None = None
-    body: str
+    timestamp_seconds: int | None = Field(default=None, ge=0)
+    body: NonEmptyStr
 
 
 class SessionMediaSchema(Schema):

@@ -5,6 +5,7 @@ This mints a token that endpoint will accept for a DCM user, scoping them to
 a DocuSeal Account per facility/organization so PDF e-sign templates stay
 correctly siloed per practice.
 """
+import hmac
 import logging
 from datetime import timedelta
 
@@ -187,8 +188,8 @@ def create_session_note_submission(user: User, template_id: int, external_id: st
 
 
 def verify_webhook_signature(request) -> bool:
-    secret = request.headers.get('X-Dcm-Webhook-Secret')
-    return bool(settings.DOCUSEAL_WEBHOOK_SECRET) and secret == settings.DOCUSEAL_WEBHOOK_SECRET
+    secret = request.headers.get('X-Dcm-Webhook-Secret') or ''
+    return bool(settings.DOCUSEAL_WEBHOOK_SECRET) and hmac.compare_digest(secret, settings.DOCUSEAL_WEBHOOK_SECRET)
 
 
 def build_submission_url(slug: str) -> str:

@@ -1,6 +1,9 @@
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
 from ninja import Schema
+from pydantic import Field
+
+from shared.schema_types import NonEmptyStr
 
 
 # ---------------------------------------------------------------------------
@@ -8,9 +11,9 @@ from ninja import Schema
 # ---------------------------------------------------------------------------
 
 class NoteTemplateFieldSchema(Schema):
-    key: str
-    label: str
-    type: str                         # text | textarea | number | boolean | select | multiselect | date
+    key: NonEmptyStr
+    label: NonEmptyStr
+    type: Literal['text', 'textarea', 'number', 'boolean', 'select', 'multiselect', 'date']
     required: bool = False
     placeholder: str = ''
     options: list[str] = []           # for select / multiselect
@@ -32,11 +35,11 @@ class NoteTemplateSchema(Schema):
 
 
 class NoteTemplateCreateRequest(Schema):
-    name: str
+    name: NonEmptyStr
     description: str = ''
-    fields: list[dict[str, Any]]
+    fields: list[NoteTemplateFieldSchema] = Field(min_length=1)
     is_org_default: bool = False
-    template_type: str = 'notes'
+    template_type: Literal['notes', 'forms', 'reports'] = 'notes'
     body_template: str = ''
     require_completer_signature: bool = False
     require_additional_signatures: bool = False
@@ -44,12 +47,12 @@ class NoteTemplateCreateRequest(Schema):
 
 
 class NoteTemplateUpdateRequest(Schema):
-    name: str | None = None
+    name: NonEmptyStr | None = None
     description: str | None = None
-    fields: list[dict[str, Any]] | None = None
+    fields: list[NoteTemplateFieldSchema] | None = Field(default=None, min_length=1)
     is_org_default: bool | None = None
     is_active: bool | None = None
-    template_type: str | None = None
+    template_type: Literal['notes', 'forms', 'reports'] | None = None
     body_template: str | None = None
     require_completer_signature: bool | None = None
     require_additional_signatures: bool | None = None

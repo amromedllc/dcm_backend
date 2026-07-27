@@ -1,6 +1,10 @@
 from datetime import datetime
 from typing import Any
 from ninja import Schema
+from pydantic import Field, field_validator
+
+from shared.schema_types import NonEmptyStr, SlugStr
+from .models import Program, Target, MaintenanceSchedule, ProgramDataField, Lesson
 
 
 # ---------------------------------------------------------------------------
@@ -24,20 +28,39 @@ class WorkflowTemplateSchema(Schema):
     created_at: datetime
 
 
+def _require_phase_keys(phases: list[dict] | None) -> list[dict] | None:
+    if phases is None:
+        return None
+    for p in phases:
+        if not isinstance(p, dict) or not str(p.get('phase') or '').strip():
+            raise ValueError('each phase must be an object with a non-empty "phase" key')
+    return phases
+
+
 class WorkflowTemplateCreateRequest(Schema):
-    name: str
+    name: NonEmptyStr
     description: str = ''
-    phases: list[dict[str, Any]]
+    phases: list[dict[str, Any]] = Field(min_length=1)
     is_org_default: bool = False
     is_active: bool = True
 
+    @field_validator('phases')
+    @classmethod
+    def _check_phases(cls, v):
+        return _require_phase_keys(v)
+
 
 class WorkflowTemplateUpdateRequest(Schema):
-    name: str | None = None
+    name: NonEmptyStr | None = None
     description: str | None = None
-    phases: list[dict[str, Any]] | None = None
+    phases: list[dict[str, Any]] | None = Field(default=None, min_length=1)
     is_org_default: bool | None = None
     is_active: bool | None = None
+
+    @field_validator('phases')
+    @classmethod
+    def _check_phases(cls, v):
+        return _require_phase_keys(v)
 
 
 # ---------------------------------------------------------------------------
@@ -57,22 +80,22 @@ class MaintenanceScheduleSchema(Schema):
 
 
 class MaintenanceScheduleCreateRequest(Schema):
-    name: str
-    interval_type: str = 'every_n_sessions'
-    interval_value: int = 5
-    episodes: int = 4
-    success_threshold_pct: int = 80
-    on_failure: str = 'back_to_acquisition'
+    name: NonEmptyStr
+    interval_type: MaintenanceSchedule.IntervalType = MaintenanceSchedule.IntervalType.EVERY_N_SESSIONS
+    interval_value: int = Field(default=5, ge=1)
+    episodes: int = Field(default=4, ge=1)
+    success_threshold_pct: int = Field(default=80, ge=0, le=100)
+    on_failure: MaintenanceSchedule.OnFailure = MaintenanceSchedule.OnFailure.BACK_TO_ACQUISITION
     is_org_default: bool = False
 
 
 class MaintenanceScheduleUpdateRequest(Schema):
-    name: str | None = None
-    interval_type: str | None = None
-    interval_value: int | None = None
-    episodes: int | None = None
-    success_threshold_pct: int | None = None
-    on_failure: str | None = None
+    name: NonEmptyStr | None = None
+    interval_type: MaintenanceSchedule.IntervalType | None = None
+    interval_value: int | None = Field(default=None, ge=1)
+    episodes: int | None = Field(default=None, ge=1)
+    success_threshold_pct: int | None = Field(default=None, ge=0, le=100)
+    on_failure: MaintenanceSchedule.OnFailure | None = None
     is_org_default: bool | None = None
 
 
@@ -81,7 +104,7 @@ class MaintenanceScheduleUpdateRequest(Schema):
 # ---------------------------------------------------------------------------
 
 class PromptingLevelSchema(Schema):
-    label: str
+    label: NonEmptyStr
     score: int
     color: str
     abbreviation: str
@@ -97,22 +120,32 @@ class PromptingTemplateSchema(Schema):
 
 
 class PromptingTemplateCreateRequest(Schema):
-    name: str
+    name: NonEmptyStr
     description: str = ''
-    levels: list[dict[str, Any]]
+    levels: list[PromptingLevelSchema] = Field(min_length=1)
     is_org_default: bool = False
 
 
 class PromptingTemplateUpdateRequest(Schema):
-    name: str | None = None
+    name: NonEmptyStr | None = None
     description: str | None = None
-    levels: list[dict[str, Any]] | None = None
+    levels: list[PromptingLevelSchema] | None = Field(default=None, min_length=1)
     is_org_default: bool | None = None
 
 
 # ---------------------------------------------------------------------------
 # Fading templates
 # ---------------------------------------------------------------------------
+
+class FadingRulesSchema(Schema):
+    """Mirrors the .get(key, default) reads in services.py's fading logic —
+    every key is optional with the same default, so validating this shape
+    can't change behavior for a caller that omits a key."""
+    threshold_pct: int = Field(default=90, ge=0, le=100)
+    consecutive_sessions: int = Field(default=3, ge=1)
+    minimum_trials: int = Field(default=5, ge=1)
+    regression_threshold_pct: int = Field(default=50, ge=0, le=100)
+
 
 class FadingTemplateSchema(Schema):
     id: int
@@ -124,17 +157,27 @@ class FadingTemplateSchema(Schema):
 
 
 class FadingTemplateCreateRequest(Schema):
-    name: str
+    name: NonEmptyStr
     description: str = ''
     rules: dict[str, Any]
     is_org_default: bool = False
 
+    @field_validator('rules')
+    @classmethod
+    def _validate_rules(cls, v):
+        return FadingRulesSchema(**v).dict()
+
 
 class FadingTemplateUpdateRequest(Schema):
-    name: str | None = None
+    name: NonEmptyStr | None = None
     description: str | None = None
     rules: dict[str, Any] | None = None
     is_org_default: bool | None = None
+
+    @field_validator('rules')
+    @classmethod
+    def _validate_rules(cls, v):
+        return FadingRulesSchema(**v).dict() if v is not None else v
 
 
 # ---------------------------------------------------------------------------
@@ -192,9 +235,9 @@ class ProgramListSchema(Schema):
 
 class ProgramCreateRequest(Schema):
     client_id: int
-    name: str
-    category: str = 'skill_acquisition'
-    phase: str = 'teaching'
+    name: NonEmptyStr
+    category: Program.Category = Program.Category.SKILL_ACQUISITION
+    phase: Program.Phase = Program.Phase.TEACHING
     treatment_area: str = ''
     tags: list[str] = []
     baseline_notes: str = ''
@@ -203,14 +246,14 @@ class ProgramCreateRequest(Schema):
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
-    display_order: int = 0
+    display_order: int = Field(default=0, ge=0)
 
 
 class ProgramUpdateRequest(Schema):
-    name: str | None = None
-    category: str | None = None
-    status: str | None = None
-    phase: str | None = None
+    name: NonEmptyStr | None = None
+    category: Program.Category | None = None
+    status: Program.Status | None = None
+    phase: Program.Phase | None = None
     treatment_area: str | None = None
     tags: list[str] | None = None
     baseline_notes: str | None = None
@@ -219,7 +262,7 @@ class ProgramUpdateRequest(Schema):
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
-    display_order: int | None = None
+    display_order: int | None = Field(default=None, ge=0)
 
 
 # ---------------------------------------------------------------------------
@@ -250,8 +293,8 @@ class TargetSchema(Schema):
 
 
 class TargetCreateRequest(Schema):
-    name: str
-    measurement_type: str = 'discrete_trial'
+    name: NonEmptyStr
+    measurement_type: Target.MeasurementType = Target.MeasurementType.DISCRETE_TRIAL
     sub_items: list[dict] = []
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
@@ -260,13 +303,13 @@ class TargetCreateRequest(Schema):
     sd_text: str = ''
     teaching_instructions: str = ''
     status: str = ''  # empty = resolve server-side to the org's default TargetStatus
-    display_order: int = 0
+    display_order: int = Field(default=0, ge=0)
     is_visible_to_staff: bool = True
 
 
 class TargetUpdateRequest(Schema):
-    name: str | None = None
-    measurement_type: str | None = None
+    name: NonEmptyStr | None = None
+    measurement_type: Target.MeasurementType | None = None
     sub_items: list[dict] | None = None
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
@@ -275,10 +318,10 @@ class TargetUpdateRequest(Schema):
     sd_text: str | None = None
     teaching_instructions: str | None = None
     status: str | None = None
-    mastery_mode: str | None = None
-    fading_mode: str | None = None
-    current_prompt_level_index: int | None = None
-    display_order: int | None = None
+    mastery_mode: Target.MasteryMode | None = None
+    fading_mode: Target.FadingMode | None = None
+    current_prompt_level_index: int | None = Field(default=None, ge=0)
+    display_order: int | None = Field(default=None, ge=0)
     is_visible_to_staff: bool | None = None
 
 
@@ -286,11 +329,11 @@ class BulkUpdateTargetsRequest(Schema):
     """Update a specific subset of fields across multiple targets at once."""
     target_ids: list[int]
     # Only fields present (non-null) will be written — preserves other fields
-    name: str | None = None
-    mastery_mode: str | None = None
-    fading_mode: str | None = None
+    name: NonEmptyStr | None = None
+    mastery_mode: Target.MasteryMode | None = None
+    fading_mode: Target.FadingMode | None = None
     status: str | None = None
-    measurement_type: str | None = None
+    measurement_type: Target.MeasurementType | None = None
     sd_text: str | None = None
     teaching_instructions: str | None = None
     prompting_template_id: int | None = None
@@ -333,20 +376,20 @@ class LessonSchema(Schema):
 
 class LessonCreateRequest(Schema):
     client_id: int
-    name: str
-    lesson_type: str = 'open'
+    name: NonEmptyStr
+    lesson_type: Lesson.LessonType = Lesson.LessonType.OPEN
     program_ids: list[int] = []
 
 
 class LessonUpdateRequest(Schema):
-    name: str | None = None
-    lesson_type: str | None = None
+    name: NonEmptyStr | None = None
+    lesson_type: Lesson.LessonType | None = None
     is_active: bool | None = None
 
 
 class AddProgramToLessonRequest(Schema):
     program_id: int
-    display_order: int = 0
+    display_order: int = Field(default=0, ge=0)
 
 
 # ---------------------------------------------------------------------------
@@ -377,9 +420,9 @@ class OrgProgramSchema(Schema):
 
 
 class OrgProgramCreateRequest(Schema):
-    name: str
-    category: str = 'skill_acquisition'
-    phase: str = 'teaching'
+    name: NonEmptyStr
+    category: Program.Category = Program.Category.SKILL_ACQUISITION
+    phase: Program.Phase = Program.Phase.TEACHING
     treatment_area: str = ''
     tags: list[str] = []
     objective: str = ''
@@ -387,7 +430,7 @@ class OrgProgramCreateRequest(Schema):
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
-    display_order: int = 0
+    display_order: int = Field(default=0, ge=0)
 
 
 class AssignOrgProgramRequest(Schema):
@@ -408,7 +451,7 @@ class TreatmentAreaSchema(Schema):
 
 
 class TreatmentAreaRequest(Schema):
-    name: str
+    name: NonEmptyStr
     description: str = ''
     is_active: bool = True
 
@@ -427,7 +470,7 @@ class ProgramTagSchema(Schema):
 
 
 class ProgramTagRequest(Schema):
-    name: str
+    name: NonEmptyStr
     color: str = '#6366f1'
     is_active: bool = True
 
@@ -451,24 +494,24 @@ class TargetStatusSchema(Schema):
 
 
 class TargetStatusRequest(Schema):
-    key: str
-    label: str
+    key: SlugStr
+    label: NonEmptyStr
     color: str = '#6366f1'
     icon: str = 'circle'
     is_staff_visible: bool = False
     is_default: bool = False
     is_active: bool = True
-    display_order: int = 0
+    display_order: int = Field(default=0, ge=0)
 
 
 class TargetStatusUpdateRequest(Schema):
-    label: str | None = None
+    label: NonEmptyStr | None = None
     color: str | None = None
     icon: str | None = None
     is_staff_visible: bool | None = None
     is_default: bool | None = None
     is_active: bool | None = None
-    display_order: int | None = None
+    display_order: int | None = Field(default=None, ge=0)
 
 
 # ---------------------------------------------------------------------------
@@ -487,10 +530,10 @@ class ProgramDataFieldSchema(Schema):
 
 
 class ProgramDataFieldRequest(Schema):
-    name: str
-    field_type: str = 'text'
-    field_location: str = 'treatment_tab'
-    display_order: int = 0
+    name: NonEmptyStr
+    field_type: ProgramDataField.FieldType = ProgramDataField.FieldType.TEXT
+    field_location: ProgramDataField.FieldLocation = ProgramDataField.FieldLocation.TREATMENT_TAB
+    display_order: int = Field(default=0, ge=0)
     is_active: bool = True
 
 

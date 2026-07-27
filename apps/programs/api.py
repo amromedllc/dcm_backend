@@ -7,6 +7,7 @@ from django.utils import timezone
 from apps.accounts.auth import jwt_auth
 from apps.accounts.permissions import require_permission
 from apps.central_library.models import CentralProgram
+from shared.uploads import validate_image_upload
 from .models import (
     Program, Target, PromptingTemplate,
     WorkflowTemplate, MaintenanceSchedule, FadingTemplate,
@@ -46,6 +47,31 @@ def _require_settings_permission(request, permission: str):
     Privileges are the source of truth — do not also require role=admin.
     """
     require_permission(request, permission)
+
+
+def _validate_treatment_area_and_tags(treatment_area: str | None, tags: list[str] | None) -> None:
+    """treatment_area and tags are free text/JSON on Program, not FKs — but
+    they're meant to be drawn from the org's configured TreatmentArea/ProgramTag
+    lists (see settings page), so a value that matches neither is almost
+    always a typo or a stale client, not an intentional new value."""
+    if treatment_area and not TreatmentArea.objects.filter(name=treatment_area).exists():
+        raise HttpError(400, f'Unknown treatment_area: {treatment_area}')
+    if tags:
+        valid = set(ProgramTag.objects.filter(name__in=tags).values_list('name', flat=True))
+        invalid = [t for t in tags if t not in valid]
+        if invalid:
+            raise HttpError(400, f'Unknown tag(s): {", ".join(invalid)}')
+
+
+def _check_unique_name(model, name: str, *, exclude_id: int | None = None) -> None:
+    """Pre-check for the (organization, name) uniqueness constraint on
+    settings entities — gives a clean 409 instead of the IntegrityError a
+    same-name insert/update would otherwise raise."""
+    qs = model.objects.filter(name=name)
+    if exclude_id is not None:
+        qs = qs.exclude(id=exclude_id)
+    if qs.exists():
+        raise HttpError(409, f'{model.__name__} named "{name}" already exists')
 
 
 def _serialize_program(program: Program, include_targets: bool = False) -> dict:
@@ -104,6 +130,7 @@ def list_programs(request, client_id: int, category: str | None = None, status: 
 @router.post('/programs', response={201: ProgramSchema})
 def create_program(request, data: ProgramCreateRequest):
     _require_supervisor(request)
+    _validate_treatment_area_and_tags(data.treatment_area, data.tags)
     program = Program.objects.create(
         external_client_id=data.client_id,
         name=data.name,
@@ -140,6 +167,11 @@ def update_program(request, program_id: int, data: ProgramUpdateRequest):
     except Program.DoesNotExist:
         raise HttpError(404, 'Program not found')
     updates = data.dict(exclude_none=True)
+    if 'treatment_area' in updates or 'tags' in updates:
+        _validate_treatment_area_and_tags(
+            updates.get('treatment_area', program.treatment_area),
+            updates.get('tags', program.tags),
+        )
     for field, value in updates.items():
         setattr(program, field, value)
     program.save()
@@ -167,6 +199,23 @@ def archive_program(request, program_id: int):
 # Targets
 # ---------------------------------------------------------------------------
 
+_SUB_ITEM_MEASUREMENT_TYPES = {
+    Target.MeasurementType.TASK_ANALYSIS,
+    Target.MeasurementType.SET_OF_TARGETS,
+    Target.MeasurementType.SHAPING,
+}
+
+
+def _require_sub_items_if_needed(measurement_type: str, sub_items: list) -> None:
+    if measurement_type in _SUB_ITEM_MEASUREMENT_TYPES and not sub_items:
+        raise HttpError(400, f'{measurement_type} targets require at least one sub_item')
+
+
+def _validate_target_status(status: str) -> None:
+    if status and not TargetStatus.objects.filter(key=status).exists():
+        raise HttpError(400, f'Invalid status: {status}')
+
+
 @router.get('/programs/{program_id}/targets', response=list[TargetSchema])
 def list_targets(request, program_id: int, staff_view: bool = False):
     try:
@@ -191,9 +240,12 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
         target_data['workflow_template_id'] = program.workflow_template_id
     if program.fading_template_id and not target_data.get('fading_template_id'):
         target_data['fading_template_id'] = program.fading_template_id
-    if not target_data.get('status'):
+    if target_data.get('status'):
+        _validate_target_status(target_data['status'])
+    else:
         default_status = TargetStatus.objects.filter(is_default=True).first()
         target_data['status'] = default_status.key if default_status else Target.Status.WAITING
+    _require_sub_items_if_needed(target_data['measurement_type'], target_data['sub_items'])
     target = Target.objects.create(
         program=program,
         created_by=request.user,
@@ -224,6 +276,9 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
         # Swapping the level hierarchy invalidates whatever level index the
         # target was previously faded to — reset to the most-intrusive level.
         target.current_prompt_level_index = 0
+    if 'status' in updates:
+        _validate_target_status(updates['status'])
+    _require_sub_items_if_needed(target.measurement_type, target.sub_items)
     target.save()
     return target
 
@@ -323,6 +378,16 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
         if fk_id is not None and not model.objects.filter(id=fk_id).exists():
             raise HttpError(400, f'Invalid {field_name}: {fk_id}')
 
+    if updates.get('status'):
+        _validate_target_status(updates['status'])
+
+    if updates.get('measurement_type') in _SUB_ITEM_MEASUREMENT_TYPES:
+        missing_sub_items = Target.objects.filter(
+            id__in=data.target_ids, program_id=program_id, sub_items=[],
+        ).exists()
+        if missing_sub_items:
+            raise HttpError(400, f'{updates["measurement_type"]} requires targets to already have sub_items')
+
     if 'prompting_template_id' in updates:
         updates['current_prompt_level_index'] = 0
     updates['updated_at'] = timezone.now()
@@ -356,6 +421,7 @@ def list_prompting_templates(request):
 @router.post('/programs/templates/prompting', response={201: PromptingTemplateSchema})
 def create_prompting_template(request, data: PromptingTemplateCreateRequest):
     _require_settings_permission(request, 'settings_prompting_templates_create')
+    _check_unique_name(PromptingTemplate, data.name)
     template = PromptingTemplate.objects.create(created_by=request.user, **data.dict())
     return 201, template
 
@@ -367,6 +433,8 @@ def update_prompting_template(request, template_id: int, data: PromptingTemplate
         template = PromptingTemplate.objects.get(id=template_id)
     except PromptingTemplate.DoesNotExist:
         raise HttpError(404, 'Template not found')
+    if data.name:
+        _check_unique_name(PromptingTemplate, data.name, exclude_id=template_id)
     for field, value in data.dict(exclude_none=True).items():
         setattr(template, field, value)
     template.save()
@@ -395,6 +463,7 @@ def list_fading_templates(request):
 @router.post('/programs/templates/fading', response={201: FadingTemplateSchema})
 def create_fading_template(request, data: FadingTemplateCreateRequest):
     _require_settings_permission(request, 'settings_fading_templates_create')
+    _check_unique_name(FadingTemplate, data.name)
     template = FadingTemplate.objects.create(created_by=request.user, **data.dict())
     return 201, template
 
@@ -406,6 +475,8 @@ def update_fading_template(request, template_id: int, data: FadingTemplateUpdate
         template = FadingTemplate.objects.get(id=template_id)
     except FadingTemplate.DoesNotExist:
         raise HttpError(404, 'Template not found')
+    if data.name:
+        _check_unique_name(FadingTemplate, data.name, exclude_id=template_id)
     for field, value in data.dict(exclude_none=True).items():
         setattr(template, field, value)
     template.save()
@@ -437,6 +508,7 @@ def list_workflow_templates(request, include_inactive: bool = False):
 @router.post('/programs/templates/workflow', response={201: WorkflowTemplateSchema})
 def create_workflow_template(request, data: WorkflowTemplateCreateRequest):
     _require_settings_permission(request, 'settings_workflows_create')
+    _check_unique_name(WorkflowTemplate, data.name)
     template = WorkflowTemplate.objects.create(created_by=request.user, **data.dict())
     return 201, template
 
@@ -456,6 +528,8 @@ def update_workflow_template(request, template_id: int, data: WorkflowTemplateUp
         template = WorkflowTemplate.objects.get(id=template_id)
     except WorkflowTemplate.DoesNotExist:
         raise HttpError(404, 'Workflow template not found')
+    if data.name:
+        _check_unique_name(WorkflowTemplate, data.name, exclude_id=template_id)
     for field, value in data.dict(exclude_none=True).items():
         setattr(template, field, value)
     template.save()
@@ -484,6 +558,7 @@ def list_maintenance_schedules(request):
 @router.post('/programs/templates/maintenance', response={201: MaintenanceScheduleSchema})
 def create_maintenance_schedule(request, data: MaintenanceScheduleCreateRequest):
     _require_settings_permission(request, 'settings_maintenance_schedules_create')
+    _check_unique_name(MaintenanceSchedule, data.name)
     schedule = MaintenanceSchedule.objects.create(created_by=request.user, **data.dict())
     return 201, schedule
 
@@ -503,6 +578,8 @@ def update_maintenance_schedule(request, schedule_id: int, data: MaintenanceSche
         schedule = MaintenanceSchedule.objects.get(id=schedule_id)
     except MaintenanceSchedule.DoesNotExist:
         raise HttpError(404, 'Maintenance schedule not found')
+    if data.name:
+        _check_unique_name(MaintenanceSchedule, data.name, exclude_id=schedule_id)
     for field, value in data.dict(exclude_none=True).items():
         setattr(schedule, field, value)
     schedule.save()
@@ -665,6 +742,7 @@ def list_org_programs(request, category: str | None = None, status: str | None =
 @router.post('/org-programs', response={201: OrgProgramSchema})
 def create_org_program(request, data: OrgProgramCreateRequest):
     require_permission(request, 'org_programs_create')
+    _validate_treatment_area_and_tags(data.treatment_area, data.tags)
     program = Program.objects.create(
         is_template=True,
         external_client_id=None,
@@ -699,7 +777,13 @@ def update_org_program(request, program_id: int, data: ProgramUpdateRequest):
         program = _org_qs(request).get(id=program_id)
     except Program.DoesNotExist:
         raise HttpError(404, 'Program not found')
-    for field, value in data.dict(exclude_none=True).items():
+    updates = data.dict(exclude_none=True)
+    if 'treatment_area' in updates or 'tags' in updates:
+        _validate_treatment_area_and_tags(
+            updates.get('treatment_area', program.treatment_area),
+            updates.get('tags', program.tags),
+        )
+    for field, value in updates.items():
         setattr(program, field, value)
     program.save()
     return _serialize_org_program(program, request, include_targets=True)
@@ -712,6 +796,7 @@ def upload_org_program_image(request, program_id: int, file: UploadedFile = File
         program = _org_qs(request).get(id=program_id)
     except Program.DoesNotExist:
         raise HttpError(404, 'Program not found')
+    validate_image_upload(file)
     program.image = file
     program.save(update_fields=['image'])
     return _serialize_org_program(program, request, include_targets=True)
@@ -947,6 +1032,7 @@ def list_treatment_areas(request, include_inactive: bool = False):
 @router.post('/programs/settings/treatment-areas', response={201: TreatmentAreaSchema})
 def create_treatment_area(request, data: TreatmentAreaRequest):
     _require_settings_permission(request, 'settings_treatment_areas_create')
+    _check_unique_name(TreatmentArea, data.name)
     return 201, TreatmentArea.objects.create(created_by=request.user, **data.dict())
 
 
@@ -957,6 +1043,7 @@ def update_treatment_area(request, pk: int, data: TreatmentAreaRequest):
         obj = TreatmentArea.objects.get(id=pk)
     except TreatmentArea.DoesNotExist:
         raise HttpError(404, 'Not found')
+    _check_unique_name(TreatmentArea, data.name, exclude_id=pk)
     for k, v in data.dict(exclude_none=True).items():
         setattr(obj, k, v)
     obj.save()
@@ -988,6 +1075,7 @@ def list_program_tags(request, include_inactive: bool = False):
 @router.post('/programs/settings/tags', response={201: ProgramTagSchema})
 def create_program_tag(request, data: ProgramTagRequest):
     _require_settings_permission(request, 'settings_tags_create')
+    _check_unique_name(ProgramTag, data.name)
     return 201, ProgramTag.objects.create(created_by=request.user, **data.dict())
 
 
@@ -998,6 +1086,7 @@ def update_program_tag(request, pk: int, data: ProgramTagRequest):
         obj = ProgramTag.objects.get(id=pk)
     except ProgramTag.DoesNotExist:
         raise HttpError(404, 'Not found')
+    _check_unique_name(ProgramTag, data.name, exclude_id=pk)
     for k, v in data.dict(exclude_none=True).items():
         setattr(obj, k, v)
     obj.save()
@@ -1083,6 +1172,7 @@ def list_data_fields(request, include_inactive: bool = False):
 @router.post('/programs/settings/data-fields', response={201: ProgramDataFieldSchema})
 def create_data_field(request, data: ProgramDataFieldRequest):
     _require_settings_permission(request, 'settings_data_fields_create')
+    _check_unique_name(ProgramDataField, data.name)
     return 201, ProgramDataField.objects.create(created_by=request.user, **data.dict())
 
 
@@ -1093,6 +1183,7 @@ def update_data_field(request, pk: int, data: ProgramDataFieldRequest):
         obj = ProgramDataField.objects.get(id=pk)
     except ProgramDataField.DoesNotExist:
         raise HttpError(404, 'Not found')
+    _check_unique_name(ProgramDataField, data.name, exclude_id=pk)
     for k, v in data.dict(exclude_none=True).items():
         setattr(obj, k, v)
     obj.save()

@@ -26,14 +26,14 @@ class SsoUrlResponse(Schema):
 
 @router.get('/docuseal/sso-url', response=SsoUrlResponse)
 def docuseal_sso_url(request):
-    require_permission(request, 'templates')
+    require_permission(request, 'templates_view')
     return {'url': build_sso_redirect_url(request.user)}
 
 
 @router.get('/docuseal/upload-url', response=SsoUrlResponse)
 def docuseal_upload_url(request):
     """Deep link straight into DocuSeal's upload dialog."""
-    require_permission(request, 'templates')
+    require_permission(request, 'templates_create')
     return {'url': build_upload_url(request.user)}
 
 
@@ -47,6 +47,7 @@ class DocusealTemplateSchema(Schema):
 @router.get('/docuseal/templates', response=list[DocusealTemplateSchema])
 def list_docuseal_session_note_templates(request):
     """Session Note DocuSeal templates for the caller's facility, read from TPMS."""
+    require_permission(request, 'templates_view')
     return list_session_note_templates(request.user)
 
 
@@ -60,13 +61,14 @@ class DocusealUploadedTemplateSchema(Schema):
 @router.get('/docuseal/uploaded-templates', response=list[DocusealUploadedTemplateSchema])
 def list_docuseal_uploaded_templates(request):
     """Session Note templates uploaded directly through DCM's upload flow."""
+    require_permission(request, 'templates_view')
     return list_uploaded_session_note_templates(request.user)
 
 
 @router.get('/docuseal/uploaded-templates/{template_id}/url', response=SsoUrlResponse)
 def docuseal_uploaded_template_url(request, template_id: int):
     """Deep link straight into this specific uploaded template's preview page."""
-    require_permission(request, 'templates')
+    require_permission(request, 'templates_view')
     return {'url': build_template_url(request.user, template_id)}
 
 
@@ -164,7 +166,11 @@ def docuseal_webhook(request):
     if submitter_id is None:
         return {'status': 'ignored'}
 
-    updated = LessonNote.objects.filter(docuseal_submitter_id=submitter_id).update(
+    # TenantResolverMiddleware can't resolve a real tenant for this request
+    # (DocuSeal calls one shared webhook URL, not a per-org hostname, and
+    # there's no JWT), so it falls back to an arbitrary org. Bypass row-level
+    # scoping and match on the globally-unique docuseal_submitter_id instead.
+    updated = LessonNote.all_organizations.filter(docuseal_submitter_id=submitter_id).update(
         docuseal_completed_at=timezone.now(),
     )
     return {'status': 'ok', 'updated': updated}
