@@ -52,6 +52,7 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'client_history': True,
         'client_progress': True,
         'client_report': True,
+        'client_bip': True,
         # Appointments
         'appointments_create': True,
         'appointments_edit': True,
@@ -71,6 +72,12 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'note_approve': True,
         # Review queue
         'review_queue_view': True,
+        # Behavior Intervention Plans
+        'bip_view': True,
+        'bip_create': True,
+        'bip_edit': True,
+        'bip_activate': True,
+        'bip_delete': True,
         # Templates
         'templates_view': True,
         'templates_create': True,
@@ -144,6 +151,7 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'client_history': True,
         'client_progress': True,
         'client_report': True,
+        'client_bip': True,
         # Appointments
         'appointments_create': True,
         'appointments_edit': True,
@@ -163,6 +171,12 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'note_approve': True,
         # Review queue
         'review_queue_view': True,
+        # Behavior Intervention Plans
+        'bip_view': True,
+        'bip_create': True,
+        'bip_edit': True,
+        'bip_activate': True,
+        'bip_delete': False,
         # Templates
         'templates_view': True,
         'templates_create': True,
@@ -236,6 +250,7 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'client_history': True,
         'client_progress': True,
         'client_report': False,
+        'client_bip': True,
         # Appointments
         'appointments_create': False,
         'appointments_edit': False,
@@ -255,6 +270,12 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'note_approve': False,
         # Review queue
         'review_queue_view': False,
+        # Behavior Intervention Plans
+        'bip_view': True,
+        'bip_create': False,
+        'bip_edit': False,
+        'bip_activate': False,
+        'bip_delete': False,
         # Templates
         'templates_view': False,
         'templates_create': False,

@@ -8,6 +8,7 @@ from apps.clients.api import router as clients_router
 from apps.programs.api import router as programs_router
 from apps.sessions.api import router as sessions_router
 from apps.notes.api import router as notes_router
+from apps.behavior_plans.api import router as behavior_plans_router
 from apps.analytics.api import router as analytics_router
 from apps.exports.api import router as exports_router
 from apps.notifications.api import router as notifications_router
@@ -56,6 +57,7 @@ api.add_router('/clients', clients_router, tags=['Clients'])
 api.add_router('/', programs_router, tags=['Programs'])
 api.add_router('/', sessions_router, tags=['Sessions'])
 api.add_router('/', notes_router, tags=['Notes'])
+api.add_router('/', behavior_plans_router, tags=['Behavior Plans'])
 api.add_router('/', analytics_router, tags=['Analytics'])
 api.add_router('/', exports_router, tags=['Exports'])
 api.add_router('/', notifications_router, tags=['Notifications'])

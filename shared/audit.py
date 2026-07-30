@@ -37,6 +37,19 @@ def log_note_status_change(actor_id: int, note_id: int, old_status: str, new_sta
               {'old_status': old_status, 'new_status': new_status})
 
 
+def log_bip_status_change(
+    actor_id: int,
+    plan_id: int,
+    old_status: str | None,
+    new_status: str,
+    client_id: int | None = None,
+    version_number: int | None = None,
+) -> None:
+    log_event('bip_status_change', actor_id, 'behavior_intervention_plan', plan_id,
+              {'old_status': old_status, 'new_status': new_status,
+               'client_id': client_id, 'version_number': version_number})
+
+
 def log_export(actor_id: int, export_id: int, export_type: str) -> None:
     log_event('export_generated', actor_id, 'export', export_id,
               {'export_type': export_type})

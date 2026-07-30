@@ -50,6 +50,7 @@ TENANT_APPS = [
     'apps.programs',
     'apps.sessions',
     'apps.notes',
+    'apps.behavior_plans',
     'apps.analytics',
     'apps.exports',
     'apps.integrations',
@@ -348,6 +349,11 @@ UNFOLD = {
                         'title': 'Note Templates',
                         'icon': 'description',
                         'link': '/admin/notes/notetemplate/',
+                    },
+                    {
+                        'title': 'Behavior Plans',
+                        'icon': 'psychology',
+                        'link': '/admin/behavior_plans/behaviorinterventionplan/',
                     },
                     {
                         'title': 'Clients',
