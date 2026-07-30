@@ -94,7 +94,17 @@ def token_tenant_mismatch(payload: dict[str, Any], request) -> bool:
     return False
 
 
-class JWTAuth(HttpBearer):
+class _BaseJWTAuth(HttpBearer):
+    """Decodes + validates a DCM access token, then optionally restricts
+    which roles may authenticate through this instance at all.
+
+    allowed_roles=None means any role. Enumerating roles POSITIVELY (rather
+    than excluding a role) means a future role is denied-by-default rather
+    than silently let through — see JWTAuth below, which is the API's
+    default auth and must never accept a caregiver token.
+    """
+    allowed_roles: frozenset[str] | None = None
+
     def authenticate(self, request, token: str) -> User | None:
         try:
             payload = decode_token(token)
@@ -105,11 +115,36 @@ class JWTAuth(HttpBearer):
             if is_token_blocked(payload):
                 return None
             user = User.objects.get(id=int(payload['sub']), is_active=True)
+            if self.allowed_roles is not None and user.role not in self.allowed_roles:
+                return None
             request.user = user
             request._jwt_payload = payload
             return user
         except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, User.DoesNotExist, KeyError):
             return None
+
+
+class JWTAuth(_BaseJWTAuth):
+    """The API's default auth. Excludes caregiver by construction — every
+    endpoint using the default auth (i.e. almost the whole app) fails
+    closed for portal accounts with no per-endpoint check required. See
+    apps.caregiver_portal for the only caregiver-reachable surface."""
+    allowed_roles = frozenset({User.Role.ADMIN, User.Role.SUPERVISOR, User.Role.STAFF, User.Role.REPORTING})
+
+
+class AnyRoleJWTAuth(_BaseJWTAuth):
+    """No role restriction — only for role-agnostic session endpoints
+    (/auth/me, /auth/logout, /auth/logout-all) that every role needs."""
+
+
+class CaregiverJWTAuth(_BaseJWTAuth):
+    allowed_roles = frozenset({User.Role.CAREGIVER})
+
+    def authenticate(self, request, token: str) -> User | None:
+        user = super().authenticate(request, token)
+        if user is None or user.external_client_id is None:
+            return None
+        return user
 
 
 class APIKeyAuth(APIKeyHeader):
@@ -124,4 +159,6 @@ class APIKeyAuth(APIKeyHeader):
 
 
 jwt_auth = JWTAuth()
+jwt_auth_any_role = AnyRoleJWTAuth()
+caregiver_auth = CaregiverJWTAuth()
 api_key_auth = APIKeyAuth()

@@ -51,6 +51,7 @@ TENANT_APPS = [
     'apps.sessions',
     'apps.notes',
     'apps.behavior_plans',
+    'apps.caregiver_portal',
     'apps.analytics',
     'apps.exports',
     'apps.integrations',

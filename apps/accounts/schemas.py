@@ -42,8 +42,14 @@ class UserSchema(Schema):
     created_at: datetime
 
 
+class CaregiverClientSchema(Schema):
+    external_id: int
+    full_name: str
+
+
 class CurrentUserSchema(UserSchema):
     permissions: dict[str, bool]
+    caregiver_client: CaregiverClientSchema | None = None
 
 
 class UserCreateRequest(Schema):

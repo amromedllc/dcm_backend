@@ -9,6 +9,7 @@ from apps.programs.api import router as programs_router
 from apps.sessions.api import router as sessions_router
 from apps.notes.api import router as notes_router
 from apps.behavior_plans.api import router as behavior_plans_router
+from apps.caregiver_portal.api import router as caregiver_portal_router
 from apps.analytics.api import router as analytics_router
 from apps.exports.api import router as exports_router
 from apps.notifications.api import router as notifications_router
@@ -23,6 +24,10 @@ api = NinjaAPI(
         'Authenticate with Bearer JWT (users) or X-API-Key header (facility integrations).'
     ),
     docs_url='/docs',
+    # jwt_auth (the default here) now excludes caregiver-role tokens by
+    # construction — see apps.accounts.auth._BaseJWTAuth. apps.caregiver_portal
+    # (mounted at /portal below, with its own auth=caregiver_auth) is the
+    # only caregiver-reachable surface in the whole API.
     auth=[jwt_auth, api_key_auth],
 )
 
@@ -58,6 +63,7 @@ api.add_router('/', programs_router, tags=['Programs'])
 api.add_router('/', sessions_router, tags=['Sessions'])
 api.add_router('/', notes_router, tags=['Notes'])
 api.add_router('/', behavior_plans_router, tags=['Behavior Plans'])
+api.add_router('/portal', caregiver_portal_router, tags=['Caregiver Portal'])
 api.add_router('/', analytics_router, tags=['Analytics'])
 api.add_router('/', exports_router, tags=['Exports'])
 api.add_router('/', notifications_router, tags=['Notifications'])

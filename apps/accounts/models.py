@@ -40,6 +40,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     external_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
     # External system employee pk — set at login for staff/supervisor, null for admin-only logins
     external_employee_id = models.IntegerField(null=True, blank=True, db_index=True)
+    external_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     # Set for native users and TPMS-linked users after login. Privileges
     # (RolePermission) are keyed by this Organization. JWT is still bound to
     # the tenant resolved at login (see accounts.auth.token_tenant_mismatch).
@@ -60,10 +61,23 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     class Meta:
         app_label = 'accounts'
+        constraints = [
+            models.CheckConstraint(
+                name='caregiver_has_client_link',
+                check=(
+                    models.Q(role='caregiver', external_client_id__isnull=False)
+                    | (~models.Q(role='caregiver') & models.Q(external_client_id__isnull=True))
+                ),
+            ),
+        ]
 
     @property
     def full_name(self) -> str:
         return f'{self.first_name} {self.last_name}'.strip()
+
+    @property
+    def is_caregiver(self) -> bool:
+        return self.role == self.Role.CAREGIVER and self.external_client_id is not None
 
     def has_role(self, *roles: str) -> bool:
         return self.role in roles

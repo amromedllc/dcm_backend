@@ -44,6 +44,30 @@ class TpmsAuthProfile:
     raw: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class TpmsClientPortalProfile:
+    """Normalized identity fields extracted from a client-portal (parent/
+    caregiver) TPMS login (account_type == 'client'/'patient').
+
+    Deliberately a SEPARATE type from TpmsAuthProfile, with no
+    external_admin_id/external_employee_id fields — a client-portal
+    payload's `user.id` is a TPMS *patient* id, and normalize_login_payload()
+    (the staff-oriented normalizer) was previously misreading that same id
+    as external_employee_id, which let a parent account get promoted to a
+    DCM staff session. Keeping this a structurally distinct type makes that
+    class of bug impossible rather than just fixed once.
+    """
+
+    email: str
+    external_client_id: int
+    display_name: str
+    first_name: str
+    last_name: str
+    has_sibling: bool
+    access_token: str | None
+    raw: dict[str, Any]
+
+
 def _base_url() -> str:
     return getattr(settings, 'TPMS_API_BASE_URL', 'https://app.therapypms.com').rstrip('/')
 
@@ -221,12 +245,27 @@ def login_with_encrypted(encrypted_email: str, encrypted_password: str) -> dict[
     return payload
 
 
-def authenticate(email: str, password: str) -> TpmsAuthProfile:
-    """encrypt (email) + encrypt (password) → login → normalized profile."""
+def authenticate_raw(email: str, password: str) -> dict[str, Any]:
+    """encrypt (email) + encrypt (password) → login → raw TPMS payload.
+
+    Split out from authenticate() so callers can branch on account_type
+    (staff vs. client-portal) before choosing which normalizer to apply —
+    see accounts.api.login().
+    """
     enc_email, enc_password = encrypt_credentials(email, password)
-    payload = login_with_encrypted(enc_email, enc_password)
-    profile = normalize_login_payload(email, payload)
-    return profile
+    return login_with_encrypted(enc_email, enc_password)
+
+
+def authenticate(email: str, password: str) -> TpmsAuthProfile:
+    """encrypt (email) + encrypt (password) → login → normalized staff profile."""
+    payload = authenticate_raw(email, password)
+    return normalize_login_payload(email, payload)
+
+
+def account_type_of(payload: dict[str, Any]) -> str:
+    """Lowercased account_type from a raw /ios/login payload ('client', 'provider', ...)."""
+    data = _unwrap_profile(payload)
+    return str(_dig(data, 'account_type', 'accountType') or '').strip().lower()
 
 
 def _practice_id_from_payload(payload: dict[str, Any]) -> int | None:
@@ -433,6 +472,40 @@ def list_recurring_appointments(
     return appointments
 
 
+def list_client_portal_appointments(
+    access_token: str, *, start_date: str, end_date: str,
+) -> list[dict[str, Any]]:
+    """
+    POST /api/v1/ios/client-portal/appointment with the caregiver's own
+    (base login) Bearer token — {"report_range": {"start_date", "end_date"}},
+    dates as MM/DD/YYYY. Response shape unconfirmed as of writing; block-key
+    list below is a best guess, mirroring list_recurring_appointments — the
+    caller (caregiver_portal.api) still projects rows onto an explicit
+    schema rather than passing them through, so an unexpected shape here
+    fails safe (empty list) rather than leaking unexpected fields.
+    """
+    payload = _request(
+        'POST',
+        '/api/v1/ios/client-portal/appointment',
+        body={'report_range': {'start_date': start_date, 'end_date': end_date}},
+        access_token=access_token,
+        debug_label='client-portal-appointment',
+    )
+
+    status = str(payload.get('status', '')).lower()
+    if status in {'unauthorised', 'unauthorized', 'error', 'fail', 'failed'}:
+        message = payload.get('message') or 'Failed to load appointments'
+        raise TpmsAuthError(str(message), payload=payload)
+
+    return _extract_rows(
+        payload,
+        'appointments',
+        'appointment_list',
+        'schedule',
+        'data',
+    )
+
+
 def _looks_like_profile(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
@@ -555,6 +628,48 @@ def normalize_login_payload(fallback_email: str, payload: dict[str, Any]) -> Tpm
         is_admin=is_admin,
         employee_type=employee_type or (user_type or account_type or None),
         is_active=is_active,
+        access_token=_extract_access_token(payload),
+        raw=payload,
+    )
+
+
+def normalize_client_portal_payload(
+    fallback_email: str, payload: dict[str, Any],
+) -> TpmsClientPortalProfile:
+    """Normalize a client-portal (parent/caregiver) /ios/login payload.
+
+    Confirmed shape (2026-07-30): {"status", "account_type": "Client",
+    "access_token", "has_sibling", "user": {"id", "client_full_name", "email"}, "tabs"}.
+    `user.id` is the TPMS patient id this portal account speaks for — the
+    ONLY identity this function extracts a client id from. Raises rather
+    than falling back to any other field, since a wrong id here means a
+    caregiver could be bound to the wrong child.
+    """
+    data = _unwrap_profile(payload)
+
+    external_client_id = _as_int(_dig(data, 'id', 'user_id', 'userId'))
+    if external_client_id is None:
+        raise TpmsAuthError(
+            'TherapyPMS client-portal login did not return a patient id',
+            payload=payload,
+        )
+
+    email = str(_dig(data, 'email') or fallback_email).strip().lower()
+
+    full_name = str(_dig(data, 'client_full_name', 'full_name', 'name') or '').strip()
+    name_parts = full_name.split()
+    first_name = name_parts[0] if name_parts else ''
+    last_name = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ''
+
+    has_sibling = bool(_dig(data, 'has_sibling', 'hasSibling'))
+
+    return TpmsClientPortalProfile(
+        email=email,
+        external_client_id=external_client_id,
+        display_name=full_name,
+        first_name=first_name,
+        last_name=last_name,
+        has_sibling=has_sibling,
         access_token=_extract_access_token(payload),
         raw=payload,
     )

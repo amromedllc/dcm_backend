@@ -9,7 +9,7 @@ from django.db import transaction
 from django.db.models import Q
 
 from .models import User, APIKey
-from .auth import create_access_token, create_refresh_token, decode_token, jwt_auth, token_tenant_mismatch
+from .auth import create_access_token, create_refresh_token, decode_token, jwt_auth, jwt_auth_any_role, token_tenant_mismatch
 from .permissions import get_user_permissions, require_permission, resolve_permission_organization
 from .schemas import (
     LoginRequest,
@@ -26,9 +26,13 @@ from .schemas import (
     ErrorResponse,
     StaffSchema,
 )
+from apps.clients.models import Client
 from apps.integrations.tpms_auth_client import (
     TpmsAuthError,
-    authenticate as tpms_authenticate,
+    authenticate_raw as tpms_authenticate_raw,
+    account_type_of,
+    normalize_login_payload,
+    normalize_client_portal_payload,
     clear_tpms_access_token,
     resolve_practice_admin_id,
     store_tpms_access_token,
@@ -45,6 +49,9 @@ def _tpms_role_for_employee_type(employee_type: str | None, *, is_admin: bool = 
     if 'bcba' in et or 'supervisor' in et or 'admin' in et:
         return User.Role.SUPERVISOR
     return User.Role.STAFF
+
+
+_CLIENT_ACCOUNT_TYPES = {'client', 'patient'}
 
 router = Router()
 
@@ -67,28 +74,49 @@ def login(request, data: LoginRequest):
 
     No DCM local-password check and no direct TherapyPMS database password
     verification. A DCM User row is auto-provisioned so JWTs have a subject.
+
+    One TPMS round trip, then dispatch on the response's own account_type —
+    staff/employee accounts and client-portal (parent/caregiver) accounts
+    hit the same TPMS endpoint but need entirely different DCM provisioning
+    (practice-scoped staff vs. single-client-scoped caregiver).
+
+    Staff is the default path, not an allowlisted one — TPMS's account_type
+    for staff/admin logins varies more than could be reliably enumerated
+    up front (normalize_login_payload already handles that variance via
+    is_admin/isAdmin flags and several account_type/user_type fallbacks),
+    and defaulting to staff here just preserves that existing behavior
+    unconditionally. Only account_type values that positively identify a
+    client-portal login get diverted to the caregiver path — that's the
+    one direction that actually needed fixing (a client-portal payload's
+    patient id previously fell through into the staff provisioning path
+    and got misread as an employee id — see _CLIENT_ACCOUNT_TYPES usage
+    below and TpmsClientPortalProfile's docstring).
     """
-    return _tpms_auth(request, data.email, data.password)
-
-
-def _tpms_auth(request, email: str, password: str) -> TokenResponse:
-    """Verify credentials via TherapyPMS iOS encrypt/login APIs and issue a DCM token."""
     tenant = getattr(request, 'tenant', None)
     if tenant is None:
         raise HttpError(401, 'Invalid email or password')
 
-    tenant_admin_ids = set(tenant.tpms_admin_ids.values_list('admin_id', flat=True))
-    if not tenant_admin_ids:
-        # Fail closed — without a practice mapping we cannot safely scope the session.
-        raise HttpError(401, 'Invalid email or password')
-
     try:
-        profile = tpms_authenticate(email, password)
+        payload = tpms_authenticate_raw(data.email, data.password)
     except TpmsAuthError as exc:
         message = str(exc) or 'Invalid email or password'
         if 'unavailable' in message.lower() or 'invalid response' in message.lower():
             raise HttpError(502, message) from exc
         raise HttpError(401, 'Invalid email or password') from exc
+
+    if account_type_of(payload) in _CLIENT_ACCOUNT_TYPES:
+        return _tpms_caregiver_auth(request, tenant, data.email, payload)
+    return _tpms_staff_auth(request, tenant, data.email, payload)
+
+
+def _tpms_staff_auth(request, tenant, email: str, payload: dict) -> TokenResponse:
+    """Provision/refresh a staff-side DCM session from an already-fetched TPMS login payload."""
+    tenant_admin_ids = set(tenant.tpms_admin_ids.values_list('admin_id', flat=True))
+    if not tenant_admin_ids:
+        # Fail closed — without a practice mapping we cannot safely scope the session.
+        raise HttpError(401, 'Invalid email or password')
+
+    profile = normalize_login_payload(email, payload)
 
     if not profile.is_active:
         raise HttpError(403, 'Account is inactive')
@@ -130,6 +158,14 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
     last_name = profile.last_name or ''
     external_employee_id = profile.external_employee_id
     provision_email = profile.email or email
+
+    # A caregiver-role row already owns this email — never let a staff-side
+    # login silently reuse/overwrite it (mirrors the equivalent guard in
+    # _tpms_caregiver_auth for the opposite direction).
+    existing_row = User.objects.filter(email__iexact=provision_email).first()
+    if existing_row and existing_row.role == User.Role.CAREGIVER:
+        logger.error('Staff TPMS login email collides with a caregiver-role user id=%s', existing_row.id)
+        raise HttpError(409, 'This email is already registered as a caregiver portal account.')
 
     # Auto-provision DCM user on first TPMS login; keep external ids + role current.
     # Bind organization to the login tenant so facility-scoped RolePermission
@@ -183,8 +219,100 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
     return _issue_tokens(user, tenant.pk)
 
 
+def _tpms_caregiver_auth(request, tenant, email: str, payload: dict) -> TokenResponse:
+    """Provision/refresh a caregiver DCM session bound to exactly one client.
 
-@router.post('/logout', auth=jwt_auth, response={204: None})
+    No sibling-list/sibling-login step (deliberate — see
+    normalize_client_portal_payload's docstring): the base login payload's
+    user.id already identifies the one linked patient.
+    """
+    tenant_admin_ids = set(tenant.tpms_admin_ids.values_list('admin_id', flat=True))
+    if not tenant_admin_ids:
+        raise HttpError(401, 'Invalid email or password')
+
+    try:
+        profile = normalize_client_portal_payload(email, payload)
+    except TpmsAuthError:
+        raise HttpError(401, 'Invalid email or password')
+
+    # Client.objects is tenant-scoped by TenantManager under the request's
+    # tenant_context (set by TenantResolverMiddleware before this view runs),
+    # so this lookup can only ever match a client in the login hostname's org.
+    clients = list(Client.objects.filter(external_id=str(profile.external_client_id)).order_by('id'))
+    if not clients:
+        raise HttpError(403, 'Your portal account is not set up in DCM yet. Please contact your provider.')
+    if len({c.external_admin_id for c in clients}) > 1:
+        logger.error(
+            'Ambiguous portal client external_id=%s resolved to multiple practices in org=%s',
+            profile.external_client_id, tenant.pk,
+        )
+        raise HttpError(403, 'Invalid email or password')
+    client = clients[0]
+
+    # Practice binding — the caregiver analogue of the staff tenant check
+    # above, using the Client row's own practice rather than a profile
+    # field (a client-portal payload carries no practice id of its own).
+    # Never guess a practice for a caregiver the way the staff path's
+    # single-practice fallback does — always require an explicit match.
+    if client.external_admin_id is None or client.external_admin_id not in tenant_admin_ids:
+        raise HttpError(401, 'Invalid email or password')
+
+    provision_email = profile.email or email
+
+    existing_row = User.objects.filter(email__iexact=provision_email).first()
+    if existing_row and existing_row.role != User.Role.CAREGIVER:
+        logger.error('Portal login email collides with a non-caregiver user id=%s', existing_row.id)
+        raise HttpError(409, 'This email is already registered as a staff account.')
+
+    with transaction.atomic():
+        user, created = User.objects.get_or_create(
+            email=provision_email,
+            defaults={
+                'first_name': profile.first_name,
+                'last_name': profile.last_name,
+                'role': User.Role.CAREGIVER,
+                'is_active': True,
+                'external_client_id': profile.external_client_id,
+                'external_admin_id': client.external_admin_id,
+                'external_employee_id': None,
+                'organization': tenant,
+            },
+        )
+        if created:
+            user.set_unusable_password()
+            user.save(update_fields=['password'])
+        else:
+            update_fields = []
+            if profile.first_name and user.first_name != profile.first_name:
+                user.first_name = profile.first_name
+                update_fields.append('first_name')
+            if profile.last_name and user.last_name != profile.last_name:
+                user.last_name = profile.last_name
+                update_fields.append('last_name')
+            # Re-link rather than silently keep a stale pointer if the
+            # portal account now maps to a different patient/practice.
+            if user.external_client_id != profile.external_client_id:
+                user.external_client_id = profile.external_client_id
+                update_fields.append('external_client_id')
+            if user.external_admin_id != client.external_admin_id:
+                user.external_admin_id = client.external_admin_id
+                update_fields.append('external_admin_id')
+            if user.organization_id != tenant.pk:
+                user.organization = tenant
+                update_fields.append('organization')
+            if not user.is_active:
+                user.is_active = True
+                update_fields.append('is_active')
+            if update_fields:
+                user.save(update_fields=update_fields)
+
+    if profile.access_token:
+        store_tpms_access_token(user.id, profile.access_token)
+
+    return _issue_tokens(user, tenant.pk)
+
+
+@router.post('/logout', auth=jwt_auth_any_role, response={204: None})
 def logout(request):
     """Revoke the current access token immediately. Token is blocklisted in Redis until expiry."""
     from .auth import blocklist_token
@@ -194,7 +322,7 @@ def logout(request):
     return 204, None
 
 
-@router.post('/logout-all', auth=jwt_auth, response={204: None})
+@router.post('/logout-all', auth=jwt_auth_any_role, response={204: None})
 def logout_all(request):
     """
     Revoke all active tokens for this user by rotating their token secret seed.
@@ -227,11 +355,21 @@ def refresh_token(request, data: RefreshRequest):
         raise HttpError(401, 'Invalid or expired token')
 
 
-@router.get('/me', response=CurrentUserSchema, auth=jwt_auth)
+@router.get('/me', response=CurrentUserSchema, auth=jwt_auth_any_role)
 def me(request):
     user = request.user
+    if user.is_caregiver:
+        # Caregiver access is identity-scoped, not permission-key-scoped —
+        # no RolePermission lookup, just the linked client's display info.
+        user.permissions = {}
+        client = Client.objects.filter(external_id=str(user.external_client_id)).first()
+        user.caregiver_client = (
+            {'external_id': user.external_client_id, 'full_name': client.full_name} if client else None
+        )
+        return user
     org = resolve_permission_organization(request)
     user.permissions = get_user_permissions(user, org)
+    user.caregiver_client = None
     return user
 
 
@@ -286,6 +424,7 @@ def list_users(request):
         raise HttpError(403, 'Insufficient permissions')
     return list(
         User.objects.filter(_same_practice_q(request.user), is_active=True)
+        .exclude(role=User.Role.CAREGIVER)
         .order_by('last_name', 'first_name')
     )
 
@@ -302,7 +441,7 @@ def list_admin_staffs(request, include_inactive: bool = False):
     if request.user.external_admin_id is None:
         return _list_native_staffs(request, include_inactive)
 
-    qs = User.objects.filter(external_admin_id=request.user.external_admin_id)
+    qs = User.objects.filter(external_admin_id=request.user.external_admin_id).exclude(role=User.Role.CAREGIVER)
     if not include_inactive:
         qs = qs.filter(is_active=True)
     return [
@@ -350,6 +489,8 @@ def _list_native_staffs(request, include_inactive: bool) -> list[StaffSchema]:
 @router.post('/users', response={201: UserSchema, 400: ErrorResponse}, auth=jwt_auth)
 def create_user(request, data: UserCreateRequest):
     require_permission(request, 'admin_users_edit')
+    if data.role == User.Role.CAREGIVER:
+        return 400, ErrorResponse(detail='Caregiver accounts are provisioned by portal login only')
     if User.objects.filter(email=data.email).exists():
         return 400, ErrorResponse(detail='A user with this email already exists')
     user = User.objects.create_user(
@@ -370,6 +511,8 @@ def update_user(request, user_id: int, data: UserUpdateRequest):
         user = User.objects.get(_same_practice_q(request.user), id=user_id)
     except User.DoesNotExist:
         raise HttpError(404, 'User not found')
+    if user.role == User.Role.CAREGIVER or data.role == User.Role.CAREGIVER:
+        raise HttpError(400, 'Caregiver accounts are provisioned and managed by portal login only')
     for field, value in data.dict(exclude_none=True).items():
         setattr(user, field, value)
     user.save()
@@ -439,10 +582,14 @@ def get_role_permissions(request):
         role: dict(defaults)
         for role, defaults in PERMISSION_DEFAULTS.items()
     }
-    rows = RolePermission.objects.filter(organization=org)
+    # Caregiver access is identity-scoped (see apps.caregiver_portal), never
+    # permission-key-scoped — exclude it even if a legacy RolePermission row
+    # exists, so it can never resurface as an editable row in the Privileges UI.
+    rows = RolePermission.objects.filter(organization=org).exclude(role=User.Role.CAREGIVER)
     for row in rows:
         merged = {**result.get(row.role, {}), **(row.permissions or {})}
         result[row.role] = _apply_role_guarantees(row.role, merged)
+    result.pop(User.Role.CAREGIVER, None)
     for role in list(result.keys()):
         result[role] = _apply_role_guarantees(role, result[role])
     return result
@@ -461,7 +608,10 @@ def save_role_permissions(request, body: dict = Body(...)):
 
     org = resolve_permission_organization(request)
 
-    valid_roles = {c[0] for c in User.Role.choices}
+    # Caregiver is deliberately excluded — its access is identity-scoped
+    # (apps.caregiver_portal), not permission-key-scoped, and must never
+    # become toggleable via this admin page.
+    valid_roles = {c[0] for c in User.Role.choices} - {User.Role.CAREGIVER}
     for role, perms in body.items():
         if role not in valid_roles:
             raise HttpError(400, f'Invalid role: {role}')
