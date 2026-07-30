@@ -410,6 +410,7 @@ class OrgProgramSchema(Schema):
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
+    folder_id: int | None = None
     image_url: str | None = None
     already_imported: bool = False
     display_order: int
@@ -435,6 +436,28 @@ class OrgProgramCreateRequest(Schema):
 
 class AssignOrgProgramRequest(Schema):
     client_id: int
+
+
+# ---------------------------------------------------------------------------
+# Org program folders (Program Management → Organization tab)
+# ---------------------------------------------------------------------------
+
+class ProgramFolderSchema(Schema):
+    id: int
+    name: str
+    display_order: int
+    program_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProgramFolderRequest(Schema):
+    name: NonEmptyStr
+    display_order: int = Field(default=0, ge=0)
+
+
+class SetProgramFolderRequest(Schema):
+    folder_id: int | None = None
 
 
 # ---------------------------------------------------------------------------

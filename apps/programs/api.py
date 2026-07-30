@@ -13,7 +13,7 @@ from .models import (
     WorkflowTemplate, MaintenanceSchedule, FadingTemplate,
     Lesson, LessonProgram,
     TreatmentArea, ProgramTag, ProgramDataField, TargetStatus,
-    TargetStatusChange, TargetPromptLevelChange,
+    TargetStatusChange, TargetPromptLevelChange, ProgramFolder,
 )
 from .schemas import (
     ProgramSchema, ProgramListSchema, ProgramCreateRequest, ProgramUpdateRequest,
@@ -26,6 +26,7 @@ from .schemas import (
     LessonSchema, LessonCreateRequest, LessonUpdateRequest, AddProgramToLessonRequest,
     LessonProgramSchema,
     OrgProgramSchema, OrgProgramCreateRequest, AssignOrgProgramRequest,
+    ProgramFolderSchema, ProgramFolderRequest, SetProgramFolderRequest,
     TreatmentAreaSchema, TreatmentAreaRequest,
     ProgramTagSchema, ProgramTagRequest,
     ProgramDataFieldSchema, ProgramDataFieldRequest,
@@ -709,6 +710,7 @@ def _serialize_org_program(program: Program, request, include_targets: bool = Fa
         'tags': program.tags,
         'objective': program.objective,
         'instructions': program.instructions,
+        'folder_id': program.folder_id,
         'image_url': request.build_absolute_uri(program.image.url) if program.image else None,
         'display_order': program.display_order,
         'target_count': program.targets.count(),
@@ -728,7 +730,10 @@ def _org_qs(request):
 
 
 @router.get('/org-programs', response=list[OrgProgramSchema])
-def list_org_programs(request, category: str | None = None, status: str | None = None):
+def list_org_programs(
+    request, category: str | None = None, status: str | None = None,
+    folder_id: int | None = None, unfiled: bool = False,
+):
     # Readable by anyone authenticated — used by Program Library and the
     # client "From Library" picker. Mutations are gated separately.
     qs = _org_qs(request).exclude(status='archived')
@@ -736,6 +741,10 @@ def list_org_programs(request, category: str | None = None, status: str | None =
         qs = qs.filter(category=category)
     if status:
         qs = qs.filter(status=status)
+    if folder_id is not None:
+        qs = qs.filter(folder_id=folder_id)
+    elif unfiled:
+        qs = qs.filter(folder_id__isnull=True)
     return [_serialize_org_program(p, request) for p in qs.prefetch_related('targets')]
 
 
@@ -759,6 +768,80 @@ def create_org_program(request, data: OrgProgramCreateRequest):
         created_by=request.user,
     )
     return 201, _serialize_org_program(program, request, include_targets=True)
+
+
+# ---------------------------------------------------------------------------
+# Org program folders
+#
+# Registered before the /org-programs/{program_id} routes below — Django's
+# resolver matches URL patterns in registration order, and an untyped path
+# param matches any segment, so 'folders' would otherwise be swallowed by
+# {program_id} and 405 (method not allowed on that operation) instead of
+# reaching these handlers.
+# ---------------------------------------------------------------------------
+
+def _serialize_program_folder(folder: ProgramFolder) -> dict:
+    return {
+        'id': folder.id,
+        'name': folder.name,
+        'display_order': folder.display_order,
+        'program_count': folder.programs.exclude(status='archived').count(),
+        'created_at': folder.created_at,
+        'updated_at': folder.updated_at,
+    }
+
+
+@router.get('/org-programs/folders', response=list[ProgramFolderSchema])
+def list_program_folders(request):
+    return [_serialize_program_folder(f) for f in ProgramFolder.objects.all()]
+
+
+@router.post('/org-programs/folders', response={201: ProgramFolderSchema})
+def create_program_folder(request, data: ProgramFolderRequest):
+    require_permission(request, 'org_programs_create')
+    _check_unique_name(ProgramFolder, data.name)
+    folder = ProgramFolder.objects.create(created_by=request.user, **data.dict())
+    return 201, _serialize_program_folder(folder)
+
+
+@router.patch('/org-programs/folders/{folder_id}', response=ProgramFolderSchema)
+def update_program_folder(request, folder_id: int, data: ProgramFolderRequest):
+    require_permission(request, 'org_programs_edit')
+    try:
+        folder = ProgramFolder.objects.get(id=folder_id)
+    except ProgramFolder.DoesNotExist:
+        raise HttpError(404, 'Folder not found')
+    _check_unique_name(ProgramFolder, data.name, exclude_id=folder_id)
+    for k, v in data.dict().items():
+        setattr(folder, k, v)
+    folder.save()
+    return _serialize_program_folder(folder)
+
+
+@router.delete('/org-programs/folders/{folder_id}', response={204: None})
+def delete_program_folder(request, folder_id: int):
+    require_permission(request, 'org_programs_delete')
+    try:
+        folder = ProgramFolder.objects.get(id=folder_id)
+    except ProgramFolder.DoesNotExist:
+        raise HttpError(404, 'Folder not found')
+    # Programs inside fall back to unfiled (Program.folder is on_delete=SET_NULL)
+    folder.delete()
+    return 204, None
+
+
+@router.post('/org-programs/{program_id}/folder', response=OrgProgramSchema)
+def set_org_program_folder(request, program_id: int, data: SetProgramFolderRequest):
+    require_permission(request, 'org_programs_edit')
+    try:
+        program = _org_qs(request).get(id=program_id)
+    except Program.DoesNotExist:
+        raise HttpError(404, 'Program not found')
+    if data.folder_id is not None and not ProgramFolder.objects.filter(id=data.folder_id).exists():
+        raise HttpError(404, 'Folder not found')
+    program.folder_id = data.folder_id
+    program.save(update_fields=['folder'])
+    return _serialize_org_program(program, request, include_targets=True)
 
 
 @router.get('/org-programs/{program_id}', response=OrgProgramSchema)

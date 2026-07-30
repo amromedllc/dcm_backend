@@ -109,8 +109,14 @@ class Program(TenantAwareModel):
     image = models.ImageField(upload_to=_program_upload_path, max_length=500, blank=True, null=True)
     display_order = models.PositiveIntegerField(default=0, db_index=True)
     archived_at = models.DateTimeField(null=True, blank=True)
+    folder = models.ForeignKey(
+        'ProgramFolder',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='programs',
+    )
 
-    _org_scoped_fk_fields = ('workflow_template', 'maintenance_schedule', 'fading_template')
+    _org_scoped_fk_fields = ('workflow_template', 'maintenance_schedule', 'fading_template', 'folder')
 
     class Meta:
         app_label = 'programs'
@@ -401,6 +407,19 @@ class TreatmentArea(TenantAwareModel):
     class Meta:
         app_label = 'programs'
         ordering = ['name']
+        unique_together = [('organization', 'name')]
+
+    def __str__(self):
+        return self.name
+
+
+class ProgramFolder(TenantAwareModel):
+    name = models.CharField(max_length=200)
+    display_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        app_label = 'programs'
+        ordering = ['display_order', 'name']
         unique_together = [('organization', 'name')]
 
     def __str__(self):
