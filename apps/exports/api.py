@@ -18,6 +18,9 @@ _GENERATE_MAP = {
     'raw_zip': tasks.generate_raw_zip,
     'notes_csv': tasks.generate_notes_csv,
     'sessions_csv': tasks.generate_sessions_csv,
+    'note_pdf': tasks.generate_note_pdf,
+    'graph_png': tasks.generate_graph_png,
+    'graph_svg': tasks.generate_graph_svg,
 }
 
 _VALID_TYPES = set(_GENERATE_MAP.keys())
@@ -51,8 +54,10 @@ def request_export(request, data: ExportCreateRequest):
         raise HttpError(400, 'abc_csv requires client_id')
     if data.export_type in ('notes_csv', 'sessions_csv') and not data.client_id:
         raise HttpError(400, f'{data.export_type} requires client_id')
-    if data.export_type in ('notes_csv', 'sessions_csv') and not data.client_id:
-        raise HttpError(400, f'{data.export_type} requires client_id')
+    if data.export_type in ('graph_png', 'graph_svg') and not data.program_id:
+        raise HttpError(400, f'{data.export_type} requires program_id')
+    if data.export_type == 'note_pdf' and not data.note_id:
+        raise HttpError(400, 'note_pdf requires note_id')
 
     params = data.dict(exclude={'export_type'}, exclude_none=True)
     for key in ('date_from', 'date_to'):
