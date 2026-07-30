@@ -1,7 +1,6 @@
 from datetime import date, datetime
 from typing import Any, Literal
 from ninja import Schema
-from pydantic import Field
 
 from shared.schema_types import NonEmptyStr
 
@@ -37,7 +36,7 @@ class NoteTemplateSchema(Schema):
 class NoteTemplateCreateRequest(Schema):
     name: NonEmptyStr
     description: str = ''
-    fields: list[NoteTemplateFieldSchema] = Field(min_length=1)
+    fields: list[NoteTemplateFieldSchema] = []
     is_org_default: bool = False
     template_type: Literal['notes', 'forms', 'reports'] = 'notes'
     body_template: str = ''
@@ -49,7 +48,7 @@ class NoteTemplateCreateRequest(Schema):
 class NoteTemplateUpdateRequest(Schema):
     name: NonEmptyStr | None = None
     description: str | None = None
-    fields: list[NoteTemplateFieldSchema] | None = Field(default=None, min_length=1)
+    fields: list[NoteTemplateFieldSchema] | None = None
     is_org_default: bool | None = None
     is_active: bool | None = None
     template_type: Literal['notes', 'forms', 'reports'] | None = None
