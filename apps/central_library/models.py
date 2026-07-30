@@ -8,6 +8,31 @@ def _central_program_upload_path(instance, filename):
     return f'central_library/programs/{uuid.uuid4().hex}/{filename}'
 
 
+class CentralProgramFolder(models.Model):
+    """Platform-owned grouping for Central Library programs — same
+    "not tenant-scoped, superuser-authored" model as CentralProgram itself.
+    Importing a whole folder (see apps.programs.api) creates/reuses an
+    org-owned ProgramFolder with the same name and files each cloned
+    program into it."""
+    name = models.CharField(max_length=200, unique=True)
+    display_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='+',
+    )
+
+    class Meta:
+        app_label = 'central_library'
+        ordering = ['display_order', 'name']
+
+    def __str__(self) -> str:
+        return self.name
+
+
 class CentralProgram(models.Model):
     """
     Platform-owned reference program, authored by the platform vendor
@@ -47,6 +72,12 @@ class CentralProgram(models.Model):
     objective = models.TextField(blank=True)
     instructions = models.TextField(blank=True)
     image = models.ImageField(upload_to=_central_program_upload_path, max_length=500, blank=True, null=True)
+    folder = models.ForeignKey(
+        CentralProgramFolder,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='programs',
+    )
     display_order = models.PositiveIntegerField(default=0, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

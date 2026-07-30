@@ -461,6 +461,24 @@ class SetProgramFolderRequest(Schema):
 
 
 # ---------------------------------------------------------------------------
+# Central Library folders (platform-owned, read-only for orgs)
+# ---------------------------------------------------------------------------
+
+class CentralProgramFolderSchema(Schema):
+    id: int
+    name: str
+    display_order: int
+    program_count: int = 0
+
+
+class ImportCentralFolderResult(Schema):
+    folder_id: int
+    folder_name: str
+    imported_count: int
+    skipped_count: int
+
+
+# ---------------------------------------------------------------------------
 # Treatment Areas
 # ---------------------------------------------------------------------------
 

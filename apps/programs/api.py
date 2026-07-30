@@ -6,7 +6,7 @@ from django.utils import timezone
 
 from apps.accounts.auth import jwt_auth
 from apps.accounts.permissions import require_permission
-from apps.central_library.models import CentralProgram
+from apps.central_library.models import CentralProgram, CentralProgramFolder
 from shared.uploads import validate_image_upload
 from .models import (
     Program, Target, PromptingTemplate,
@@ -27,6 +27,7 @@ from .schemas import (
     LessonProgramSchema,
     OrgProgramSchema, OrgProgramCreateRequest, AssignOrgProgramRequest,
     ProgramFolderSchema, ProgramFolderRequest, SetProgramFolderRequest,
+    CentralProgramFolderSchema, ImportCentralFolderResult,
     TreatmentAreaSchema, TreatmentAreaRequest,
     ProgramTagSchema, ProgramTagRequest,
     ProgramDataFieldSchema, ProgramDataFieldRequest,
@@ -1011,6 +1012,7 @@ def _serialize_central_program(
         'tags': program.tags,
         'objective': program.objective,
         'instructions': program.instructions,
+        'folder_id': program.folder_id,
         'image_url': request.build_absolute_uri(program.image.url) if program.image else None,
         'already_imported': program.id in imported_ids,
         'display_order': program.display_order,
@@ -1022,13 +1024,73 @@ def _serialize_central_program(
 
 
 @router.get('/central-programs', response=list[OrgProgramSchema])
-def list_central_programs(request, category: str | None = None):
+def list_central_programs(
+    request, category: str | None = None,
+    folder_id: int | None = None, unfiled: bool = False,
+):
     require_permission(request, 'central_library_view')
     qs = _central_qs()
     if category:
         qs = qs.filter(category=category)
+    if folder_id is not None:
+        qs = qs.filter(folder_id=folder_id)
+    elif unfiled:
+        qs = qs.filter(folder_id__isnull=True)
     imported_ids = _imported_central_program_ids()
     return [_serialize_central_program(p, request, imported_ids=imported_ids) for p in qs.prefetch_related('targets')]
+
+
+# Registered before /central-programs/{program_id} below — same routing
+# gotcha as apps.programs.api's org-program folders: Django's resolver
+# matches in registration order, and an untyped path param would otherwise
+# swallow the literal 'folders' segment and 405 instead of reaching these.
+@router.get('/central-programs/folders', response=list[CentralProgramFolderSchema])
+def list_central_program_folders(request):
+    require_permission(request, 'central_library_view')
+    return [
+        {
+            'id': f.id,
+            'name': f.name,
+            'display_order': f.display_order,
+            'program_count': f.programs.filter(status=CentralProgram.Status.ACTIVE).count(),
+        }
+        for f in CentralProgramFolder.objects.all()
+    ]
+
+
+@router.post('/central-programs/folders/{folder_id}/import', response={201: ImportCentralFolderResult})
+def import_central_folder(request, folder_id: int):
+    """Import every not-yet-imported program in a Central Library folder into
+    the caller's org library in one shot, filing them all into a same-named
+    org ProgramFolder (created if it doesn't already exist)."""
+    require_permission(request, 'central_library_import')
+    try:
+        central_folder = CentralProgramFolder.objects.get(id=folder_id)
+    except CentralProgramFolder.DoesNotExist:
+        raise HttpError(404, 'Folder not found')
+
+    org_folder, _created = ProgramFolder.objects.get_or_create(
+        name=central_folder.name,
+        defaults={'created_by': request.user},
+    )
+    already_imported_ids = _imported_central_program_ids()
+    imported_count = 0
+    skipped_count = 0
+    for central_program in central_folder.programs.filter(status=CentralProgram.Status.ACTIVE):
+        if central_program.id in already_imported_ids:
+            skipped_count += 1
+            continue
+        dest = _clone_central_program(central_program.id, request.user)
+        dest.folder = org_folder
+        dest.save(update_fields=['folder'])
+        imported_count += 1
+
+    return 201, {
+        'folder_id': org_folder.id,
+        'folder_name': org_folder.name,
+        'imported_count': imported_count,
+        'skipped_count': skipped_count,
+    }
 
 
 @router.get('/central-programs/{program_id}', response=OrgProgramSchema)

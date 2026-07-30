@@ -1,6 +1,6 @@
 from django.contrib import admin
 from unfold.admin import ModelAdmin, TabularInline
-from .models import CentralProgram, CentralTarget
+from .models import CentralProgram, CentralTarget, CentralProgramFolder
 
 
 class _SuperuserOnlyAdminMixin:
@@ -33,10 +33,22 @@ class CentralTargetInline(_SuperuserOnlyAdminMixin, TabularInline):
 
 @admin.register(CentralProgram)
 class CentralProgramAdmin(_SuperuserOnlyAdminMixin, ModelAdmin):
-    list_display = ['name', 'category', 'phase', 'status', 'treatment_area', 'display_order', 'updated_at']
-    list_filter = ['category', 'status']
+    list_display = ['name', 'folder', 'category', 'phase', 'status', 'treatment_area', 'display_order', 'updated_at']
+    list_filter = ['category', 'status', 'folder']
     search_fields = ['name', 'treatment_area']
     inlines = [CentralTargetInline]
+    readonly_fields = ['created_at', 'updated_at', 'created_by']
+
+    def save_model(self, request, obj, form, change):
+        if not change:
+            obj.created_by = request.user
+        super().save_model(request, obj, form, change)
+
+
+@admin.register(CentralProgramFolder)
+class CentralProgramFolderAdmin(_SuperuserOnlyAdminMixin, ModelAdmin):
+    list_display = ['name', 'display_order', 'updated_at']
+    search_fields = ['name']
     readonly_fields = ['created_at', 'updated_at', 'created_by']
 
     def save_model(self, request, obj, form, change):
