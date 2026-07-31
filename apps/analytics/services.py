@@ -302,12 +302,26 @@ def get_client_progress_report(
     2. Session counts
     3. All trial events in the date range
     4. Target status change history (mastery events)
+
+    client_id may be either the local DCM Client.id (the staff-facing report
+    page's convention) or the TPMS patient id (the caregiver portal's — see
+    apps.caregiver_portal.api._scope). Program.external_client_id is always
+    the local id, while SessionRun.external_client_id is normalized to the
+    TPMS id (see apps.sessions.api._canonical_external_client_id), so both
+    forms need resolving here regardless of which one the caller passed in.
     """
+    from apps.clients.models import Client
+    client = Client.objects.filter(id=client_id).first() or Client.objects.filter(external_id=str(client_id)).first()
+    dcm_client_id = client.id if client else client_id
+    external_client_id = (
+        int(client.external_id) if client and client.external_id and client.external_id.isdigit()
+        else dcm_client_id
+    )
 
     # ── 1. Programs and targets ──────────────────────────────────────────────
     programs = list(
         Program.objects
-        .filter(external_client_id=client_id)
+        .filter(external_client_id=dcm_client_id)
         .prefetch_related('targets__prompting_template')
         .order_by('display_order', 'name')
     )
@@ -321,7 +335,7 @@ def get_client_progress_report(
 
     # ── 2. Session counts ────────────────────────────────────────────────────
     sessions_qs = SessionRun.objects.filter(
-        external_client_id=client_id,
+        external_client_id=external_client_id,
         started_at__date__gte=date_from,
         started_at__date__lte=date_to,
     ).values('status')

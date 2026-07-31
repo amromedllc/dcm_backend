@@ -12,7 +12,13 @@ from apps.integrations.tpms_auth_client import (
     clear_tpms_access_token,
 )
 from apps.notes.models import LessonNote
-from .schemas import CaregiverAppointmentSchema, CaregiverNoteListItem, CaregiverNoteDetail
+from apps.sessions.models import SessionRun, TrialEvent, BehaviorEvent
+from apps.sessions.schemas import SessionRunSchema, TrialEventSchema, BehaviorEventSchema
+from apps.sessions.api import _serialize_session
+from .schemas import (
+    CaregiverAppointmentSchema, CaregiverSessionRefSchema,
+    CaregiverNoteListItem, CaregiverNoteDetail,
+)
 
 router = Router(auth=caregiver_auth)
 
@@ -39,8 +45,15 @@ def _scope(request) -> tuple[int, Client]:
     return external_client_id, client
 
 
+def _split_hours(raw: str) -> tuple[str | None, str | None]:
+    parts = raw.split(' to ', 1)
+    if len(parts) == 2:
+        return parts[0].strip() or None, parts[1].strip() or None
+    return raw.strip() or None, None
+
+
 def _project_appointment(row: dict) -> dict:
-    """Best-effort field extraction — see CaregiverAppointmentSchema's docstring."""
+
     def pick(*keys):
         for key in keys:
             value = row.get(key)
@@ -48,15 +61,22 @@ def _project_appointment(row: dict) -> dict:
                 return str(value)
         return None
 
+    start_time = pick('start_time', 'from_time', 'time_from')
+    end_time = pick('end_time', 'to_time', 'time_to')
+    if start_time is None and end_time is None:
+        hours = pick('hours')
+        if hours:
+            start_time, end_time = _split_hours(hours)
+
     return {
         'id': pick('id', 'appointment_id', 'session_id'),
-        'date': pick('date', 'appointment_date', 'session_date'),
-        'start_time': pick('start_time', 'from_time', 'time_from'),
-        'end_time': pick('end_time', 'to_time', 'time_to'),
+        'date': pick('date', 'appointment_date', 'session_date', 'scheduled_date'),
+        'start_time': start_time,
+        'end_time': end_time,
         'provider_name': pick('provider_name', 'therapist_name', 'staff_name', 'provider'),
         'status': pick('status', 'appointment_status'),
-        'service_type': pick('service_type', 'session_type', 'program'),
-        'location': pick('location', 'place_of_service'),
+        'service_type': pick('service_type', 'session_type', 'program', 'service_name'),
+        'location': pick('location', 'place_of_service', 'pos'),
         'notes': pick('notes', 'description'),
     }
 
@@ -68,6 +88,8 @@ def portal_schedule(request, start_date: date | None = None, end_date: date | No
 
     frm = start_date or date.today()
     to = end_date or (frm + timedelta(days=_DEFAULT_SCHEDULE_DAYS))
+    if frm > to:
+        raise HttpError(400, 'start_date must be before end_date')
 
     token = get_tpms_access_token(request.user.id)
     if not token:
@@ -87,6 +109,79 @@ def portal_schedule(request, start_date: date | None = None, end_date: date | No
         raise HttpError(502, str(exc) or 'Failed to load appointments from TherapyPMS') from exc
 
     return [_project_appointment(row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Session (watch a session staff/supervisor is recording, live)
+# ---------------------------------------------------------------------------
+
+def _get_caregiver_session_or_404(request, session_id: int) -> SessionRun:
+    external_client_id, _ = _scope(request)
+    try:
+        return SessionRun.objects.select_related('staff').get(
+            id=session_id, external_client_id=external_client_id,
+        )
+    except SessionRun.DoesNotExist:
+        raise HttpError(404, 'Session not found')
+
+
+@router.get('/sessions/resolve', response=CaregiverSessionRefSchema)
+def resolve_session_for_appointment(request, appointment_id: str, appointment_date: date | None = None):
+    external_client_id, _ = _scope(request)
+    print("Resolving session for appointment_id:", appointment_id, "and appointment_date:", appointment_date)
+
+    session = None
+    try:
+        appt_id_int = int(appointment_id)
+    except (TypeError, ValueError):
+        appt_id_int = None
+
+    if appt_id_int is not None:
+        session = (
+            SessionRun.objects
+            .filter(external_client_id=external_client_id, external_appointment_id=appt_id_int)
+            .order_by('-started_at')
+            .first()
+        )
+
+    if session is None and appointment_date is not None:
+        session = (
+            SessionRun.objects
+            .filter(external_client_id=external_client_id, started_at__date=appointment_date)
+            .order_by('-started_at')
+            .first()
+        )
+
+    if session is None:
+        session = (
+            SessionRun.objects
+            .filter(external_client_id=external_client_id, status='open')
+            .order_by('-started_at')
+            .first()
+        )
+
+    if session is None:
+        raise HttpError(404, 'No session has been recorded for this appointment yet')
+
+    return {'session_id': session.id, 'status': session.status}
+
+
+@router.get('/sessions/{session_id}', response=SessionRunSchema)
+def portal_session(request, session_id: int):
+    session = _get_caregiver_session_or_404(request, session_id)
+    return _serialize_session(session)
+
+
+@router.get('/sessions/{session_id}/trials', response=list[TrialEventSchema])
+def portal_session_trials(request, session_id: int):
+    _get_caregiver_session_or_404(request, session_id)
+    return list(TrialEvent.objects.filter(session_run_id=session_id).order_by('recorded_at'))
+
+
+@router.get('/sessions/{session_id}/behaviors', response=list[BehaviorEventSchema])
+def portal_session_behaviors(request, session_id: int):
+    _get_caregiver_session_or_404(request, session_id)
+    return list(BehaviorEvent.objects.filter(session_run_id=session_id).order_by('occurred_at'))
 
 
 @router.get('/progress')

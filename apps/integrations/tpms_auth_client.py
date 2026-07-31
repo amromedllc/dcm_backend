@@ -178,6 +178,10 @@ def _request(
         message = 'TherapyPMS request failed'
         if isinstance(payload, dict):
             message = str(payload.get('message') or message)
+        logger.warning(
+            'TPMS request failed (%s %s) [%s]: status=%s message=%s body=%s',
+            method, path, debug_label, response.status_code, message, raw_text[:2000],
+        )
         raise TpmsAuthError(message, status_code=response.status_code, payload=payload)
 
     if not isinstance(payload, dict):
@@ -436,24 +440,52 @@ def list_patients(access_token: str, *, search: str | None = None) -> list[dict[
     return patients
 
 
-def list_recurring_appointments(
+def list_appointments(
     access_token: str,
     *,
-    patient_ids: list[int],
     provider_ids: list[int],
+    client_ids: list[int],
+    start_date: str,
+    end_date: str,
 ) -> list[dict[str, Any]]:
     """
-    POST /api/v1/ios/appointment/recurring/list with TPMS patient + provider ids.
+    POST /api/v1/ios/appointments/list — replaces the old
+    /api/v1/ios/appointment/recurring/list (which had no date range and used
+    "patient_ids"). Dates as MM/DD/YYYY, same report_range convention as
+    list_client_portal_appointments. Ids sent as strings.
+
+    Confirmed real row shape: {"session_id", "lock_icon", "break_icon",
+    "billable", "patient_id", "patient_name", "service_hour", "provider_id",
+    "provider_name", "pos", "scheduled_date", "scheduled_time", "status",
+    "address"} — "scheduled_time" combines start+end ("10:00 am to 12:30 pm")
+    like list_client_portal_appointments's "hours" field does.
+
+    Confirmed per-role request shape (2026-07-31) — the wire key for the
+    client-side filter is "patients_ids" (not "client_ids"; kept as
+    client_ids on this function's own signature for DCM-side clarity):
+    - Own schedule (my_schedule/list_provider_appointments): provider_ids
+      only, no patients_ids key at all.
+    - Supervisor/admin viewing one client's sessions: patients_ids only, no
+      provider_ids key at all (they see every provider for that client).
+    - Staff viewing one client's sessions: both provider_ids (their own) and
+      patients_ids (that one client).
+    Each key is omitted from the body entirely when its list is empty,
+    rather than sent as `[]`.
     """
+    body: dict[str, Any] = {
+        'report_range': {'start_date': start_date, 'end_date': end_date},
+    }
+    if provider_ids:
+        body['provider_ids'] = [str(p) for p in provider_ids]
+    if client_ids:
+        body['patients_ids'] = [str(c) for c in client_ids]
+
     payload = _request(
         'POST',
-        '/api/v1/ios/appointment/recurring/list',
-        body={
-            'patient_ids': patient_ids,
-            'provider_ids': provider_ids,
-        },
+        '/api/v1/ios/appointments/list',
+        body=body,
         access_token=access_token,
-        debug_label='appointment-recurring-list',
+        debug_label='appointments-list',
     )
 
     status = str(payload.get('status', '')).lower()
@@ -461,15 +493,7 @@ def list_recurring_appointments(
         message = payload.get('message') or 'Failed to load appointments'
         raise TpmsAuthError(str(message), payload=payload)
 
-    appointments = _extract_rows(
-        payload,
-        'recurring_sessions',
-        'appointments',
-        'recurring_appointments',
-        'appointment_list',
-        'data',
-    )
-    return appointments
+    return _extract_rows(payload, 'appointments', 'data')
 
 
 def list_client_portal_appointments(
@@ -478,11 +502,11 @@ def list_client_portal_appointments(
     """
     POST /api/v1/ios/client-portal/appointment with the caregiver's own
     (base login) Bearer token — {"report_range": {"start_date", "end_date"}},
-    dates as MM/DD/YYYY. Response shape unconfirmed as of writing; block-key
-    list below is a best guess, mirroring list_recurring_appointments — the
-    caller (caregiver_portal.api) still projects rows onto an explicit
-    schema rather than passing them through, so an unexpected shape here
-    fails safe (empty list) rather than leaking unexpected fields.
+    dates as MM/DD/YYYY. Real row shape confirmed (2026-07) — see
+    _project_appointment() in caregiver_portal/api.py — but the caller still
+    projects rows onto an explicit schema rather than passing them through,
+    so a future shape change there fails safe (empty list) rather than
+    leaking unexpected fields.
     """
     payload = _request(
         'POST',

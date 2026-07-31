@@ -22,6 +22,14 @@ class CaregiverAppointmentSchema(Schema):
     notes: str | None = None
 
 
+class CaregiverSessionRefSchema(Schema):
+    """Result of resolving a schedule appointment to the DCM session recorded
+    against it, if any — just enough for the frontend to navigate + know
+    whether to start polling."""
+    session_id: int
+    status: str
+
+
 class CaregiverNoteListItem(Schema):
     id: int
     note_date: date

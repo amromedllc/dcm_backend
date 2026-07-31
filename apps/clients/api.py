@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import redis
@@ -16,7 +16,7 @@ from apps.integrations.tpms_auth_client import (
     clear_tpms_access_token,
     get_tpms_access_token,
     list_patients,
-    list_recurring_appointments,
+    list_appointments,
 )
 
 logger = logging.getLogger(__name__)
@@ -660,13 +660,14 @@ def _serialize_tpms_api_appointments(
                     appt,
                     'start_date',
                     'schedule_date',
+                    'scheduled_date',
                     'appointment_date',
                     'session_date',
                     'date',
                 )
             )
             if schedule_date is not None:
-                from_hm, to_hm = _parse_hours_range(_dig_appointment(appt, 'hours', 'time'))
+                from_hm, to_hm = _parse_hours_range(_dig_appointment(appt, 'hours', 'time', 'scheduled_time'))
                 if from_hm is not None:
                     start = datetime(
                         schedule_date.year, schedule_date.month, schedule_date.day,
@@ -682,7 +683,7 @@ def _serialize_tpms_api_appointments(
             _dig_appointment(appt, 'to_time', 'end_time', 'appointment_end_time', 'schedule_to')
         )
         if end is None:
-            _, to_hm = _parse_hours_range(_dig_appointment(appt, 'hours', 'time'))
+            _, to_hm = _parse_hours_range(_dig_appointment(appt, 'hours', 'time', 'scheduled_time'))
             if to_hm is not None:
                 end = datetime(start.year, start.month, start.day, to_hm[0], to_hm[1])
         if end is None:
@@ -783,11 +784,12 @@ def list_client_sessions(
     """
     Return appointments for a client from TherapyPMS iOS API.
 
-    Uses POST /api/v1/ios/appointment/recurring/list with:
-    - patient_ids: the selected client's TPMS patient id (`Client.external_id`)
+    Uses POST /api/v1/ios/appointments/list with:
+    - client_ids: the selected client's TPMS patient id (`Client.external_id`)
     - provider_ids: the logged-in user's TPMS provider id (`User.external_employee_id`),
       except for admin/supervisor who see all providers' sessions for the client
       (client_id-scoped only, irrespective of provider_id)
+    - report_range: from_date/to_date if given, else a wide default window
     """
     client = _get_client_or_404(request, client_id)
 
@@ -810,11 +812,16 @@ def list_client_sessions(
         else:
             return []
 
+    range_start = from_date or (date.today() - timedelta(days=3 * 365))
+    range_end = to_date or (date.today() + timedelta(days=3 * 365))
+
     try:
-        appointments = list_recurring_appointments(
+        appointments = list_appointments(
             token,
-            patient_ids=[tpms_patient_id],
+            client_ids=[tpms_patient_id],
             provider_ids=provider_ids,
+            start_date=range_start.strftime('%m/%d/%Y'),
+            end_date=range_end.strftime('%m/%d/%Y'),
         )
     except TpmsAuthError as exc:
         if exc.status_code in {401, 403}:

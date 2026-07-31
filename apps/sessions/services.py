@@ -87,6 +87,11 @@ def submit_session(session_run, staff_user) -> tuple[list, list]:
     """Move a session from open → submitted, then evaluate target workflow
     advancement and prompt-level fading.
 
+    A supervisor or admin submitting a session already carries approval
+    authority, so their submission skips the review queue and lands directly
+    on approved — a plain staff submission still requires a separate
+    supervisor/admin approval.
+
     Returns (advanced_targets, faded_targets) — the Target objects whose
     status was automatically advanced, and whose prompt level was automatically
     faded, respectively.
@@ -101,13 +106,25 @@ def submit_session(session_run, staff_user) -> tuple[list, list]:
     if note and note.docuseal_template_id and not note.docuseal_completed_at:
         raise HttpError(409, 'Session Note must be completed before submitting')
 
-    session_run.status = session_run.Status.SUBMITTED
-    session_run.submitted_at = timezone.now()
-    session_run.ended_at = session_run.ended_at or timezone.now()
-    session_run.save(update_fields=['status', 'submitted_at', 'ended_at'])
+    auto_approve = staff_user.role in ('admin', 'supervisor')
+    now = timezone.now()
+    session_run.submitted_at = now
+    session_run.ended_at = session_run.ended_at or now
+    update_fields = ['submitted_at', 'ended_at', 'status']
+    if auto_approve:
+        session_run.status = session_run.Status.APPROVED
+        session_run.reviewed_by = staff_user
+        session_run.reviewed_at = now
+        update_fields += ['reviewed_by', 'reviewed_at']
+    else:
+        session_run.status = session_run.Status.SUBMITTED
+    session_run.save(update_fields=update_fields)
 
-    from apps.notifications.service import notify_session_submitted
-    notify_session_submitted(session_run)
+    from apps.notifications.service import notify_session_submitted, notify_session_approved
+    if auto_approve:
+        notify_session_approved(session_run)
+    else:
+        notify_session_submitted(session_run)
 
     from apps.programs.services import evaluate_session_mastery, evaluate_session_fading
     advanced = evaluate_session_mastery(session_run)

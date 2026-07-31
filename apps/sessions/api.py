@@ -265,12 +265,12 @@ def list_provider_appointments(
     status: str | None = None,
 ):
     """Return appointments for a provider via the TherapyPMS iOS API."""
-    from apps.clients.models import Client
+    from datetime import date as dt_date, timedelta
     from apps.integrations.tpms_auth_client import (
         TpmsAuthError,
         clear_tpms_access_token,
         get_tpms_access_token,
-        list_recurring_appointments,
+        list_appointments,
     )
     from apps.clients.api import _serialize_tpms_api_appointments
 
@@ -278,24 +278,22 @@ def list_provider_appointments(
     if not token:
         raise HttpError(401, 'TherapyPMS session expired. Please log in again.')
 
-    patient_ids: list[int] = []
-    qs = Client.objects.exclude(external_id='').exclude(external_id__isnull=True)
-    if request.user.external_admin_id is not None:
-        qs = qs.filter(external_admin_id=request.user.external_admin_id)
-    for ext in qs.values_list('external_id', flat=True):
-        try:
-            patient_ids.append(int(ext))
-        except (TypeError, ValueError):
-            continue
-
-    if not patient_ids:
-        return []
+    # A provider's own schedule is scoped by provider_ids alone — no
+    # client_ids needed (that's for the "one specific client" case in
+    # clients.api.list_client_sessions). Sending client_ids=[] here omits
+    # the key from the request entirely (see list_appointments).
+    # No date filter requested here — ask TPMS for a wide window rather than
+    # an unbounded one, then _serialize_tpms_api_appointments's own
+    # from_date/to_date=None just means "don't filter further client-side."
+    today = dt_date.today()
 
     try:
-        appointments = list_recurring_appointments(
+        appointments = list_appointments(
             token,
-            patient_ids=patient_ids,
+            client_ids=[],
             provider_ids=[int(external_employee_id)],
+            start_date=(today - timedelta(days=3 * 365)).strftime('%m/%d/%Y'),
+            end_date=(today + timedelta(days=3 * 365)).strftime('%m/%d/%Y'),
         )
     except TpmsAuthError as exc:
         if exc.status_code in {401, 403}:
@@ -321,12 +319,11 @@ def my_schedule(request, date: str | None = None):
     (defaults to today). Uses TherapyPMS iOS API for TPMS-linked users.
     """
     from datetime import date as dt_date
-    from apps.clients.models import Client
     from apps.integrations.tpms_auth_client import (
         TpmsAuthError,
         clear_tpms_access_token,
         get_tpms_access_token,
-        list_recurring_appointments,
+        list_appointments,
     )
     from apps.clients.api import _serialize_tpms_api_appointments
 
@@ -348,24 +345,15 @@ def my_schedule(request, date: str | None = None):
     if not token:
         raise HttpError(401, 'TherapyPMS session expired. Please log in again.')
 
-    patient_ids: list[int] = []
-    qs = Client.objects.exclude(external_id='').exclude(external_id__isnull=True)
-    if request.user.external_admin_id is not None:
-        qs = qs.filter(external_admin_id=request.user.external_admin_id)
-    for ext in qs.values_list('external_id', flat=True):
-        try:
-            patient_ids.append(int(ext))
-        except (TypeError, ValueError):
-            continue
-
-    if not patient_ids:
-        return []
-
     try:
-        appointments = list_recurring_appointments(
+        # Own schedule — provider_ids alone, no client_ids (see
+        # list_provider_appointments above for the same reasoning).
+        appointments = list_appointments(
             token,
-            patient_ids=patient_ids,
+            client_ids=[],
             provider_ids=[int(employee_id)],
+            start_date=target.strftime('%m/%d/%Y'),
+            end_date=target.strftime('%m/%d/%Y'),
         )
     except TpmsAuthError as exc:
         if exc.status_code in {401, 403}:
@@ -562,26 +550,51 @@ def update_appointment(request, appt_id: int, data: AppointmentUpdateRequest):
 # Sessions — start / list / detail
 # ---------------------------------------------------------------------------
 
+def _canonical_external_client_id(client_id: int) -> int:
+    """SessionRun.external_client_id is meant to hold the TPMS patient id —
+    the caregiver portal's JWT only ever knows that id, never a local PK —
+    but every staff-side URL/hook (/clients/{clientId}/..., useClientSessions)
+    passes the local DCM Client.id instead (see _get_client_or_404, which
+    looks clients up by id, not external_id). Resolve to the real TPMS id
+    here so storage and lookups agree regardless of which one the caller
+    sent — mirrors _find_appointment's equivalent normalization for
+    external_appointment_id."""
+    from apps.clients.models import Client
+    client = Client.objects.filter(id=client_id).first()
+    if client and client.external_id and client.external_id.isdigit():
+        return int(client.external_id)
+    return client_id
+
+
 @router.post('/sessions', response={201: SessionRunSchema})
 def start_session(request, data: SessionStartRequest):
     """
     Creates a new SessionRun and immediately captures the program snapshot.
-    client_id is the TPMS client (patient) ID; appointment_id is the TPMS appointment ID.
+    client_id is whatever the frontend's appointment/client row happened to
+    expose — normally the local DCM Client.id (see _get_client_or_404) —
+    appointment_id may be either the TPMS appointment ID or a local DCM
+    Appointment PK (the frontend's appointment row id is whichever one
+    _serialize_tpms_api_appointments happened to return — see
+    _find_appointment). Both external_client_id and external_appointment_id
+    are normalized to their TPMS ids before storage so they match what the
+    caregiver portal (which only ever sees TPMS ids) looks sessions up by.
     """
     if data.client_id not in _accessible_external_client_ids(request):
         raise HttpError(404, 'Client not found')
-    lesson_id = data.lesson_id
-    if not lesson_id and data.appointment_id:
-        lesson_id = Appointment.objects.filter(id=data.appointment_id).values_list('lesson_id', flat=True).first()
+    appt = _find_appointment(data.appointment_id) if data.appointment_id else None
+    lesson_id = data.lesson_id or (appt.lesson_id if appt else None)
+    external_appointment_id = data.appointment_id
+    if appt and appt.external_id and appt.external_id.isdigit():
+        external_appointment_id = int(appt.external_id)
     snapshot = build_program_snapshot(
         client_id=data.client_id,
         lesson_id=lesson_id,
         restrict_to_lesson=bool(data.appointment_id),
     )
     session = SessionRun.objects.create(
-        external_client_id=data.client_id,
+        external_client_id=_canonical_external_client_id(data.client_id),
         staff=request.user,
-        external_appointment_id=data.appointment_id,
+        external_appointment_id=external_appointment_id,
         lesson_id=lesson_id,
         program_snapshot=snapshot,
         start_latitude=data.latitude,
@@ -602,7 +615,7 @@ def list_sessions(
         external_client_id__in=_accessible_external_client_ids(request),
     )
     if client_id:
-        qs = qs.filter(external_client_id=client_id)
+        qs = qs.filter(external_client_id=_canonical_external_client_id(client_id))
     if status:
         qs = qs.filter(status=status)
     if request.user.role == 'staff':
