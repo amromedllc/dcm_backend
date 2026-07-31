@@ -64,23 +64,45 @@ def evaluate_session_fading(session_run) -> list[Target]:
     return faded
 
 
-def _pass_stats(target: Target, trials_qs) -> tuple[int, int]:
+def _pass_stats(target: Target, trials_qs, *, require_independent: bool = False) -> tuple[int, int]:
     """
     Returns (total_passes, correct_passes) for one target's trials in one session.
 
     - Plain targets (no sub_items — discrete_trial and friends): one TrialEvent row
-      is one pass; correct means response_score > 0. Unchanged from before sub_items existed.
+      is one pass; correct means response_score > 0 by default. Unchanged from
+      before sub_items existed.
     - Shaping: one row per pass (whichever sub_item_key/level was reached that trial);
       correct only if the level reached is the terminal (last) entry in target.sub_items.
+      `require_independent` doesn't apply here — correctness is already defined by
+      reaching the terminal level, not by response_score.
     - Task analysis / set of targets: multiple rows share one trial_number, together
       forming one pass. A pass only counts once every sub_item has been scored in it
       (an in-progress/incomplete pass doesn't count toward total or correct), and is
       correct only if every one of those rows was scored correct — independent
       completion of the whole chain/set, not a per-step average.
+
+    `require_independent`: when True, a pass only counts as correct if its score
+    equals the target's configured *success* score — the level an admin marked
+    is_success on the prompting template (falling back to the highest configured
+    score for templates with nothing marked) — the same rule apps.analytics uses
+    for accuracy charts. Used by mastery (_advance_if_criteria_met), since
+    advancing to the next phase should require independent performance, not
+    merely a nonzero (still-prompted) score. NOT used by fading
+    (_fade_if_criteria_met): fading evaluates trials already filtered down to
+    the target's *current* (often sub-maximal) prompt level, so requiring the
+    success score there would make it impossible to ever satisfy — fading keeps
+    the plain response_score > 0 rule.
     """
+    max_score = None
+    if require_independent and target.prompting_template:
+        max_score = target.prompting_template.success_score()
+
     if not target.sub_items:
         total = trials_qs.count()
-        correct = trials_qs.filter(response_score__gt=0).count()
+        correct = (
+            trials_qs.filter(response_score__gte=max_score).count() if max_score is not None
+            else trials_qs.filter(response_score__gt=0).count()
+        )
         return total, correct
 
     if target.measurement_type == Target.MeasurementType.SHAPING:
@@ -94,7 +116,8 @@ def _pass_stats(target: Target, trials_qs) -> tuple[int, int]:
     correct_keys: dict[int, set] = {}
     for score, trial_number, key in trials_qs.values_list('response_score', 'trial_number', 'sub_item_key'):
         scored_keys.setdefault(trial_number, set()).add(key)
-        if score > 0:
+        is_correct = score >= max_score if max_score is not None else score > 0
+        if is_correct:
             correct_keys.setdefault(trial_number, set()).add(key)
 
     total = 0
@@ -156,7 +179,7 @@ def _advance_if_criteria_met(target: Target, session_run_id: int) -> bool:
 
     for session in recent_sessions:
         trials = TrialEvent.objects.filter(session_run=session, target_id=target.id)
-        total, correct = _pass_stats(target, trials)
+        total, correct = _pass_stats(target, trials, require_independent=True)
         if total < min_trials:
             return False
         pct = correct / total * 100

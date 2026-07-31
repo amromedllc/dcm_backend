@@ -105,9 +105,14 @@ class MaintenanceScheduleUpdateRequest(Schema):
 
 class PromptingLevelSchema(Schema):
     label: NonEmptyStr
-    score: int
+    # No longer client-supplied — _normalize_levels() below derives it from
+    # is_success (1 for the success level, 0 for every other) on every save,
+    # regardless of what's sent. Kept as a field (rather than dropped) because
+    # existing stored levels and TrialEvent.response_score still key off it.
+    score: int = 0
     color: str
     abbreviation: str
+    is_success: bool = False
 
 
 class PromptingTemplateSchema(Schema):
@@ -119,11 +124,33 @@ class PromptingTemplateSchema(Schema):
     created_at: datetime
 
 
+def _normalize_levels(levels: list[PromptingLevelSchema] | None) -> list[PromptingLevelSchema] | None:
+    """Exactly one level must be marked is_success (there's no separate score
+    field anymore for admins to fall back on to signal "this one is correct").
+    Normalizes score to the binary value everything downstream already
+    effectively treats it as: 1 for the success level, 0 for every other."""
+    if levels is None:
+        return None
+    success_count = sum(1 for lvl in levels if lvl.is_success)
+    if success_count == 0:
+        raise ValueError('Mark one prompt level as the successful outcome')
+    if success_count > 1:
+        raise ValueError('Only one prompt level can be marked as the successful outcome')
+    for lvl in levels:
+        lvl.score = 1 if lvl.is_success else 0
+    return levels
+
+
 class PromptingTemplateCreateRequest(Schema):
     name: NonEmptyStr
     description: str = ''
     levels: list[PromptingLevelSchema] = Field(min_length=1)
     is_org_default: bool = False
+
+    @field_validator('levels')
+    @classmethod
+    def _check_levels(cls, v):
+        return _normalize_levels(v)
 
 
 class PromptingTemplateUpdateRequest(Schema):
@@ -131,6 +158,11 @@ class PromptingTemplateUpdateRequest(Schema):
     description: str | None = None
     levels: list[PromptingLevelSchema] | None = Field(default=None, min_length=1)
     is_org_default: bool | None = None
+
+    @field_validator('levels')
+    @classmethod
+    def _check_levels(cls, v):
+        return _normalize_levels(v)
 
 
 # ---------------------------------------------------------------------------

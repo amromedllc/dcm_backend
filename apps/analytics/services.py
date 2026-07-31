@@ -66,13 +66,13 @@ class ClientProgressReport(TypedDict):
 # ---------------------------------------------------------------------------
 
 def _max_scores_for_targets(target_ids: list[int]) -> dict[int, int | None]:
-    """Returns {target_id: max_prompting_score} for the given target IDs."""
+    """Returns {target_id: success_score} for the given target IDs — the score
+    of the prompt level marked is_success on the target's template (falling
+    back to the highest configured score for templates with nothing marked).
+    Name kept as "max_scores" at call sites since that's still the common case."""
     result: dict[int, int | None] = {}
     for target in Target.objects.filter(id__in=target_ids).select_related('prompting_template'):
-        if target.prompting_template and target.prompting_template.levels:
-            result[target.id] = max(lvl['score'] for lvl in target.prompting_template.levels)
-        else:
-            result[target.id] = None
+        result[target.id] = target.prompting_template.success_score() if target.prompting_template else None
     return result
 
 

@@ -12,7 +12,8 @@ def _program_upload_path(instance, filename):
 class PromptingTemplate(TenantAwareModel):
     """
     Defines the scored response levels used during trial data entry.
-    Example levels: [{"label": "Full Physical", "score": 0, "color": "#e74c3c", "abbreviation": "FP"}, ...]
+    Example levels: [{"label": "Full Physical", "score": 0, "color": "#e74c3c",
+    "abbreviation": "FP", "is_success": False}, ...]
     """
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True)
@@ -26,6 +27,19 @@ class PromptingTemplate(TenantAwareModel):
 
     def __str__(self) -> str:
         return self.name
+
+    def success_score(self) -> int | None:
+        """The response_score that counts as a fully successful/independent
+        response for this template — the level an admin explicitly marked
+        is_success, or (for templates saved before that flag existed, where
+        no level has it set) the highest configured score, for backward
+        compatibility. Returns None for a template with no levels."""
+        if not self.levels:
+            return None
+        for lvl in self.levels:
+            if lvl.get('is_success'):
+                return lvl['score']
+        return max(lvl['score'] for lvl in self.levels)
 
 
 class FadingTemplate(TenantAwareModel):
