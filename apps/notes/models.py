@@ -28,7 +28,6 @@ class NoteTemplate(TenantAwareModel):
     TEMPLATE_TYPES = [
         ('notes', 'Notes'),
         ('forms', 'Forms'),
-        ('reports', 'Reports'),
     ]
     template_type = models.CharField(max_length=20, choices=TEMPLATE_TYPES, default='notes')
     body_template = models.TextField(blank=True, default='')

@@ -38,7 +38,7 @@ class NoteTemplateCreateRequest(Schema):
     description: str = ''
     fields: list[NoteTemplateFieldSchema] = []
     is_org_default: bool = False
-    template_type: Literal['notes', 'forms', 'reports'] = 'notes'
+    template_type: Literal['notes', 'forms'] = 'notes'
     body_template: str = ''
     require_completer_signature: bool = False
     require_additional_signatures: bool = False
@@ -51,7 +51,7 @@ class NoteTemplateUpdateRequest(Schema):
     fields: list[NoteTemplateFieldSchema] | None = None
     is_org_default: bool | None = None
     is_active: bool | None = None
-    template_type: Literal['notes', 'forms', 'reports'] | None = None
+    template_type: Literal['notes', 'forms'] | None = None
     body_template: str | None = None
     require_completer_signature: bool | None = None
     require_additional_signatures: bool | None = None
