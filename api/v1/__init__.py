@@ -86,35 +86,52 @@ def dashboard(request):
     from apps.sessions.models import SessionRun
     from apps.notes.models import LessonNote
     from apps.notifications.models import Notification
-    from apps.clients.models import Client
+    from apps.clients.api import _get_accessible_clients
+    from apps.sessions.api import _accessible_external_client_ids
+    from apps.accounts.api import _same_practice_q
 
     user = request.user
     today = timezone.now().date()
 
-    sessions_pending = SessionRun.objects.filter(status='submitted').count()
+    # One Organization can front several TPMS practices at once (see
+    # tenants.OrganizationTpmsAdminId) — every count below must stay within
+    # the caller's own practice/assignment scope, the same boundary already
+    # enforced for clients/sessions/notes/users elsewhere, or a practice
+    # sharing this org's schema would see every other practice's numbers
+    # baked into its own dashboard.
+    accessible_client_ids = _accessible_external_client_ids(request)
+    accessible_clients = _get_accessible_clients(request)
+
+    sessions_pending = SessionRun.objects.filter(
+        status='submitted', external_client_id__in=accessible_client_ids,
+    ).count()
 
     my_open_sessions = (
         SessionRun.objects.filter(staff_id=user.id, status='open').count()
         if user.role == 'staff' else None
     )
 
-    notes_pending = LessonNote.objects.filter(status='submitted').count()
+    notes_pending = LessonNote.objects.filter(
+        status='submitted', external_client_id__in=accessible_client_ids,
+    ).count()
 
     my_draft_notes = (
         LessonNote.objects.filter(staff_id=user.id, status='draft').count()
         if user.role == 'staff' else None
     )
 
-    active_clients = Client.objects.filter(status='active').count()
+    active_clients = accessible_clients.filter(status='active').count()
 
     # Total clients (all statuses) — the admin dashboard's "Total clients" card
-    total_clients = Client.objects.count()
+    total_clients = accessible_clients.count()
 
     unread_notifications = Notification.objects.filter(
         recipient_id=user.id, read_at__isnull=True
     ).count()
 
-    sessions_today = SessionRun.objects.filter(started_at__date=today).count()
+    sessions_today = SessionRun.objects.filter(
+        started_at__date=today, external_client_id__in=accessible_client_ids,
+    ).count()
 
     result = {
         'sessions_pending_review': sessions_pending,
@@ -134,7 +151,12 @@ def dashboard(request):
         from apps.audit.models import AuditLog
         from apps.accounts.models import User
 
-        recent = AuditLog.objects.select_related()[:10]
+        # AuditLog.actor_id is a plain int (not a FK — see model comment on
+        # why), so practice-scoping it means resolving the same-practice
+        # user ids first rather than joining through actor_id directly.
+        same_practice_user_ids = User.objects.filter(_same_practice_q(user)).values('id')
+
+        recent = AuditLog.objects.filter(actor_id__in=same_practice_user_ids).select_related()[:10]
         result['recent_activity'] = [
             {
                 'actor_email': log.actor_email,
@@ -156,16 +178,24 @@ def dashboard(request):
             )
 
         sessions_submitted_by_day = _counts_by_day(
-            SessionRun.objects.filter(submitted_at__date__gte=trend_start), 'submitted_at',
+            SessionRun.objects.filter(
+                submitted_at__date__gte=trend_start, external_client_id__in=accessible_client_ids,
+            ), 'submitted_at',
         )
         sessions_approved_by_day = _counts_by_day(
-            SessionRun.objects.filter(status='approved', reviewed_at__date__gte=trend_start), 'reviewed_at',
+            SessionRun.objects.filter(
+                status='approved', reviewed_at__date__gte=trend_start, external_client_id__in=accessible_client_ids,
+            ), 'reviewed_at',
         )
         notes_submitted_by_day = _counts_by_day(
-            LessonNote.objects.filter(submitted_at__date__gte=trend_start), 'submitted_at',
+            LessonNote.objects.filter(
+                submitted_at__date__gte=trend_start, external_client_id__in=accessible_client_ids,
+            ), 'submitted_at',
         )
         notes_approved_by_day = _counts_by_day(
-            LessonNote.objects.filter(status='approved', approved_at__date__gte=trend_start), 'approved_at',
+            LessonNote.objects.filter(
+                status='approved', approved_at__date__gte=trend_start, external_client_id__in=accessible_client_ids,
+            ), 'approved_at',
         )
 
         daily_trend = []
@@ -186,7 +216,7 @@ def dashboard(request):
         # separate reverse FKs joined onto the same User row).
         productivity_start = today - timedelta(days=29)
         staff_rows = (
-            User.objects.filter(role='staff', is_active=True)
+            User.objects.filter(_same_practice_q(user), role='staff', is_active=True)
             .annotate(
                 sessions_count=Count(
                     'session_runs',
