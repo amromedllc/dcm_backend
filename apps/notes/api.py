@@ -272,19 +272,23 @@ def list_signatures(request, note_id: int):
     return list(note.signatures.all())
 
 
+_ALLOWED_SELF_SIGNATURE = {'staff': 'staff', 'supervisor': 'supervisor', 'admin': 'supervisor'}
+
+
 @router.post('/notes/{note_id}/sign', response={201: NoteSignatureSchema})
 def sign_note(request, note_id: int, data: SignNoteRequest):
     note = _get_note_or_404(note_id)
+    _assert_note_access(note, request)
 
-    # Approved notes can be signed by staff/supervisors; caregiver signing allowed on any non-draft
     if data.signature_type == 'caregiver':
-        if note.status == LessonNote.Status.DRAFT:
-            raise HttpError(409, 'Caregivers cannot sign draft notes')
-        if not note.requires_caregiver_signature:
-            raise HttpError(400, 'This note does not require a caregiver signature')
-    else:
-        if note.status != LessonNote.Status.APPROVED:
-            raise HttpError(409, 'Staff and supervisor signatures require an approved note')
+        raise HttpError(403, 'Caregiver signatures must be submitted through the caregiver portal')
+
+    expected = _ALLOWED_SELF_SIGNATURE.get(request.user.role)
+    if data.signature_type != expected:
+        raise HttpError(403, "You can only sign with your own role's signature type")
+
+    if note.status != LessonNote.Status.APPROVED:
+        raise HttpError(409, 'Staff and supervisor signatures require an approved note')
 
     if NoteSignature.objects.filter(note_id=note_id, signer_id=request.user.id, signature_type=data.signature_type).exists():
         raise HttpError(409, 'You have already signed this note with this signature type')
