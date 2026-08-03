@@ -1,9 +1,9 @@
 import hmac
 import logging
-import os
 from collections import deque
 from threading import Lock
 
+from django.conf import settings
 from django.http import HttpResponseForbidden, JsonResponse
 
 _MAX_RECORDS = 1000
@@ -30,7 +30,7 @@ def get_recent_logs(limit: int = 200) -> list[str]:
 
 
 def logs_view(request):
-    expected = os.environ.get('LOGS_ACCESS_TOKEN', 'f6cb7428db3cd332693da394aa523122e5df0fdeec5c58a5')
+    expected = getattr(settings, 'LOGS_ACCESS_TOKEN', '')
     provided = request.GET.get('token', '')
     if not expected or not hmac.compare_digest(expected, provided):
         return HttpResponseForbidden('Forbidden')
