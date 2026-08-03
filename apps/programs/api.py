@@ -57,22 +57,38 @@ def _accessible_external_client_ids(request) -> set[int]:
     return ids
 
 
+def _program_accessible(request, program: Program) -> bool:
+    """Client-bound programs are scoped by practice/assignment (see
+    _accessible_external_client_ids); org-level template programs have no
+    external_client_id at all, so they're scoped the same way _org_qs scopes
+    them — by the creating admin's facility — instead of always failing the
+    client check and 404ing (which is what happened before this branch:
+    every /org-programs detail open 404'd since a template's
+    external_client_id is always None)."""
+    if program.is_template:
+        return (
+            program.created_by_id is not None
+            and program.created_by.external_admin_id == request.user.external_admin_id
+        )
+    return program.external_client_id in _accessible_external_client_ids(request)
+
+
 def _get_program_or_404(request, program_id: int) -> Program:
     try:
-        program = Program.objects.get(id=program_id)
+        program = Program.objects.select_related('created_by').get(id=program_id)
     except Program.DoesNotExist:
         raise HttpError(404, 'Program not found')
-    if program.external_client_id not in _accessible_external_client_ids(request):
+    if not _program_accessible(request, program):
         raise HttpError(404, 'Program not found')
     return program
 
 
 def _get_target_or_404(request, target_id: int) -> Target:
     try:
-        target = Target.objects.select_related('program').get(id=target_id)
+        target = Target.objects.select_related('program', 'program__created_by').get(id=target_id)
     except Target.DoesNotExist:
         raise HttpError(404, 'Target not found')
-    if target.program.external_client_id not in _accessible_external_client_ids(request):
+    if not _program_accessible(request, target.program):
         raise HttpError(404, 'Target not found')
     return target
 
