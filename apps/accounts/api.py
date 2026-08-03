@@ -400,19 +400,24 @@ def me_debug(request):
 def _same_practice_q(user: User, prefix: str = '') -> Q:
     """
     Scopes a queryset to users in the same practice as `user` — either the
-    same Organization (native users) or the same TPMS external_admin_id
-    (externally-linked users). `prefix` lets this reach through a related
+    same TPMS external_admin_id (externally-linked users) or the same
+    Organization (native users). `prefix` lets this reach through a related
     field, e.g. _same_practice_q(user, 'created_by__') for APIKey.
+
+    external_admin_id must be checked before organization_id: one Organization
+    can front several TPMS practices at once (see tenants.OrganizationTpmsAdminId),
+    so a TPMS-linked user's organization_id alone doesn't identify their practice
+    — checking it first would match every other practice sharing that org too.
 
     User/APIKey live in SHARED_APPS — one global table for every tenant on
     the platform, not schema-isolated — so without this filter, these
-    admin-only endpoints would read/modify another tenant's users or keys
-    given nothing more than a role check and a guessable id.
+    admin-only endpoints would read/modify another tenant's (or practice's)
+    users or keys given nothing more than a role check and a guessable id.
     """
-    if user.organization_id is not None:
-        return Q(**{f'{prefix}organization_id': user.organization_id})
     if user.external_admin_id is not None:
         return Q(**{f'{prefix}external_admin_id': user.external_admin_id})
+    if user.organization_id is not None:
+        return Q(**{f'{prefix}organization_id': user.organization_id})
     # Neither identifier set — scope to nothing rather than risk matching
     # every other user who also happens to have both fields null.
     return Q(**{f'{prefix}pk': None})
