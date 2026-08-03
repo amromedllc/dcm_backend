@@ -43,6 +43,40 @@ def _require_supervisor(request):
         raise HttpError(403, 'Supervisor or admin access required')
 
 
+def _accessible_external_client_ids(request) -> set[int]:
+    from apps.clients.api import _get_accessible_clients
+
+    ids: set[int] = set()
+    for client_id, external_id in _get_accessible_clients(request).values_list('id', 'external_id'):
+        ids.add(client_id)
+        if external_id:
+            try:
+                ids.add(int(external_id))
+            except (TypeError, ValueError):
+                pass
+    return ids
+
+
+def _get_program_or_404(request, program_id: int) -> Program:
+    try:
+        program = Program.objects.get(id=program_id)
+    except Program.DoesNotExist:
+        raise HttpError(404, 'Program not found')
+    if program.external_client_id not in _accessible_external_client_ids(request):
+        raise HttpError(404, 'Program not found')
+    return program
+
+
+def _get_target_or_404(request, target_id: int) -> Target:
+    try:
+        target = Target.objects.select_related('program').get(id=target_id)
+    except Target.DoesNotExist:
+        raise HttpError(404, 'Target not found')
+    if target.program.external_client_id not in _accessible_external_client_ids(request):
+        raise HttpError(404, 'Target not found')
+    return target
+
+
 def _require_settings_permission(request, permission: str):
     """Enforce the fine-grained settings privilege (e.g. settings_tags_create).
 
@@ -110,7 +144,10 @@ def _serialize_program(program: Program, include_targets: bool = False) -> dict:
 
 @router.get('/programs', response=list[ProgramListSchema])
 def list_programs(request, client_id: int, category: str | None = None, status: str | None = None):
-    qs = Program.objects.filter(external_client_id=client_id).exclude(status='archived')
+    qs = Program.objects.filter(
+        external_client_id=client_id,
+        external_client_id__in=_accessible_external_client_ids(request),
+    ).exclude(status='archived')
     if category:
         qs = qs.filter(category=category)
     if status:
@@ -154,10 +191,7 @@ def create_program(request, data: ProgramCreateRequest):
 
 @router.get('/programs/{program_id}', response=ProgramSchema)
 def get_program(request, program_id: int):
-    try:
-        program = Program.objects.prefetch_related('targets').get(id=program_id)
-    except Program.DoesNotExist:
-        raise HttpError(404, 'Program not found')
+    program = _get_program_or_404(request, program_id)
     return {**_serialize_program(program, include_targets=True)}
 
 
@@ -220,10 +254,7 @@ def _validate_target_status(status: str) -> None:
 
 @router.get('/programs/{program_id}/targets', response=list[TargetSchema])
 def list_targets(request, program_id: int, staff_view: bool = False):
-    try:
-        program = Program.objects.get(id=program_id)
-    except Program.DoesNotExist:
-        raise HttpError(404, 'Program not found')
+    program = _get_program_or_404(request, program_id)
     qs = program.targets.all()
     if staff_view:
         qs = qs.visible_to_staff()
@@ -258,10 +289,7 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
 
 @router.get('/targets/{target_id}', response=TargetSchema)
 def get_target(request, target_id: int):
-    try:
-        return Target.objects.get(id=target_id)
-    except Target.DoesNotExist:
-        raise HttpError(404, 'Target not found')
+    return _get_target_or_404(request, target_id)
 
 
 @router.patch('/targets/{target_id}', response=TargetSchema)
@@ -296,6 +324,7 @@ def delete_target(request, target_id: int):
 
 @router.get('/targets/{target_id}/history', response=list[TargetStatusChangeSchema])
 def target_history(request, target_id: int):
+    _get_target_or_404(request, target_id)
     qs = (
         TargetStatusChange.objects
         .filter(target_id=target_id)
@@ -325,6 +354,7 @@ def target_history(request, target_id: int):
 
 @router.get('/targets/{target_id}/prompt-level-history', response=list[TargetPromptLevelChangeSchema])
 def target_prompt_level_history(request, target_id: int):
+    _get_target_or_404(request, target_id)
     qs = (
         TargetPromptLevelChange.objects
         .filter(target_id=target_id)
