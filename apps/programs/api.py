@@ -77,6 +77,21 @@ def _get_target_or_404(request, target_id: int) -> Target:
     return target
 
 
+def _assert_client_accessible(request, client_id: int) -> None:
+    if client_id not in _accessible_external_client_ids(request):
+        raise HttpError(404, 'Client not found')
+
+
+def _get_lesson_or_404(request, lesson_id: int) -> Lesson:
+    try:
+        lesson = Lesson.objects.get(id=lesson_id)
+    except Lesson.DoesNotExist:
+        raise HttpError(404, 'Lesson not found')
+    if lesson.external_client_id not in _accessible_external_client_ids(request):
+        raise HttpError(404, 'Lesson not found')
+    return lesson
+
+
 def _require_settings_permission(request, permission: str):
     """Enforce the fine-grained settings privilege (e.g. settings_tags_create).
 
@@ -169,6 +184,7 @@ def list_programs(request, client_id: int, category: str | None = None, status: 
 @router.post('/programs', response={201: ProgramSchema})
 def create_program(request, data: ProgramCreateRequest):
     _require_supervisor(request)
+    _assert_client_accessible(request, data.client_id)
     _validate_treatment_area_and_tags(data.treatment_area, data.tags)
     program = Program.objects.create(
         external_client_id=data.client_id,
@@ -198,10 +214,7 @@ def get_program(request, program_id: int):
 @router.patch('/programs/{program_id}', response=ProgramSchema)
 def update_program(request, program_id: int, data: ProgramUpdateRequest):
     _require_supervisor(request)
-    try:
-        program = Program.objects.get(id=program_id)
-    except Program.DoesNotExist:
-        raise HttpError(404, 'Program not found')
+    program = _get_program_or_404(request, program_id)
     updates = data.dict(exclude_none=True)
     if 'treatment_area' in updates or 'tags' in updates:
         _validate_treatment_area_and_tags(
@@ -221,10 +234,7 @@ def update_program(request, program_id: int, data: ProgramUpdateRequest):
 @router.delete('/programs/{program_id}', response={204: None})
 def archive_program(request, program_id: int):
     _require_supervisor(request)
-    try:
-        program = Program.objects.get(id=program_id)
-    except Program.DoesNotExist:
-        raise HttpError(404, 'Program not found')
+    program = _get_program_or_404(request, program_id)
     program.status = Program.Status.ARCHIVED
     program.archived_at = timezone.now()
     program.save(update_fields=['status', 'archived_at'])
@@ -264,10 +274,7 @@ def list_targets(request, program_id: int, staff_view: bool = False):
 @router.post('/programs/{program_id}/targets', response={201: TargetSchema})
 def create_target(request, program_id: int, data: TargetCreateRequest):
     _require_supervisor(request)
-    try:
-        program = Program.objects.get(id=program_id)
-    except Program.DoesNotExist:
-        raise HttpError(404, 'Program not found')
+    program = _get_program_or_404(request, program_id)
     target_data = data.dict()
     if program.workflow_template_id and not target_data.get('workflow_template_id'):
         target_data['workflow_template_id'] = program.workflow_template_id
@@ -295,10 +302,7 @@ def get_target(request, target_id: int):
 @router.patch('/targets/{target_id}', response=TargetSchema)
 def update_target(request, target_id: int, data: TargetUpdateRequest):
     _require_supervisor(request)
-    try:
-        target = Target.objects.get(id=target_id)
-    except Target.DoesNotExist:
-        raise HttpError(404, 'Target not found')
+    target = _get_target_or_404(request, target_id)
     updates = data.dict(exclude_none=True)
     for field, value in updates.items():
         setattr(target, field, value)
@@ -316,9 +320,8 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
 @router.delete('/targets/{target_id}', response={204: None})
 def delete_target(request, target_id: int):
     _require_supervisor(request)
-    deleted, _ = Target.objects.filter(id=target_id).delete()
-    if not deleted:
-        raise HttpError(404, 'Target not found')
+    target = _get_target_or_404(request, target_id)
+    target.delete()
     return 204, None
 
 
@@ -401,6 +404,7 @@ _BULK_UPDATE_FK_MODELS = {
 def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest):
     """Update specific fields across multiple targets without touching unspecified fields."""
     _require_supervisor(request)
+    _get_program_or_404(request, program_id)
     updates = data.dict(exclude={'target_ids'}, exclude_none=True)
     if not updates:
         raise HttpError(400, 'No fields to update were provided')
@@ -436,6 +440,7 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
 def reorder_targets(request, program_id: int, data: ReorderTargetsRequest):
     """Set display_order on targets based on the submitted ordered list of IDs."""
     _require_supervisor(request)
+    _get_program_or_404(request, program_id)
     for order, target_id in enumerate(data.ordered_ids):
         Target.objects.filter(id=target_id, program_id=program_id).update(display_order=order)
     return 200, None
@@ -656,13 +661,18 @@ def _serialize_lesson(lesson: Lesson) -> dict:
 
 @router.get('/lessons', response=list[LessonSchema])
 def list_lessons(request, client_id: int):
-    lessons = Lesson.objects.filter(external_client_id=client_id, is_active=True)
+    lessons = Lesson.objects.filter(
+        external_client_id=client_id,
+        external_client_id__in=_accessible_external_client_ids(request),
+        is_active=True,
+    )
     return [_serialize_lesson(l) for l in lessons]
 
 
 @router.post('/lessons', response={201: LessonSchema})
 def create_lesson(request, data: LessonCreateRequest):
     _require_supervisor(request)
+    _assert_client_accessible(request, data.client_id)
     lesson = Lesson.objects.create(
         external_client_id=data.client_id,
         name=data.name,
@@ -676,19 +686,13 @@ def create_lesson(request, data: LessonCreateRequest):
 
 @router.get('/lessons/{lesson_id}', response=LessonSchema)
 def get_lesson(request, lesson_id: int):
-    try:
-        return _serialize_lesson(Lesson.objects.get(id=lesson_id))
-    except Lesson.DoesNotExist:
-        raise HttpError(404, 'Lesson not found')
+    return _serialize_lesson(_get_lesson_or_404(request, lesson_id))
 
 
 @router.patch('/lessons/{lesson_id}', response=LessonSchema)
 def update_lesson(request, lesson_id: int, data: LessonUpdateRequest):
     _require_supervisor(request)
-    try:
-        lesson = Lesson.objects.get(id=lesson_id)
-    except Lesson.DoesNotExist:
-        raise HttpError(404, 'Lesson not found')
+    lesson = _get_lesson_or_404(request, lesson_id)
     for field, value in data.dict(exclude_none=True).items():
         setattr(lesson, field, value)
     lesson.save()
@@ -698,10 +702,7 @@ def update_lesson(request, lesson_id: int, data: LessonUpdateRequest):
 @router.post('/lessons/{lesson_id}/programs', response={201: LessonProgramSchema})
 def add_program_to_lesson(request, lesson_id: int, data: AddProgramToLessonRequest):
     _require_supervisor(request)
-    try:
-        lesson = Lesson.objects.get(id=lesson_id)
-    except Lesson.DoesNotExist:
-        raise HttpError(404, 'Lesson not found')
+    lesson = _get_lesson_or_404(request, lesson_id)
     lp, _ = LessonProgram.objects.get_or_create(
         lesson=lesson,
         program_id=data.program_id,
@@ -718,6 +719,7 @@ def add_program_to_lesson(request, lesson_id: int, data: AddProgramToLessonReque
 @router.delete('/lessons/{lesson_id}/programs/{program_id}', response={204: None})
 def remove_program_from_lesson(request, lesson_id: int, program_id: int):
     _require_supervisor(request)
+    _get_lesson_or_404(request, lesson_id)
     LessonProgram.objects.filter(lesson_id=lesson_id, program_id=program_id).delete()
     return 204, None
 
@@ -977,6 +979,7 @@ def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
 def assign_org_program_to_client(request, program_id: int, data: AssignOrgProgramRequest):
     """Copy a facility-level program template to a specific client."""
     require_permission(request, 'client_programs_create')
+    _assert_client_accessible(request, data.client_id)
     try:
         template = _org_qs(request).prefetch_related('targets').get(id=program_id)
     except Program.DoesNotExist:
@@ -989,9 +992,9 @@ def assign_org_program_to_client(request, program_id: int, data: AssignOrgProgra
 def copy_program_to_client(request, program_id: int, data: AssignOrgProgramRequest):
     """Copy any client program to another client."""
     _require_supervisor(request)
-    try:
-        source = Program.objects.prefetch_related('targets').get(id=program_id, is_template=False)
-    except Program.DoesNotExist:
+    _assert_client_accessible(request, data.client_id)
+    source = _get_program_or_404(request, program_id)
+    if source.is_template:
         raise HttpError(404, 'Program not found')
     dest = _copy_program_to_client(source, data.client_id, request.user)
     return 201, {**_serialize_program(dest, include_targets=True)}
