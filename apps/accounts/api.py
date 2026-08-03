@@ -486,11 +486,25 @@ def _list_native_staffs(request, include_inactive: bool) -> list[StaffSchema]:
     ]
 
 
+_ROLE_RANK = {
+    User.Role.REPORTING: 0,
+    User.Role.STAFF: 0,
+    User.Role.SUPERVISOR: 1,
+    User.Role.ADMIN: 2,
+}
+
+
+def _assert_can_assign_role(request, target_role: str) -> None:
+    if _ROLE_RANK.get(target_role, 0) > _ROLE_RANK.get(request.user.role, 0):
+        raise HttpError(403, 'You cannot grant a role higher than your own')
+
+
 @router.post('/users', response={201: UserSchema, 400: ErrorResponse}, auth=jwt_auth)
 def create_user(request, data: UserCreateRequest):
     require_permission(request, 'admin_users_edit')
     if data.role == User.Role.CAREGIVER:
         return 400, ErrorResponse(detail='Caregiver accounts are provisioned by portal login only')
+    _assert_can_assign_role(request, data.role)
     if User.objects.filter(email=data.email).exists():
         return 400, ErrorResponse(detail='A user with this email already exists')
     user = User.objects.create_user(
@@ -513,6 +527,8 @@ def update_user(request, user_id: int, data: UserUpdateRequest):
         raise HttpError(404, 'User not found')
     if user.role == User.Role.CAREGIVER or data.role == User.Role.CAREGIVER:
         raise HttpError(400, 'Caregiver accounts are provisioned and managed by portal login only')
+    if data.role is not None:
+        _assert_can_assign_role(request, data.role)
     for field, value in data.dict(exclude_none=True).items():
         setattr(user, field, value)
     user.save()
