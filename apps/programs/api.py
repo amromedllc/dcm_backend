@@ -1,8 +1,11 @@
+import os
+
 from ninja import Router, File
 from ninja.errors import HttpError
 from ninja.files import UploadedFile
 from django.core.files.base import ContentFile
 from django.utils import timezone
+from PIL import Image
 
 from apps.accounts.api import _same_practice_q
 from apps.accounts.auth import jwt_auth
@@ -183,6 +186,36 @@ def _serialize_program(program: Program, include_targets: bool = False) -> dict:
             'id', 'name', 'status', 'display_order', 'is_visible_to_staff'
         ))
     return data
+
+
+def _optimized_program_image_url(request, image_field) -> str | None:
+    if not image_field:
+        return None
+
+    try:
+        source_path = image_field.path
+        source_url = image_field.url
+    except (NotImplementedError, ValueError):
+        return request.build_absolute_uri(image_field.url)
+
+    optimized_path = f'{source_path}.card.webp'
+    optimized_url = f'{source_url}.card.webp'
+
+    try:
+        source_mtime = os.path.getmtime(source_path)
+        optimized_is_current = (
+            os.path.exists(optimized_path)
+            and os.path.getmtime(optimized_path) >= source_mtime
+        )
+        if not optimized_is_current:
+            with Image.open(source_path) as img:
+                img = img.convert('RGB')
+                img.thumbnail((1200, 800), Image.Resampling.LANCZOS)
+                img.save(optimized_path, 'WEBP', quality=82, method=6)
+    except OSError:
+        return request.build_absolute_uri(source_url)
+
+    return request.build_absolute_uri(optimized_url)
 
 
 # ---------------------------------------------------------------------------
@@ -777,7 +810,7 @@ def _serialize_org_program(program: Program, request, include_targets: bool = Fa
         'objective': program.objective,
         'instructions': program.instructions,
         'folder_id': program.folder_id,
-        'image_url': request.build_absolute_uri(program.image.url) if program.image else None,
+        'image_url': _optimized_program_image_url(request, program.image),
         'display_order': program.display_order,
         'target_count': program.targets.count(),
         'targets': targets,
@@ -1080,7 +1113,7 @@ def _serialize_central_program(
         'objective': program.objective,
         'instructions': program.instructions,
         'folder_id': program.folder_id,
-        'image_url': request.build_absolute_uri(program.image.url) if program.image else None,
+        'image_url': _optimized_program_image_url(request, program.image),
         'already_imported': program.id in imported_ids,
         'display_order': program.display_order,
         'target_count': program.targets.count(),
