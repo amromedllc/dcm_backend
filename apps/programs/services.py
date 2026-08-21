@@ -1,6 +1,15 @@
 from __future__ import annotations
 
+from django.db.models import Min, Max, Sum
+
 from apps.programs.models import Target, TargetPromptLevelChange, TargetStatusChange
+
+
+BEHAVIOR_MEASUREMENT_TYPES = {
+    Target.MeasurementType.DURATION,
+    Target.MeasurementType.RATE,
+    Target.MeasurementType.FREQUENCY,
+}
 
 
 def evaluate_session_mastery(session_run) -> list[Target]:
@@ -13,14 +22,21 @@ def evaluate_session_mastery(session_run) -> list[Target]:
 
     Returns the list of targets whose status was changed.
     """
-    from apps.sessions.models import TrialEvent
+    from apps.sessions.models import BehaviorEvent, TrialEvent
 
-    target_ids = (
+    trial_target_ids = (
         TrialEvent.objects
         .filter(session_run=session_run)
         .values_list('target_id', flat=True)
         .distinct()
     )
+    behavior_target_ids = (
+        BehaviorEvent.objects
+        .filter(session_run=session_run)
+        .values_list('target_id', flat=True)
+        .distinct()
+    )
+    target_ids = set(trial_target_ids) | set(behavior_target_ids)
 
     advanced: list[Target] = []
     for target in Target.objects.filter(id__in=target_ids).select_related('workflow_template', 'program__workflow_template'):
@@ -131,6 +147,268 @@ def _pass_stats(target: Target, trials_qs, *, require_independent: bool = False)
     return total, correct
 
 
+def _limit_trials_if_configured(trials_qs, criteria: dict):
+    only_first = criteria.get('only_probe_first') or criteria.get('only_first_trials') or criteria.get('first_trials')
+    try:
+        limit = int(only_first or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    if limit <= 0:
+        return trials_qs
+    trial_numbers = list(
+        trials_qs
+        .values_list('trial_number', flat=True)
+        .distinct()
+        .order_by('trial_number')[:limit]
+    )
+    return trials_qs.filter(trial_number__in=trial_numbers)
+
+
+def _behavior_metric_value(target: Target, session, criteria: dict) -> tuple[int, float]:
+    """Returns (sample_count, value) for behavior-style workflow objectives.
+
+    `minimum_trials` maps to minimum behavior events for behavior targets, keeping
+    the existing workflow JSON shape without adding another field.
+    """
+    from apps.sessions.models import BehaviorEvent
+
+    events = BehaviorEvent.objects.filter(session_run=session, target_id=target.id)
+    total_events = events.aggregate(total=Sum('frequency_count'))['total'] or 0
+    objective_key = str(criteria.get('objective_key') or '').lower()
+
+    if target.measurement_type == Target.MeasurementType.DURATION or 'duration' in objective_key:
+        durations = [d for d in events.values_list('duration_seconds', flat=True) if d is not None]
+        if not durations:
+            return 0, 0.0
+        if 'min_duration' in objective_key:
+            return len(durations), float(min(durations))
+        if 'max_duration' in objective_key:
+            return len(durations), float(max(durations))
+        if 'avg_duration' in objective_key:
+            return len(durations), float(sum(durations) / len(durations))
+        return len(durations), float(sum(durations))
+
+    if target.measurement_type == Target.MeasurementType.RATE or 'rate_' in objective_key:
+        start = session.started_at
+        end = session.ended_at or session.submitted_at or session.reviewed_at
+        if not start or not end or end <= start:
+            bounds = events.aggregate(start=Min('occurred_at'), end=Max('occurred_at'))
+            start = bounds['start']
+            end = bounds['end']
+        if not start or not end or end <= start:
+            return total_events, float(total_events)
+        hours = max((end - start).total_seconds() / 3600, 1 / 60)
+        if 'per_minute' in objective_key:
+            return total_events, float(total_events / (hours * 60))
+        return total_events, float(total_events / hours)
+
+    return total_events, float(total_events)
+
+
+def _session_meets_criteria(target: Target, session, phase_config: dict, criteria: dict) -> bool:
+    min_trials = criteria.get('minimum_trials', 5)
+    threshold = criteria.get('threshold_pct', 80)
+    threshold_direction = str(criteria.get('threshold_direction') or 'min').lower()
+
+    objective_key = str(criteria.get('objective_key') or phase_config.get('objective_key') or '').lower()
+    criteria = {**criteria, 'objective_key': objective_key}
+
+    if target.measurement_type in BEHAVIOR_MEASUREMENT_TYPES or objective_key in {
+        'increase_frequency', 'reduce_frequency',
+        'increase_rate_per_hour', 'reduce_rate_per_hour',
+        'increase_rate_per_minute', 'reduce_rate_per_minute',
+        'increase_total_duration', 'reduce_total_duration',
+        'increase_min_duration', 'reduce_min_duration',
+        'increase_max_duration', 'reduce_max_duration',
+        'increase_avg_duration', 'reduce_avg_duration',
+    }:
+        total, value = _behavior_metric_value(target, session, criteria)
+        if total < min_trials:
+            return False
+        return value <= threshold if threshold_direction == 'max' else value >= threshold
+
+    from apps.sessions.models import TrialEvent
+
+    trials = TrialEvent.objects.filter(session_run=session, target_id=target.id)
+    trials = _limit_trials_if_configured(trials, criteria)
+    total, correct = _pass_stats(target, trials, require_independent=True)
+    if total < min_trials:
+        return False
+    pct = correct / total * 100
+    return pct <= threshold if threshold_direction == 'max' else pct >= threshold
+
+
+def _uses_behavior_events(target: Target, criteria: dict | None = None) -> bool:
+    objective_key = str((criteria or {}).get('objective_key') or '').lower()
+    return target.measurement_type in BEHAVIOR_MEASUREMENT_TYPES or objective_key in {
+        'increase_frequency', 'reduce_frequency',
+        'increase_rate_per_hour', 'reduce_rate_per_hour',
+        'increase_rate_per_minute', 'reduce_rate_per_minute',
+        'increase_total_duration', 'reduce_total_duration',
+        'increase_min_duration', 'reduce_min_duration',
+        'increase_max_duration', 'reduce_max_duration',
+        'increase_avg_duration', 'reduce_avg_duration',
+    }
+
+
+def _recent_sessions_for_target(target: Target, limit: int, criteria: dict | None = None):
+    from apps.sessions.models import SessionRun
+
+    event_filter = (
+        {'behavior_events__target_id': target.id}
+        if _uses_behavior_events(target, criteria)
+        else {'trial_events__target_id': target.id}
+    )
+    return list(
+        SessionRun.objects
+        .filter(
+            status__in=[SessionRun.Status.SUBMITTED, SessionRun.Status.APPROVED],
+            **event_filter,
+        )
+        .distinct()
+        .order_by('-submitted_at')[:limit]
+    )
+
+
+def _transition_target(target: Target, next_status: str, session_run_id: int) -> bool:
+    if not next_status or next_status == target.status:
+        return False
+
+    old_status = target.status
+    target.status = next_status
+    target._pre_advance_status = old_status
+    target.save(update_fields=['status', 'updated_at'])
+
+    TargetStatusChange.objects.create(
+        target=target,
+        from_status=old_status,
+        to_status=next_status,
+        trigger=TargetStatusChange.Trigger.AUTO_MASTERY,
+        session_run_id=session_run_id,
+    )
+
+    _maybe_create_phase_line(target, old_status, next_status, session_run_id)
+    _maybe_auto_open_waiting_targets(target, session_run_id)
+
+    from apps.notifications.service import notify_target_advanced
+    from apps.sessions.models import SessionRun
+    try:
+        sr = SessionRun.objects.get(id=session_run_id)
+        notify_target_advanced(target, sr)
+    except Exception:
+        pass
+
+    return True
+
+
+def _maybe_create_phase_line(target: Target, old_status: str, next_status: str, session_run_id: int) -> None:
+    wf = target.workflow_template or target.program.workflow_template
+    if not wf:
+        return
+    phase_config = next((p for p in wf.phases if p.get('phase') == next_status), None)
+    if not phase_config or not phase_config.get('auto_phase_line'):
+        return
+
+    from apps.analytics.models import GraphAnnotation
+    from apps.sessions.models import SessionRun
+
+    try:
+        session = SessionRun.objects.get(id=session_run_id)
+        date = (session.submitted_at or session.ended_at or session.started_at).date()
+        label = phase_config.get('phase_line_label') or phase_config.get('label') or next_status.title()
+        GraphAnnotation.objects.get_or_create(
+            program=target.program,
+            target=target,
+            annotation_type=GraphAnnotation.AnnotationType.PHASE_LINE,
+            date=date,
+            label=label,
+            defaults={
+                'color': phase_config.get('color') or '#666666',
+                'style': phase_config.get('phase_line_style') or GraphAnnotation.LineStyle.SOLID,
+                'notes': f'Automatic workflow transition: {old_status} to {next_status}',
+            },
+        )
+    except Exception:
+        pass
+
+
+def _maybe_auto_open_waiting_targets(target: Target, session_run_id: int) -> None:
+    wf = target.workflow_template or target.program.workflow_template
+    if not wf:
+        return
+    phase_config = next((p for p in wf.phases if p.get('phase') == 'mastered'), None)
+    if not phase_config or not phase_config.get('auto_open_waiting'):
+        return
+    if target.status not in {'mastered', 'closed', 'maintenance'}:
+        return
+
+    open_status = phase_config.get('auto_open_status') or 'acquisition'
+    direction = phase_config.get('auto_open_direction') or 'first'
+    try:
+        max_open = int(phase_config.get('auto_open_max_targets') or 1)
+    except (TypeError, ValueError):
+        max_open = 1
+
+    currently_open = target.program.targets.exclude(id=target.id).filter(status=open_status).count()
+    slots = max(0, max_open - currently_open)
+    if phase_config.get('auto_open_all'):
+        slots = target.program.targets.filter(status='waiting').count()
+    if slots <= 0:
+        return
+
+    qs = target.program.targets.filter(status='waiting')
+    if direction == 'last':
+        qs = qs.order_by('-display_order', '-id')
+    else:
+        qs = qs.order_by('display_order', 'id')
+
+    for waiting in qs[:slots]:
+        _transition_target(waiting, open_status, session_run_id)
+
+
+def _evaluate_maintenance(target: Target, session_run_id: int, phase_config: dict) -> bool:
+    maintenance = phase_config.get('maintenance') or {}
+    criteria = {
+        'threshold_pct': maintenance.get('threshold_pct', 100),
+        'threshold_direction': maintenance.get('threshold_direction', 'min'),
+        'minimum_trials': maintenance.get('minimum_trials', 1),
+        'objective_key': phase_config.get('objective_key'),
+    }
+
+    from apps.sessions.models import SessionRun
+
+    try:
+        session = SessionRun.objects.get(id=session_run_id)
+    except SessionRun.DoesNotExist:
+        return False
+
+    if _session_meets_criteria(target, session, phase_config, criteria):
+        target.maintenance_episodes_completed += 1
+        intervals = maintenance.get('intervals') or []
+        if target.maintenance_episodes_completed >= max(1, len(intervals)):
+            target.maintenance_episodes_completed = 0
+            target.save(update_fields=['maintenance_episodes_completed', 'updated_at'])
+            next_status = phase_config.get('on_success') or 'closed'
+            if next_status == 'maintenance':
+                next_status = 'closed'
+            return _transition_target(target, next_status, session_run_id)
+        target.save(update_fields=['maintenance_episodes_completed', 'updated_at'])
+        return False
+
+    target.maintenance_episodes_completed = 0
+    target.save(update_fields=['maintenance_episodes_completed', 'updated_at'])
+    if maintenance.get('on_failure') != 'back_to_acquisition':
+        return False
+
+    revert_sessions = int(maintenance.get('revert_sessions') or 1)
+    recent_sessions = _recent_sessions_for_target(target, revert_sessions, criteria)
+    if len(recent_sessions) < revert_sessions:
+        return False
+    if all(not _session_meets_criteria(target, s, phase_config, criteria) for s in recent_sessions):
+        return _transition_target(target, 'acquisition', session_run_id)
+    return False
+
+
 def _advance_if_criteria_met(target: Target, session_run_id: int) -> bool:
     """
     Returns True if the target's status was advanced.
@@ -146,71 +424,32 @@ def _advance_if_criteria_met(target: Target, session_run_id: int) -> bool:
         (p for p in wf.phases if p.get('phase') == target.status),
         None,
     )
-    if phase_config is None or 'criteria' not in phase_config:
+    if phase_config is None:
+        return False
+
+    if target.status == 'mastered' and phase_config.get('maintenance'):
+        return _evaluate_maintenance(target, session_run_id, phase_config)
+
+    if 'criteria' not in phase_config:
         return False
 
     next_status = phase_config.get('on_success')
-    if not next_status or next_status == target.status:
-        return False
 
-    criteria = phase_config['criteria']
+    criteria = {**phase_config['criteria'], 'objective_key': phase_config.get('objective_key')}
     n_consecutive = criteria.get('consecutive_sessions', 3)
-    threshold_pct = criteria.get('threshold_pct', 80)
-    min_trials = criteria.get('minimum_trials', 5)
-    # 'min' (Increase Percent Correct): percent must be ≥ threshold
-    # 'max' (Reduce Percentage): percent must be ≤ threshold
-    threshold_direction = str(criteria.get('threshold_direction') or 'min').lower()
-
-    from apps.sessions.models import SessionRun, TrialEvent
 
     # Most-recent-first so we look at the last N submitted/approved sessions for this target
-    recent_sessions = list(
-        SessionRun.objects
-        .filter(
-            status__in=[SessionRun.Status.SUBMITTED, SessionRun.Status.APPROVED],
-            trial_events__target_id=target.id,
-        )
-        .distinct()
-        .order_by('-submitted_at')[:n_consecutive]
-    )
+    recent_sessions = _recent_sessions_for_target(target, n_consecutive, criteria)
 
     if len(recent_sessions) < n_consecutive:
         return False
 
-    for session in recent_sessions:
-        trials = TrialEvent.objects.filter(session_run=session, target_id=target.id)
-        total, correct = _pass_stats(target, trials, require_independent=True)
-        if total < min_trials:
-            return False
-        pct = correct / total * 100
-        if threshold_direction == 'max':
-            if pct > threshold_pct:
-                return False
-        elif pct < threshold_pct:
-            return False
+    mastered = all(_session_meets_criteria(target, session, phase_config, criteria) for session in recent_sessions)
+    if not mastered:
+        failure_status = phase_config.get('on_failure_status') or phase_config.get('on_regression')
+        return _transition_target(target, failure_status, session_run_id) if failure_status else False
 
-    old_status = target.status
-    target.status = next_status
-    target._pre_advance_status = old_status
-    target.save(update_fields=['status', 'updated_at'])
-
-    TargetStatusChange.objects.create(
-        target=target,
-        from_status=old_status,
-        to_status=next_status,
-        trigger=TargetStatusChange.Trigger.AUTO_MASTERY,
-        session_run_id=session_run_id,
-    )
-
-    from apps.notifications.service import notify_target_advanced
-    from apps.sessions.models import SessionRun
-    try:
-        sr = SessionRun.objects.get(id=session_run_id)
-        notify_target_advanced(target, sr)
-    except Exception:
-        pass
-
-    return True
+    return _transition_target(target, next_status, session_run_id)
 
 
 def _fade_if_criteria_met(target: Target, session_run_id: int) -> bool:

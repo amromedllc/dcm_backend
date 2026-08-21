@@ -370,6 +370,8 @@ class TargetCreateRequest(Schema):
     sd_text: str = ''
     teaching_instructions: str = ''
     status: str = ''  # empty = resolve server-side to the org's default TargetStatus
+    mastery_mode: Target.MasteryMode = Target.MasteryMode.MANUAL
+    fading_mode: Target.FadingMode = Target.FadingMode.MANUAL
     display_order: int = Field(default=0, ge=0)
     is_visible_to_staff: bool = True
     module_id: int | None = None
