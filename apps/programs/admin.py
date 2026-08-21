@@ -4,7 +4,7 @@ from shared.admin import OrganizationScopedAdminMixin
 from .models import (
     Program, Target, PromptingTemplate,
     WorkflowTemplate, MaintenanceSchedule, FadingTemplate,
-    Lesson, LessonProgram,
+    Lesson, LessonProgram, ProgramModule, ProgramSubmodule,
 )
 
 
@@ -72,4 +72,18 @@ class LessonAdmin(OrganizationScopedAdminMixin, ModelAdmin):
     list_filter = ['lesson_type', 'is_active']
     search_fields = ['name']
     inlines = [LessonProgramInline]
+    readonly_fields = ['created_at', 'updated_at']
+
+
+@admin.register(ProgramModule)
+class ProgramModuleAdmin(OrganizationScopedAdminMixin, ModelAdmin):
+    list_display = ['name', 'program', 'display_order', 'created_at']
+    search_fields = ['name']
+    readonly_fields = ['created_at', 'updated_at']
+
+
+@admin.register(ProgramSubmodule)
+class ProgramSubmoduleAdmin(OrganizationScopedAdminMixin, ModelAdmin):
+    list_display = ['name', 'module', 'display_order', 'created_at']
+    search_fields = ['name']
     readonly_fields = ['created_at', 'updated_at']

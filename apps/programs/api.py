@@ -18,6 +18,7 @@ from .models import (
     Lesson, LessonProgram,
     TreatmentArea, ProgramTag, ProgramDataField, TargetStatus,
     TargetStatusChange, TargetPromptLevelChange, ProgramFolder,
+    ProgramModule, ProgramSubmodule,
 )
 from .schemas import (
     ProgramSchema, ProgramListSchema, ProgramCreateRequest, ProgramUpdateRequest,
@@ -37,6 +38,7 @@ from .schemas import (
     ProgramDataFieldSchema, ProgramDataFieldRequest,
     TargetStatusChangeSchema, TargetPromptLevelChangeSchema,
     TargetStatusSchema, TargetStatusRequest, TargetStatusUpdateRequest,
+    ProgramModuleSchema, ProgramModuleRequest, ProgramSubmoduleSchema, ProgramSubmoduleRequest,
 )
 
 router = Router(auth=jwt_auth)
@@ -1260,6 +1262,132 @@ def import_central_program(request, program_id: int):
     require_permission(request, 'central_library_import')
     dest = _clone_central_program(program_id, request.user)
     return 201, _serialize_org_program(dest, request, include_targets=True)
+
+
+# ---------------------------------------------------------------------------
+# Program Modules & Submodules
+# ---------------------------------------------------------------------------
+
+def _serialize_module(module: ProgramModule) -> dict:
+    return {
+        'id': module.id,
+        'program_id': module.program_id,
+        'name': module.name,
+        'display_order': module.display_order,
+        'submodules': [
+            {
+                'id': s.id,
+                'module_id': s.module_id,
+                'name': s.name,
+                'display_order': s.display_order,
+                'created_at': s.created_at,
+                'updated_at': s.updated_at,
+            }
+            for s in module.submodules.all()
+        ],
+        'created_at': module.created_at,
+        'updated_at': module.updated_at,
+    }
+
+
+@router.get('/programs/{program_id}/modules', response=list[ProgramModuleSchema])
+def list_modules(request, program_id: int):
+    _get_program_or_404(request, program_id)
+    return [_serialize_module(m) for m in ProgramModule.objects.filter(program_id=program_id).prefetch_related('submodules')]
+
+
+@router.post('/programs/{program_id}/modules', response={201: ProgramModuleSchema})
+def create_module(request, program_id: int, data: ProgramModuleRequest):
+    _require_supervisor(request)
+    program = _get_program_or_404(request, program_id)
+    module = ProgramModule.objects.create(
+        program=program,
+        name=data.name,
+        display_order=data.display_order,
+        created_by=request.user,
+    )
+    return 201, _serialize_module(module)
+
+
+@router.patch('/programs/{program_id}/modules/{module_id}', response=ProgramModuleSchema)
+def update_module(request, program_id: int, module_id: int, data: ProgramModuleRequest):
+    _require_supervisor(request)
+    _get_program_or_404(request, program_id)
+    try:
+        module = ProgramModule.objects.prefetch_related('submodules').get(id=module_id, program_id=program_id)
+    except ProgramModule.DoesNotExist:
+        raise HttpError(404, 'Module not found')
+    for k, v in data.dict().items():
+        setattr(module, k, v)
+    module.save()
+    return _serialize_module(module)
+
+
+@router.delete('/programs/{program_id}/modules/{module_id}', response={204: None})
+def delete_module(request, program_id: int, module_id: int):
+    _require_supervisor(request)
+    _get_program_or_404(request, program_id)
+    try:
+        ProgramModule.objects.get(id=module_id, program_id=program_id).delete()
+    except ProgramModule.DoesNotExist:
+        raise HttpError(404, 'Module not found')
+    return 204, None
+
+
+@router.post('/programs/{program_id}/modules/{module_id}/submodules', response={201: ProgramSubmoduleSchema})
+def create_submodule(request, program_id: int, module_id: int, data: ProgramSubmoduleRequest):
+    _require_supervisor(request)
+    _get_program_or_404(request, program_id)
+    try:
+        module = ProgramModule.objects.get(id=module_id, program_id=program_id)
+    except ProgramModule.DoesNotExist:
+        raise HttpError(404, 'Module not found')
+    submodule = ProgramSubmodule.objects.create(
+        module=module,
+        name=data.name,
+        display_order=data.display_order,
+        created_by=request.user,
+    )
+    return 201, {
+        'id': submodule.id,
+        'module_id': submodule.module_id,
+        'name': submodule.name,
+        'display_order': submodule.display_order,
+        'created_at': submodule.created_at,
+        'updated_at': submodule.updated_at,
+    }
+
+
+@router.patch('/programs/{program_id}/modules/{module_id}/submodules/{submodule_id}', response=ProgramSubmoduleSchema)
+def update_submodule(request, program_id: int, module_id: int, submodule_id: int, data: ProgramSubmoduleRequest):
+    _require_supervisor(request)
+    _get_program_or_404(request, program_id)
+    try:
+        submodule = ProgramSubmodule.objects.get(id=submodule_id, module_id=module_id)
+    except ProgramSubmodule.DoesNotExist:
+        raise HttpError(404, 'Submodule not found')
+    for k, v in data.dict().items():
+        setattr(submodule, k, v)
+    submodule.save()
+    return {
+        'id': submodule.id,
+        'module_id': submodule.module_id,
+        'name': submodule.name,
+        'display_order': submodule.display_order,
+        'created_at': submodule.created_at,
+        'updated_at': submodule.updated_at,
+    }
+
+
+@router.delete('/programs/{program_id}/modules/{module_id}/submodules/{submodule_id}', response={204: None})
+def delete_submodule(request, program_id: int, module_id: int, submodule_id: int):
+    _require_supervisor(request)
+    _get_program_or_404(request, program_id)
+    try:
+        ProgramSubmodule.objects.get(id=submodule_id, module_id=module_id).delete()
+    except ProgramSubmodule.DoesNotExist:
+        raise HttpError(404, 'Submodule not found')
+    return 204, None
 
 
 # ---------------------------------------------------------------------------

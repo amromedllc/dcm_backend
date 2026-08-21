@@ -298,8 +298,37 @@ class ProgramUpdateRequest(Schema):
 
 
 # ---------------------------------------------------------------------------
-# Targets
+# Modules / Submodules
 # ---------------------------------------------------------------------------
+
+class ProgramSubmoduleSchema(Schema):
+    id: int
+    module_id: int
+    name: str
+    display_order: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProgramModuleSchema(Schema):
+    id: int
+    program_id: int
+    name: str
+    display_order: int
+    submodules: list[ProgramSubmoduleSchema] = []
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProgramModuleRequest(Schema):
+    name: NonEmptyStr
+    display_order: int = Field(default=0, ge=0)
+
+
+class ProgramSubmoduleRequest(Schema):
+    name: NonEmptyStr
+    display_order: int = Field(default=0, ge=0)
+
 
 class TargetSchema(Schema):
     id: int
@@ -320,10 +349,14 @@ class TargetSchema(Schema):
     current_prompt_level_index: int
     display_order: int
     is_visible_to_staff: bool
+    module_id: int | None = None
+    submodule_id: int | None = None
     created_at: datetime
     updated_at: datetime
 
-
+# ---------------------------------------------------------------------------
+# Targets
+# ---------------------------------------------------------------------------
 class TargetCreateRequest(Schema):
     name: NonEmptyStr
     measurement_type: Target.MeasurementType = Target.MeasurementType.DISCRETE_TRIAL
@@ -337,6 +370,8 @@ class TargetCreateRequest(Schema):
     status: str = ''  # empty = resolve server-side to the org's default TargetStatus
     display_order: int = Field(default=0, ge=0)
     is_visible_to_staff: bool = True
+    module_id: int | None = None
+    submodule_id: int | None = None
 
 
 class TargetUpdateRequest(Schema):
@@ -355,6 +390,8 @@ class TargetUpdateRequest(Schema):
     current_prompt_level_index: int | None = Field(default=None, ge=0)
     display_order: int | None = Field(default=None, ge=0)
     is_visible_to_staff: bool | None = None
+    module_id: int | None = None
+    submodule_id: int | None = None
 
 
 class BulkUpdateTargetsRequest(Schema):

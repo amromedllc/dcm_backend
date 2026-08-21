@@ -244,6 +244,18 @@ class Target(TenantAwareModel):
     mastery_mode = models.CharField(max_length=10, choices=MasteryMode.choices, default=MasteryMode.MANUAL)
     display_order = models.PositiveIntegerField(default=0, db_index=True)
     is_visible_to_staff = models.BooleanField(default=True)
+    module = models.ForeignKey(
+        'ProgramModule',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='targets',
+    )
+    submodule = models.ForeignKey(
+        'ProgramSubmodule',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='targets',
+    )
 
     # program is the owning parent — a Target can never legitimately belong
     # to a different organization than its Program, so derive rather than
@@ -438,6 +450,47 @@ class ProgramFolder(TenantAwareModel):
 
     def __str__(self):
         return self.name
+
+
+class ProgramModule(TenantAwareModel):
+    """
+    A named grouping of targets within a program (e.g. "Receptive Language").
+    Programs can have zero or more modules; targets may optionally belong to one.
+    """
+    program = models.ForeignKey(
+        Program,
+        on_delete=models.CASCADE,
+        related_name='modules',
+    )
+    name = models.CharField(max_length=200)
+    display_order = models.PositiveIntegerField(default=0, db_index=True)
+
+    class Meta:
+        app_label = 'programs'
+        ordering = ['display_order', 'name']
+
+    def __str__(self):
+        return f'{self.program.name} / {self.name}'
+
+
+class ProgramSubmodule(TenantAwareModel):
+    """
+    A sub-grouping within a module (e.g. "Colors" inside "Receptive Language").
+    """
+    module = models.ForeignKey(
+        ProgramModule,
+        on_delete=models.CASCADE,
+        related_name='submodules',
+    )
+    name = models.CharField(max_length=200)
+    display_order = models.PositiveIntegerField(default=0, db_index=True)
+
+    class Meta:
+        app_label = 'programs'
+        ordering = ['display_order', 'name']
+
+    def __str__(self):
+        return f'{self.module.name} / {self.name}'
 
 
 class ProgramTag(TenantAwareModel):
