@@ -394,14 +394,19 @@ def _sync_clients_from_tpms(
 
 
 @router.get('', response=list[ClientSchema])
-def list_clients(request, include_inactive: bool = False, search: str | None = None):
+def list_clients(
+    request,
+    include_inactive: bool = False,
+    search: str | None = None,
+    sync: bool = True,
+):
     """
     Returns patients scoped to the logged-in user's TherapyPMS session.
 
     Uses GET /api/v1/ios/patient/list with the TPMS Bearer token captured at
     login, then upserts DCM Client rows so programs/sessions keep a stable id.
     """
-    if request.user.external_admin_id is None:
+    if request.user.external_admin_id is None or not sync:
         return _list_native_clients(request, include_inactive, search)
 
     return _sync_clients_from_tpms(
