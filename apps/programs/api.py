@@ -1,5 +1,6 @@
 import os
 
+from django.db import models
 from ninja import Router, File
 from ninja.errors import HttpError
 from ninja.files import UploadedFile
@@ -24,6 +25,7 @@ from .schemas import (
     ProgramSchema, ProgramListSchema, ProgramCreateRequest, ProgramUpdateRequest,
     TargetSchema, TargetCreateRequest, TargetUpdateRequest,
     BulkUpdateTargetsRequest, BulkUpdateResult, ReorderTargetsRequest,
+    ReorderModulesRequest, ReorderSubmodulesRequest,
     PromptingTemplateSchema, PromptingTemplateCreateRequest, PromptingTemplateUpdateRequest,
     WorkflowTemplateSchema, WorkflowTemplateCreateRequest, WorkflowTemplateUpdateRequest,
     MaintenanceScheduleSchema, MaintenanceScheduleCreateRequest, MaintenanceScheduleUpdateRequest,
@@ -185,7 +187,8 @@ def _serialize_program(program: Program, include_targets: bool = False) -> dict:
     }
     if include_targets:
         data['targets'] = list(program.targets.all().values(
-            'id', 'name', 'status', 'display_order', 'is_visible_to_staff'
+            'id', 'name', 'status', 'display_order', 'is_visible_to_staff',
+            'module_id', 'submodule_id',
         ))
     return data
 
@@ -325,8 +328,8 @@ def _require_sub_items_if_needed(measurement_type: str, sub_items: list) -> None
         raise HttpError(400, f'{measurement_type} targets require at least one sub_item')
 
 
-def _validate_target_status(status: str) -> None:
-    if status and not TargetStatus.objects.filter(key=status).exists():
+def _validate_target_status(request, status: str) -> None:
+    if status and not _settings_qs(TargetStatus, request).filter(key=status).exists():
         raise HttpError(400, f'Invalid status: {status}')
 
 
@@ -349,9 +352,9 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
     if program.fading_template_id and not target_data.get('fading_template_id'):
         target_data['fading_template_id'] = program.fading_template_id
     if target_data.get('status'):
-        _validate_target_status(target_data['status'])
+        _validate_target_status(request, target_data['status'])
     else:
-        default_status = TargetStatus.objects.filter(is_default=True).first()
+        default_status = _settings_qs(TargetStatus, request).filter(is_default=True).first()
         target_data['status'] = default_status.key if default_status else Target.Status.WAITING
     _require_sub_items_if_needed(target_data['measurement_type'], target_data['sub_items'])
     target = Target.objects.create(
@@ -379,7 +382,7 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
         # target was previously faded to — reset to the most-intrusive level.
         target.current_prompt_level_index = 0
     if 'status' in updates:
-        _validate_target_status(updates['status'])
+        _validate_target_status(request, updates['status'])
     _require_sub_items_if_needed(target.measurement_type, target.sub_items)
     target.save()
     return target
@@ -483,7 +486,7 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
             raise HttpError(400, f'Invalid {field_name}: {fk_id}')
 
     if updates.get('status'):
-        _validate_target_status(updates['status'])
+        _validate_target_status(request, updates['status'])
 
     if updates.get('measurement_type') in _SUB_ITEM_MEASUREMENT_TYPES:
         missing_sub_items = Target.objects.filter(
@@ -811,6 +814,9 @@ def _serialize_org_program(program: Program, request, include_targets: bool = Fa
         'tags': program.tags,
         'objective': program.objective,
         'instructions': program.instructions,
+        'workflow_template_id': program.workflow_template_id,
+        'maintenance_schedule_id': program.maintenance_schedule_id,
+        'fading_template_id': program.fading_template_id,
         'folder_id': program.folder_id,
         'image_url': _optimized_program_image_url(request, program.image),
         'display_order': program.display_order,
@@ -1011,7 +1017,7 @@ def _copy_image(source_image, dest) -> None:
 
 
 def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
-    """Deep-copy a program (+ all its targets) to a different client."""
+    """Deep-copy a program (+ modules, submodules, targets) to a different client."""
     dest = Program.objects.create(
         is_template=False,
         external_client_id=client_id,
@@ -1027,17 +1033,33 @@ def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
         created_by=user,
     )
     _copy_image(source.image, dest)
+    # Clone modules + submodules, keeping a mapping from source id → dest instance
+    module_map: dict[int, ProgramModule] = {}
+    submodule_map: dict[int, ProgramSubmodule] = {}
+    for mod in source.modules.prefetch_related('submodules').all():
+        dest_mod = ProgramModule.objects.create(
+            program=dest, name=mod.name, display_order=mod.display_order, created_by=user,
+        )
+        module_map[mod.id] = dest_mod
+        for sub in mod.submodules.all():
+            dest_sub = ProgramSubmodule.objects.create(
+                module=dest_mod, name=sub.name, display_order=sub.display_order, created_by=user,
+            )
+            submodule_map[sub.id] = dest_sub
     for t in source.targets.all():
         Target.objects.create(
             program=dest,
             name=t.name,
             measurement_type=t.measurement_type,
+            sub_items=t.sub_items,
             prompting_template=t.prompting_template,
             sd_text=t.sd_text,
             teaching_instructions=t.teaching_instructions,
             status=t.status,
             display_order=t.display_order,
             is_visible_to_staff=t.is_visible_to_staff,
+            module=module_map.get(t.module_id) if t.module_id else None,
+            submodule=submodule_map.get(t.submodule_id) if t.submodule_id else None,
             created_by=user,
         )
     dest.refresh_from_db()
@@ -1236,6 +1258,7 @@ def _clone_central_program(program_id: int, user) -> Program:
         created_by=user,
     )
     _copy_image(source.image, dest)
+    # Central programs have no modules/submodules, so no mapping needed here.
     for t in source.targets.all():
         prompting_template = None
         if t.prompting_levels:
@@ -1269,17 +1292,25 @@ def import_central_program(request, program_id: int):
 # ---------------------------------------------------------------------------
 
 def _serialize_module(module: ProgramModule) -> dict:
+    submodule_target_counts = {
+        row['submodule_id']: row['count']
+        for row in module.targets.filter(submodule_id__isnull=False)
+        .values('submodule_id')
+        .annotate(count=models.Count('id'))
+    }
     return {
         'id': module.id,
         'program_id': module.program_id,
         'name': module.name,
         'display_order': module.display_order,
+        'target_count': module.targets.count(),
         'submodules': [
             {
                 'id': s.id,
                 'module_id': s.module_id,
                 'name': s.name,
                 'display_order': s.display_order,
+                'target_count': submodule_target_counts.get(s.id, 0),
                 'created_at': s.created_at,
                 'updated_at': s.updated_at,
             }
@@ -1332,6 +1363,15 @@ def delete_module(request, program_id: int, module_id: int):
     except ProgramModule.DoesNotExist:
         raise HttpError(404, 'Module not found')
     return 204, None
+
+
+@router.post('/programs/{program_id}/modules/reorder', response={200: None})
+def reorder_modules(request, program_id: int, data: ReorderModulesRequest):
+    _require_supervisor(request)
+    _get_program_or_404(request, program_id)
+    for order, module_id in enumerate(data.ordered_ids):
+        ProgramModule.objects.filter(id=module_id, program_id=program_id).update(display_order=order)
+    return 200, None
 
 
 @router.post('/programs/{program_id}/modules/{module_id}/submodules', response={201: ProgramSubmoduleSchema})
@@ -1388,6 +1428,15 @@ def delete_submodule(request, program_id: int, module_id: int, submodule_id: int
     except ProgramSubmodule.DoesNotExist:
         raise HttpError(404, 'Submodule not found')
     return 204, None
+
+
+@router.post('/programs/{program_id}/modules/{module_id}/submodules/reorder', response={200: None})
+def reorder_submodules(request, program_id: int, module_id: int, data: ReorderSubmodulesRequest):
+    _require_supervisor(request)
+    _get_program_or_404(request, program_id)
+    for order, submodule_id in enumerate(data.ordered_ids):
+        ProgramSubmodule.objects.filter(id=submodule_id, module_id=module_id).update(display_order=order)
+    return 200, None
 
 
 # ---------------------------------------------------------------------------

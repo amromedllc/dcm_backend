@@ -306,6 +306,7 @@ class ProgramSubmoduleSchema(Schema):
     module_id: int
     name: str
     display_order: int
+    target_count: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -315,6 +316,7 @@ class ProgramModuleSchema(Schema):
     program_id: int
     name: str
     display_order: int
+    target_count: int = 0
     submodules: list[ProgramSubmoduleSchema] = []
     created_at: datetime
     updated_at: datetime
@@ -418,6 +420,14 @@ class BulkUpdateResult(Schema):
 
 
 class ReorderTargetsRequest(Schema):
+    ordered_ids: list[int]
+
+
+class ReorderModulesRequest(Schema):
+    ordered_ids: list[int]
+
+
+class ReorderSubmodulesRequest(Schema):
     ordered_ids: list[int]
 
 
