@@ -1336,11 +1336,15 @@ def _central_qs():
     return CentralProgram.objects.filter(status=CentralProgram.Status.ACTIVE)
 
 
-def _imported_central_program_ids() -> set[int]:
+def _imported_central_program_ids(request) -> set[int]:
     """Central program ids already cloned into the caller's org — used to
     show "Already in Library" up front rather than only erroring on click."""
     return set(
-        Program.objects.filter(source_central_program_id__isnull=False)
+        Program.objects
+        .filter(
+            _same_practice_q(request.user, 'created_by__'),
+            source_central_program_id__isnull=False,
+        )
         .values_list('source_central_program_id', flat=True)
     )
 
@@ -1393,7 +1397,7 @@ def list_central_programs(
         qs = qs.filter(folder_id=folder_id)
     elif unfiled:
         qs = qs.filter(folder_id__isnull=True)
-    imported_ids = _imported_central_program_ids()
+    imported_ids = _imported_central_program_ids(request)
     return [_serialize_central_program(p, request, imported_ids=imported_ids) for p in qs.prefetch_related('targets')]
 
 
@@ -1430,7 +1434,7 @@ def import_central_folder(request, folder_id: int):
         name=central_folder.name,
         defaults={'created_by': request.user},
     )
-    already_imported_ids = _imported_central_program_ids()
+    already_imported_ids = _imported_central_program_ids(request)
     imported_count = 0
     skipped_count = 0
     for central_program in central_folder.programs.filter(status=CentralProgram.Status.ACTIVE):
@@ -1457,7 +1461,7 @@ def get_central_program(request, program_id: int):
         program = _central_qs().prefetch_related('targets').get(id=program_id)
     except CentralProgram.DoesNotExist:
         raise HttpError(404, 'Program not found')
-    return _serialize_central_program(program, request, include_targets=True, imported_ids=_imported_central_program_ids())
+    return _serialize_central_program(program, request, include_targets=True, imported_ids=_imported_central_program_ids(request))
 
 
 def _clone_central_program(program_id: int, user) -> Program:
@@ -1472,7 +1476,10 @@ def _clone_central_program(program_id: int, user) -> Program:
     except CentralProgram.DoesNotExist:
         raise HttpError(404, 'Program not found')
 
-    if Program.objects.filter(source_central_program_id=program_id).exists():
+    if Program.objects.filter(
+        _same_practice_q(user, 'created_by__'),
+        source_central_program_id=program_id,
+    ).exists():
         raise HttpError(409, f'"{source.name}" is already in your Program Library.')
 
     dest = Program.objects.create(
