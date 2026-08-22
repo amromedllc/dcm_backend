@@ -338,6 +338,7 @@ class TargetSchema(Schema):
     name: str
     measurement_type: str
     sub_items: list[dict] = []
+    sub_item_progression: str = 'forward'
     prompting_template_id: int | None
     workflow_template_id: int | None
     maintenance_schedule_id: int | None
@@ -363,6 +364,7 @@ class TargetCreateRequest(Schema):
     name: NonEmptyStr
     measurement_type: Target.MeasurementType = Target.MeasurementType.DISCRETE_TRIAL
     sub_items: list[dict] = []
+    sub_item_progression: Target.SubItemProgression = Target.SubItemProgression.FORWARD
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
@@ -382,6 +384,7 @@ class TargetUpdateRequest(Schema):
     name: NonEmptyStr | None = None
     measurement_type: Target.MeasurementType | None = None
     sub_items: list[dict] | None = None
+    sub_item_progression: Target.SubItemProgression | None = None
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None

@@ -1,5 +1,6 @@
 import uuid
 
+from django.conf import settings
 from django.db import models
 from shared.models import OrganizationScopedMixin, TenantAwareModel
 from shared.tenancy import TenantManager, TenantQuerySet
@@ -171,6 +172,11 @@ class Target(TenantAwareModel):
         MANUAL    = 'manual',    'Manual'
         AUTOMATIC = 'automatic', 'Automatic'
 
+    class SubItemProgression(models.TextChoices):
+        FORWARD = 'forward', 'Forward Chain'
+        BACKWARD = 'backward', 'Backward Chain'
+        TOTAL_TASK = 'total_task', 'Total Task'
+
     class MeasurementType(models.TextChoices):
         DISCRETE_TRIAL  = 'discrete_trial',  'Discrete Trial'
         DURATION        = 'duration',        'Duration'
@@ -206,6 +212,11 @@ class Target(TenantAwareModel):
     # steps), set_of_targets (independent items), and shaping (approximation levels,
     # last entry = terminal/goal level). Unused (empty) by every other measurement type.
     sub_items = models.JSONField(default=list, blank=True)
+    sub_item_progression = models.CharField(
+        max_length=20,
+        choices=SubItemProgression.choices,
+        default=SubItemProgression.FORWARD,
+    )
     prompting_template = models.ForeignKey(
         PromptingTemplate,
         on_delete=models.SET_NULL,
@@ -275,6 +286,70 @@ class Target(TenantAwareModel):
 
     def __str__(self) -> str:
         return f'{self.name} [{self.status}]'
+
+
+class TargetSubItem(TenantAwareModel):
+    class Status(models.TextChoices):
+        WAITING      = 'waiting',      'Waiting'
+        PROBE        = 'probe',        'Probe'
+        ACQUISITION  = 'acquisition',  'Acquisition'
+        MASTERED     = 'mastered',     'Mastered'
+        CLOSED       = 'closed',       'Closed'
+        HOLD         = 'hold',         'Hold'
+        DISCONTINUED = 'discontinued', 'Discontinued'
+
+    target = models.ForeignKey(
+        Target,
+        on_delete=models.CASCADE,
+        related_name='child_items',
+    )
+    key = models.CharField(max_length=100)
+    label = models.CharField(max_length=200)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.WAITING, db_index=True)
+    display_order = models.PositiveIntegerField(default=0, db_index=True)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.target.organization_id
+
+    class Meta:
+        app_label = 'programs'
+        ordering = ['display_order', 'id']
+        unique_together = [('target', 'key')]
+
+    def __str__(self) -> str:
+        return f'{self.target_id}:{self.label} [{self.status}]'
+
+
+class TargetSubItemStatusChange(OrganizationScopedMixin):
+    class Trigger(models.TextChoices):
+        MANUAL = 'manual', 'Manual'
+        AUTO_MASTERY = 'auto_mastery', 'Automatic — Mastery Criteria Met'
+
+    sub_item = models.ForeignKey(
+        TargetSubItem,
+        on_delete=models.CASCADE,
+        related_name='status_changes',
+    )
+    from_status = models.CharField(max_length=20)
+    to_status = models.CharField(max_length=20)
+    trigger = models.CharField(max_length=20, choices=Trigger.choices, default=Trigger.MANUAL)
+    session_run_id = models.PositiveIntegerField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+        db_constraint=False,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.sub_item.organization_id
+
+    class Meta:
+        app_label = 'programs'
+        ordering = ['-created_at']
 
 
 class WorkflowTemplate(TenantAwareModel):

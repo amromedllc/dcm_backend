@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from django.db.models import Min, Max, Sum
 
-from apps.programs.models import Target, TargetPromptLevelChange, TargetStatusChange
+from apps.programs.models import Target, TargetPromptLevelChange, TargetStatusChange, TargetSubItem, TargetSubItemStatusChange
 
 
 BEHAVIOR_MEASUREMENT_TYPES = {
@@ -10,6 +10,82 @@ BEHAVIOR_MEASUREMENT_TYPES = {
     Target.MeasurementType.RATE,
     Target.MeasurementType.FREQUENCY,
 }
+
+
+def _scorable_sub_items(sub_items: list[dict]) -> list[dict]:
+    scorable = [
+        item for item in sub_items
+        if not item.get('status') or item.get('status') in {'probe', 'acquisition'}
+    ]
+    return scorable or sub_items
+
+
+def _sync_target_sub_items_json(target: Target) -> None:
+    items = [
+        {'key': item.key, 'label': item.label, 'status': item.status}
+        for item in target.child_items.all().order_by('display_order', 'id')
+    ]
+    if items and target.sub_items != items:
+        target.sub_items = items
+        target.save(update_fields=['sub_items', 'updated_at'])
+
+
+def _transition_sub_item(sub_item: TargetSubItem, next_status: str, session_run_id: int) -> bool:
+    if not next_status or sub_item.status == next_status:
+        return False
+    old_status = sub_item.status
+    sub_item.status = next_status
+    sub_item.save(update_fields=['status', 'updated_at'])
+    TargetSubItemStatusChange.objects.create(
+        sub_item=sub_item,
+        from_status=old_status,
+        to_status=next_status,
+        trigger=TargetSubItemStatusChange.Trigger.AUTO_MASTERY,
+        session_run_id=session_run_id,
+    )
+    return True
+
+
+def _advance_sub_items_if_needed(target: Target, session_run_id: int) -> bool:
+    if target.measurement_type not in {
+        Target.MeasurementType.TASK_ANALYSIS,
+        Target.MeasurementType.SET_OF_TARGETS,
+        Target.MeasurementType.SHAPING,
+    }:
+        return False
+
+    children = list(target.child_items.all().order_by('display_order', 'id'))
+    if not children:
+        return False
+
+    open_statuses = {'probe', 'acquisition'}
+    waiting = [item for item in children if item.status == TargetSubItem.Status.WAITING]
+    current = [item for item in children if item.status in open_statuses]
+
+    if target.sub_item_progression == Target.SubItemProgression.TOTAL_TASK:
+        changed = False
+        for item in current:
+            changed = _transition_sub_item(item, TargetSubItem.Status.MASTERED, session_run_id) or changed
+        if waiting:
+            for item in waiting:
+                changed = _transition_sub_item(item, TargetSubItem.Status.ACQUISITION, session_run_id) or changed
+            _sync_target_sub_items_json(target)
+            return True
+        _sync_target_sub_items_json(target)
+        return changed and any(item.status != TargetSubItem.Status.MASTERED for item in children)
+
+    changed = False
+    for item in current:
+        changed = _transition_sub_item(item, TargetSubItem.Status.MASTERED, session_run_id) or changed
+
+    if waiting:
+        next_item = waiting[-1] if target.sub_item_progression == Target.SubItemProgression.BACKWARD else waiting[0]
+        _transition_sub_item(next_item, TargetSubItem.Status.ACQUISITION, session_run_id)
+        _sync_target_sub_items_json(target)
+        return True
+
+    _sync_target_sub_items_json(target)
+    return False
 
 
 def evaluate_session_mastery(session_run) -> list[Target]:
@@ -127,7 +203,7 @@ def _pass_stats(target: Target, trials_qs, *, require_independent: bool = False)
         correct = trials_qs.filter(sub_item_key=terminal_key).count()
         return total, correct
 
-    expected_keys = {item.get('key') for item in target.sub_items}
+    expected_keys = {item.get('key') for item in _scorable_sub_items(target.sub_items)}
     scored_keys: dict[int, set] = {}
     correct_keys: dict[int, set] = {}
     for score, trial_number, key in trials_qs.values_list('response_score', 'trial_number', 'sub_item_key'):
@@ -448,6 +524,9 @@ def _advance_if_criteria_met(target: Target, session_run_id: int) -> bool:
     if not mastered:
         failure_status = phase_config.get('on_failure_status') or phase_config.get('on_regression')
         return _transition_target(target, failure_status, session_run_id) if failure_status else False
+
+    if _advance_sub_items_if_needed(target, session_run_id):
+        return True
 
     return _transition_target(target, next_status, session_run_id)
 

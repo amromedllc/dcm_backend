@@ -19,7 +19,7 @@ from .models import (
     Lesson, LessonProgram,
     TreatmentArea, ProgramTag, ProgramDataField, TargetStatus,
     TargetStatusChange, TargetPromptLevelChange, ProgramFolder,
-    ProgramModule, ProgramSubmodule,
+    ProgramModule, ProgramSubmodule, TargetSubItem, TargetSubItemStatusChange,
 )
 from .schemas import (
     ProgramSchema, ProgramListSchema, ProgramCreateRequest, ProgramUpdateRequest,
@@ -328,6 +328,83 @@ def _require_sub_items_if_needed(measurement_type: str, sub_items: list) -> None
         raise HttpError(400, f'{measurement_type} targets require at least one sub_item')
 
 
+def _default_sub_item_status(target: Target, index: int, total: int) -> str:
+    if target.sub_item_progression == Target.SubItemProgression.TOTAL_TASK:
+        return TargetSubItem.Status.ACQUISITION
+    if target.sub_item_progression == Target.SubItemProgression.BACKWARD:
+        return TargetSubItem.Status.ACQUISITION if index == total - 1 else TargetSubItem.Status.WAITING
+    return TargetSubItem.Status.ACQUISITION if index == 0 else TargetSubItem.Status.WAITING
+
+
+def _sync_target_sub_items(target: Target, items: list[dict], user=None) -> None:
+    existing = {item.key: item for item in target.child_items.all()}
+    seen: set[str] = set()
+    normalized: list[dict] = []
+    total = len(items)
+
+    for idx, raw in enumerate(items):
+        if not isinstance(raw, dict):
+            continue
+        key = str(raw.get('key') or f'item_{idx + 1}')[:100]
+        label = str(raw.get('label') or key)[:200]
+        status = str(raw.get('status') or '')
+        if status and not TargetSubItem.Status.values.__contains__(status):
+            raise HttpError(400, f'Invalid sub item status: {status}')
+        status = status or _default_sub_item_status(target, idx, total)
+        seen.add(key)
+
+        child = existing.get(key)
+        if child:
+            old_status = child.status
+            child.label = label
+            child.status = status
+            child.display_order = idx
+            child.save(update_fields=['label', 'status', 'display_order', 'updated_at'])
+            if old_status != status:
+                TargetSubItemStatusChange.objects.create(
+                    sub_item=child,
+                    from_status=old_status,
+                    to_status=status,
+                    trigger=TargetSubItemStatusChange.Trigger.MANUAL,
+                    created_by=user,
+                )
+        else:
+            child = TargetSubItem.objects.create(
+                target=target,
+                key=key,
+                label=label,
+                status=status,
+                display_order=idx,
+                created_by=user,
+            )
+            TargetSubItemStatusChange.objects.create(
+                sub_item=child,
+                from_status='',
+                to_status=status,
+                trigger=TargetSubItemStatusChange.Trigger.MANUAL,
+                created_by=user,
+            )
+        normalized.append({'key': key, 'label': label, 'status': status})
+
+    target.child_items.exclude(key__in=seen).delete()
+    if target.sub_items != normalized:
+        target.sub_items = normalized
+        target.save(update_fields=['sub_items', 'updated_at'])
+
+
+def _refresh_target_sub_items_json(target: Target) -> None:
+    children = list(target.child_items.all().order_by('display_order', 'id'))
+    if not children:
+        return
+    serialized = [
+        {'key': item.key, 'label': item.label, 'status': item.status}
+        for item in children
+    ]
+    if target.sub_items != serialized:
+        target.sub_items = serialized
+        target.save(update_fields=['sub_items', 'updated_at'])
+
+
 def _validate_target_status(request, status: str) -> None:
     if status and not _settings_qs(TargetStatus, request).filter(key=status).exists():
         raise HttpError(400, f'Invalid status: {status}')
@@ -362,6 +439,8 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
         created_by=request.user,
         **target_data,
     )
+    if target.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
+        _sync_target_sub_items(target, target.sub_items, request.user)
     return 201, target
 
 
@@ -385,6 +464,12 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
         _validate_target_status(request, updates['status'])
     _require_sub_items_if_needed(target.measurement_type, target.sub_items)
     target.save()
+    if target.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES and (
+        'sub_items' in updates or 'sub_item_progression' in updates
+    ):
+        _sync_target_sub_items(target, target.sub_items, request.user)
+    elif target.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
+        _refresh_target_sub_items_json(target)
     return target
 
 
@@ -1047,11 +1132,12 @@ def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
             )
             submodule_map[sub.id] = dest_sub
     for t in source.targets.all():
-        Target.objects.create(
+        copied = Target.objects.create(
             program=dest,
             name=t.name,
             measurement_type=t.measurement_type,
             sub_items=t.sub_items,
+            sub_item_progression=t.sub_item_progression,
             prompting_template=t.prompting_template,
             sd_text=t.sd_text,
             teaching_instructions=t.teaching_instructions,
@@ -1062,6 +1148,8 @@ def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
             submodule=submodule_map.get(t.submodule_id) if t.submodule_id else None,
             created_by=user,
         )
+        if copied.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
+            _sync_target_sub_items(copied, copied.sub_items, user)
     dest.refresh_from_db()
     return dest
 
@@ -1263,7 +1351,7 @@ def _clone_central_program(program_id: int, user) -> Program:
         prompting_template = None
         if t.prompting_levels:
             prompting_template = PromptingTemplate.objects.create(name=f'{t.name} Prompting', levels=t.prompting_levels)
-        Target.objects.create(
+        copied = Target.objects.create(
             program=dest,
             name=t.name,
             measurement_type=t.measurement_type,
@@ -1275,6 +1363,8 @@ def _clone_central_program(program_id: int, user) -> Program:
             prompting_template=prompting_template,
             created_by=user,
         )
+        if copied.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
+            _sync_target_sub_items(copied, copied.sub_items, user)
     dest.refresh_from_db()
     return dest
 

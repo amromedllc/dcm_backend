@@ -82,6 +82,16 @@ def _target_due_for_session(target) -> bool:
     return timezone.now() >= due_at
 
 
+def _snapshot_sub_items(target) -> list[dict]:
+    children = list(target.child_items.all().order_by('display_order', 'id'))
+    if children:
+        return [
+            {'key': item.key, 'label': item.label, 'status': item.status}
+            for item in children
+        ]
+    return target.sub_items
+
+
 def build_program_snapshot(client_id: int, lesson_id: int | None = None, restrict_to_lesson: bool = False) -> dict:
     """
     Captures the full program/target configuration as an immutable JSONB snapshot.
@@ -112,13 +122,13 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
         programs_qs = (
             Program.objects
             .filter(id__in=program_ids, status=Program.Status.ACTIVE)
-            .prefetch_related('targets__prompting_template')
+            .prefetch_related('targets__prompting_template', 'targets__child_items')
         )
     elif not restrict_to_lesson:
         programs_qs = (
             Program.objects
             .filter(external_client_id=client_id, status=Program.Status.ACTIVE)
-            .prefetch_related('targets__prompting_template')
+            .prefetch_related('targets__prompting_template', 'targets__child_items')
         )
     else:
         programs_qs = Program.objects.none()
@@ -134,7 +144,8 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
                 'name': target.name,
                 'status': target.status,
                 'measurement_type': target.measurement_type,
-                'sub_items': target.sub_items,
+                'sub_items': _snapshot_sub_items(target),
+                'sub_item_progression': target.sub_item_progression,
                 'sd_text': target.sd_text,
                 'teaching_instructions': target.teaching_instructions,
                 'prompting_template': {

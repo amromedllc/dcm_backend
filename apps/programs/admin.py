@@ -5,6 +5,7 @@ from .models import (
     Program, Target, PromptingTemplate,
     WorkflowTemplate, MaintenanceSchedule, FadingTemplate,
     Lesson, LessonProgram, ProgramModule, ProgramSubmodule,
+    TargetSubItem, TargetSubItemStatusChange,
 )
 
 
@@ -12,6 +13,13 @@ class TargetInline(OrganizationScopedAdminMixin, TabularInline):
     model = Target
     extra = 0
     fields = ['name', 'measurement_type', 'status', 'display_order', 'is_visible_to_staff']
+    ordering = ['display_order']
+
+
+class TargetSubItemInline(OrganizationScopedAdminMixin, TabularInline):
+    model = TargetSubItem
+    extra = 0
+    fields = ['label', 'key', 'status', 'display_order']
     ordering = ['display_order']
 
 
@@ -26,10 +34,25 @@ class ProgramAdmin(OrganizationScopedAdminMixin, ModelAdmin):
 
 @admin.register(Target)
 class TargetAdmin(OrganizationScopedAdminMixin, ModelAdmin):
-    list_display = ['name', 'program', 'measurement_type', 'status', 'display_order', 'is_visible_to_staff']
-    list_filter = ['status', 'measurement_type']
+    list_display = ['name', 'program', 'measurement_type', 'status', 'sub_item_progression', 'display_order', 'is_visible_to_staff']
+    list_filter = ['status', 'measurement_type', 'sub_item_progression']
     search_fields = ['name', 'sd_text']
     readonly_fields = ['created_at', 'updated_at']
+    inlines = [TargetSubItemInline]
+
+
+@admin.register(TargetSubItem)
+class TargetSubItemAdmin(OrganizationScopedAdminMixin, ModelAdmin):
+    list_display = ['label', 'target', 'status', 'display_order']
+    list_filter = ['status']
+    search_fields = ['label', 'target__name']
+
+
+@admin.register(TargetSubItemStatusChange)
+class TargetSubItemStatusChangeAdmin(OrganizationScopedAdminMixin, ModelAdmin):
+    list_display = ['sub_item', 'from_status', 'to_status', 'trigger', 'session_run_id', 'created_at']
+    list_filter = ['trigger', 'to_status']
+    readonly_fields = ['created_at']
 
 
 @admin.register(PromptingTemplate)
