@@ -4,7 +4,7 @@ from shared.admin import OrganizationScopedAdminMixin
 from .models import (
     Program, Target, PromptingTemplate,
     WorkflowTemplate, MaintenanceSchedule, FadingTemplate,
-    Lesson, LessonProgram, ProgramModule, ProgramSubmodule,
+    Lesson, LessonProgram, ProgramModule, ProgramSubmodule, ProgramModificationLog,
 )
 
 
@@ -22,6 +22,14 @@ class ProgramAdmin(OrganizationScopedAdminMixin, ModelAdmin):
     search_fields = ['name', 'treatment_area']
     inlines = [TargetInline]
     readonly_fields = ['created_at', 'updated_at', 'archived_at']
+
+
+@admin.register(ProgramModificationLog)
+class ProgramModificationLogAdmin(OrganizationScopedAdminMixin, ModelAdmin):
+    list_display = ['program', 'external_client_id', 'add_phase_line', 'phase_line_date', 'created_by', 'created_at']
+    list_filter = ['add_phase_line']
+    search_fields = ['program__name', 'note', 'phase_line_label']
+    readonly_fields = ['created_at', 'updated_at']
 
 
 @admin.register(Target)

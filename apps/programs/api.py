@@ -19,7 +19,7 @@ from .models import (
     Lesson, LessonProgram,
     TreatmentArea, ProgramTag, ProgramDataField, TargetStatus,
     TargetStatusChange, TargetPromptLevelChange, ProgramFolder,
-    ProgramModule, ProgramSubmodule,
+    ProgramModule, ProgramSubmodule, ProgramModificationLog,
 )
 from .schemas import (
     ProgramSchema, ProgramListSchema, ProgramCreateRequest, ProgramUpdateRequest,
@@ -41,6 +41,7 @@ from .schemas import (
     TargetStatusChangeSchema, TargetPromptLevelChangeSchema,
     TargetStatusSchema, TargetStatusRequest, TargetStatusUpdateRequest,
     ProgramModuleSchema, ProgramModuleRequest, ProgramSubmoduleSchema, ProgramSubmoduleRequest,
+    ProgramModificationLogSchema, ProgramModificationLogCreateRequest,
 )
 
 router = Router(auth=jwt_auth)
@@ -193,6 +194,40 @@ def _serialize_program(program: Program, include_targets: bool = False) -> dict:
     return data
 
 
+def _serialize_program_modification_log(log: ProgramModificationLog) -> dict:
+    user = log.created_by
+    return {
+        'id': log.id,
+        'program_id': log.program_id,
+        'program_name': log.program.name,
+        'client_id': log.external_client_id,
+        'note': log.note,
+        'add_phase_line': log.add_phase_line,
+        'phase_line_date': log.phase_line_date,
+        'phase_line_label': log.phase_line_label,
+        'phase_line_color': log.phase_line_color,
+        'created_by': getattr(user, 'email', None) or getattr(user, 'full_name', None) or None,
+        'created_at': log.created_at,
+    }
+
+
+def _create_phase_line_annotation(request, program: Program, log: ProgramModificationLog) -> None:
+    if not log.add_phase_line or not log.phase_line_date:
+        return
+    from apps.analytics.models import GraphAnnotation
+
+    GraphAnnotation.objects.create(
+        program=program,
+        annotation_type=GraphAnnotation.AnnotationType.PHASE_LINE,
+        date=log.phase_line_date,
+        label=log.phase_line_label or 'Program modification',
+        color=log.phase_line_color,
+        style=GraphAnnotation.LineStyle.SOLID,
+        notes=log.note,
+        created_by=request.user,
+    )
+
+
 def _optimized_program_image_url(request, image_field) -> str | None:
     if not image_field:
         return None
@@ -310,6 +345,54 @@ def archive_program(request, program_id: int):
     program.archived_at = timezone.now()
     program.save(update_fields=['status', 'archived_at'])
     return 204, None
+
+
+@router.get('/programs/{program_id}/modification-logs', response=list[ProgramModificationLogSchema])
+def list_program_modification_logs(request, program_id: int):
+    program = _get_program_or_404(request, program_id)
+    qs = (
+        ProgramModificationLog.objects
+        .filter(program=program)
+        .select_related('program', 'created_by')
+    )
+    return [_serialize_program_modification_log(log) for log in qs]
+
+
+@router.post('/programs/{program_id}/modification-logs', response={201: ProgramModificationLogSchema})
+def create_program_modification_log(request, program_id: int, data: ProgramModificationLogCreateRequest):
+    _require_supervisor(request)
+    program = _get_program_or_404(request, program_id)
+    if program.external_client_id is None:
+        raise HttpError(400, 'Program modification logs require a client program')
+    note = data.note.strip()
+    phase_label = data.phase_line_label.strip()
+    if not note and not data.add_phase_line:
+        raise HttpError(400, 'Enter a note or add a phase line')
+    if data.add_phase_line and not data.phase_line_date:
+        raise HttpError(400, 'Select a phase line date')
+    log = ProgramModificationLog.objects.create(
+        program=program,
+        external_client_id=program.external_client_id,
+        note=note,
+        add_phase_line=data.add_phase_line,
+        phase_line_date=data.phase_line_date,
+        phase_line_label=phase_label,
+        phase_line_color=data.phase_line_color,
+        created_by=request.user,
+    )
+    _create_phase_line_annotation(request, program, log)
+    return 201, _serialize_program_modification_log(log)
+
+
+@router.get('/program-modification-logs', response=list[ProgramModificationLogSchema])
+def list_client_program_modification_logs(request, client_id: int):
+    _assert_client_accessible(request, client_id)
+    qs = (
+        ProgramModificationLog.objects
+        .filter(external_client_id=client_id)
+        .select_related('program', 'created_by')
+    )
+    return [_serialize_program_modification_log(log) for log in qs]
 
 
 # ---------------------------------------------------------------------------

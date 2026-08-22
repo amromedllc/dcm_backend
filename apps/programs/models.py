@@ -144,6 +144,30 @@ class Program(TenantAwareModel):
         return f'{self.name} ({self.external_client_id})'
 
 
+class ProgramModificationLog(TenantAwareModel):
+    program = models.ForeignKey(
+        Program,
+        on_delete=models.CASCADE,
+        related_name='modification_logs',
+    )
+    external_client_id = models.BigIntegerField(db_index=True)
+    note = models.TextField(blank=True)
+    add_phase_line = models.BooleanField(default=False)
+    phase_line_date = models.DateField(null=True, blank=True)
+    phase_line_label = models.CharField(max_length=200, blank=True)
+    phase_line_color = models.CharField(max_length=7, default='#0f766e')
+
+    class Meta:
+        app_label = 'programs'
+        ordering = ['-created_at']
+
+    def _derive_organization_id(self) -> int | None:
+        return self.program.organization_id
+
+    def __str__(self) -> str:
+        return f'Program modification for {self.program_id} on {self.created_at:%Y-%m-%d}'
+
+
 class TargetQuerySet(TenantQuerySet):
     def visible_to_staff(self) -> 'TargetQuerySet':
         """Returns only the targets that should appear in the mobile session execution view."""

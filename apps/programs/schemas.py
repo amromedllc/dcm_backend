@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from ninja import Schema
 from pydantic import Field, field_validator
@@ -295,6 +295,28 @@ class ProgramUpdateRequest(Schema):
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
     display_order: int | None = Field(default=None, ge=0)
+
+
+class ProgramModificationLogSchema(Schema):
+    id: int
+    program_id: int
+    program_name: str
+    client_id: int
+    note: str
+    add_phase_line: bool
+    phase_line_date: date | None = None
+    phase_line_label: str = ''
+    phase_line_color: str = '#0f766e'
+    created_by: str | None = None
+    created_at: datetime
+
+
+class ProgramModificationLogCreateRequest(Schema):
+    note: str = ''
+    add_phase_line: bool = False
+    phase_line_date: date | None = None
+    phase_line_label: str = ''
+    phase_line_color: str = '#0f766e'
 
 
 # ---------------------------------------------------------------------------
