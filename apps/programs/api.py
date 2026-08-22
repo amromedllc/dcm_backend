@@ -1,6 +1,7 @@
 import os
 
-from ninja import Router, File
+from django.db import models
+from ninja import Router, File, Form
 from ninja.errors import HttpError
 from ninja.files import UploadedFile
 from django.core.files.base import ContentFile
@@ -13,16 +14,18 @@ from apps.accounts.permissions import require_permission
 from apps.central_library.models import CentralProgram, CentralProgramFolder
 from shared.uploads import validate_image_upload
 from .models import (
-    Program, Target, PromptingTemplate,
+    Program, ProgramMaterial, Target, PromptingTemplate,
     WorkflowTemplate, MaintenanceSchedule, FadingTemplate,
     Lesson, LessonProgram,
     TreatmentArea, ProgramTag, ProgramDataField, TargetStatus,
     TargetStatusChange, TargetPromptLevelChange, ProgramFolder,
+    ProgramModule, ProgramSubmodule, TargetSubItem, TargetSubItemStatusChange,
 )
 from .schemas import (
-    ProgramSchema, ProgramListSchema, ProgramCreateRequest, ProgramUpdateRequest,
+    ProgramSchema, ProgramListSchema, ProgramCreateRequest, ProgramUpdateRequest, ProgramMaterialSchema,
     TargetSchema, TargetCreateRequest, TargetUpdateRequest,
     BulkUpdateTargetsRequest, BulkUpdateResult, ReorderTargetsRequest,
+    ReorderModulesRequest, ReorderSubmodulesRequest,
     PromptingTemplateSchema, PromptingTemplateCreateRequest, PromptingTemplateUpdateRequest,
     WorkflowTemplateSchema, WorkflowTemplateCreateRequest, WorkflowTemplateUpdateRequest,
     MaintenanceScheduleSchema, MaintenanceScheduleCreateRequest, MaintenanceScheduleUpdateRequest,
@@ -37,6 +40,7 @@ from .schemas import (
     ProgramDataFieldSchema, ProgramDataFieldRequest,
     TargetStatusChangeSchema, TargetPromptLevelChangeSchema,
     TargetStatusSchema, TargetStatusRequest, TargetStatusUpdateRequest,
+    ProgramModuleSchema, ProgramModuleRequest, ProgramSubmoduleSchema, ProgramSubmoduleRequest,
 )
 
 router = Router(auth=jwt_auth)
@@ -160,7 +164,54 @@ def _check_unique_name(model, request, name: str, *, exclude_id: int | None = No
         raise HttpError(409, f'{model.__name__} named "{name}" already exists')
 
 
-def _serialize_program(program: Program, include_targets: bool = False) -> dict:
+PROGRAM_MATERIAL_IMAGE_TYPES = {'image/jpeg', 'image/png'}
+PROGRAM_MATERIAL_VIDEO_TYPES = {'video/mp4', 'video/quicktime'}
+PROGRAM_MATERIAL_DOCUMENT_TYPES = {
+    'application/pdf',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.ms-powerpoint',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+}
+MAX_PROGRAM_MATERIAL_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_PROGRAM_MATERIAL_VIDEO_BYTES = 100 * 1024 * 1024
+MAX_PROGRAM_MATERIAL_DOCUMENT_BYTES = 10 * 1024 * 1024
+
+
+def _program_material_type_for(file: UploadedFile) -> str:
+    content_type = file.content_type or ''
+    if content_type in PROGRAM_MATERIAL_IMAGE_TYPES:
+        if file.size > MAX_PROGRAM_MATERIAL_IMAGE_BYTES:
+            raise HttpError(400, 'Images must be under 5MB')
+        validate_image_upload(file, max_bytes=MAX_PROGRAM_MATERIAL_IMAGE_BYTES)
+        return ProgramMaterial.MaterialType.IMAGE
+    if content_type in PROGRAM_MATERIAL_VIDEO_TYPES:
+        if file.size > MAX_PROGRAM_MATERIAL_VIDEO_BYTES:
+            raise HttpError(400, 'Videos must be under 100MB')
+        return ProgramMaterial.MaterialType.VIDEO
+    if content_type in PROGRAM_MATERIAL_DOCUMENT_TYPES:
+        if file.size > MAX_PROGRAM_MATERIAL_DOCUMENT_BYTES:
+            raise HttpError(400, 'Documents must be under 10MB')
+        return ProgramMaterial.MaterialType.DOCUMENT
+    allowed = sorted(PROGRAM_MATERIAL_IMAGE_TYPES | PROGRAM_MATERIAL_VIDEO_TYPES | PROGRAM_MATERIAL_DOCUMENT_TYPES)
+    raise HttpError(400, f'Learning material must be one of: {", ".join(allowed)}')
+
+
+def _serialize_program_material(material: ProgramMaterial, request) -> ProgramMaterialSchema:
+    return ProgramMaterialSchema(
+        id=material.id,
+        program_id=material.program_id,
+        title=material.title,
+        material_type=material.material_type,
+        file_url=request.build_absolute_uri(material.file.url),
+        content_type=material.content_type,
+        file_size=material.file_size,
+        uploaded_by=material.created_by.email if material.created_by_id else None,
+        created_at=material.created_at,
+    )
+
+
+def _serialize_program(program: Program, request=None, include_targets: bool = False) -> dict:
     data = {
         'id': program.id,
         'client_id': program.external_client_id,
@@ -173,9 +224,11 @@ def _serialize_program(program: Program, include_targets: bool = False) -> dict:
         'baseline_notes': program.baseline_notes,
         'objective': program.objective,
         'instructions': program.instructions,
+        'prompting_template_id': program.prompting_template_id,
         'workflow_template_id': program.workflow_template_id,
         'maintenance_schedule_id': program.maintenance_schedule_id,
         'fading_template_id': program.fading_template_id,
+        'image_url': _optimized_program_image_url(request, program.image) if request is not None else None,
         'display_order': program.display_order,
         'archived_at': program.archived_at,
         'created_at': program.created_at,
@@ -183,8 +236,13 @@ def _serialize_program(program: Program, include_targets: bool = False) -> dict:
     }
     if include_targets:
         data['targets'] = list(program.targets.all().values(
-            'id', 'name', 'status', 'display_order', 'is_visible_to_staff'
+            'id', 'name', 'status', 'display_order', 'is_visible_to_staff',
+            'module_id', 'submodule_id',
         ))
+        data['materials'] = [
+            _serialize_program_material(material, request)
+            for material in program.materials.select_related('created_by')
+        ] if request is not None else []
     return data
 
 
@@ -239,7 +297,7 @@ def list_programs(request, client_id: int, category: str | None = None, status: 
         for t in targets:
             status_counts[t.status] = status_counts.get(t.status, 0) + 1
         result.append({
-            **_serialize_program(p),
+            **_serialize_program(p, request),
             'target_count': len(targets),
             'target_status_counts': status_counts,
         })
@@ -261,19 +319,20 @@ def create_program(request, data: ProgramCreateRequest):
         baseline_notes=data.baseline_notes,
         objective=data.objective,
         instructions=data.instructions,
+        prompting_template_id=data.prompting_template_id,
         workflow_template_id=data.workflow_template_id,
         maintenance_schedule_id=data.maintenance_schedule_id,
         fading_template_id=data.fading_template_id,
         display_order=data.display_order,
         created_by=request.user,
     )
-    return 201, {**_serialize_program(program), 'targets': []}
+    return 201, {**_serialize_program(program, request), 'targets': []}
 
 
 @router.get('/programs/{program_id}', response=ProgramSchema)
 def get_program(request, program_id: int):
     program = _get_program_or_404(request, program_id)
-    return {**_serialize_program(program, include_targets=True)}
+    return {**_serialize_program(program, request, include_targets=True)}
 
 
 @router.patch('/programs/{program_id}', response=ProgramSchema)
@@ -292,9 +351,67 @@ def update_program(request, program_id: int, data: ProgramUpdateRequest):
     program.save()
     if 'workflow_template_id' in updates:
         program.targets.update(workflow_template_id=program.workflow_template_id)
+    if 'prompting_template_id' in updates:
+        program.targets.update(
+            prompting_template_id=program.prompting_template_id,
+            current_prompt_level_index=0,
+        )
     if 'fading_template_id' in updates:
         program.targets.update(fading_template_id=program.fading_template_id)
-    return {**_serialize_program(program, include_targets=True)}
+    return {**_serialize_program(program, request, include_targets=True)}
+
+
+@router.post('/programs/{program_id}/image', response=ProgramSchema)
+def upload_program_image(request, program_id: int, file: UploadedFile = File(...)):
+    _require_supervisor(request)
+    program = _get_program_or_404(request, program_id)
+    validate_image_upload(file)
+    program.image = file
+    program.save(update_fields=['image'])
+    return {**_serialize_program(program, request, include_targets=True)}
+
+
+@router.get('/programs/{program_id}/materials', response=list[ProgramMaterialSchema])
+def list_program_materials(request, program_id: int):
+    program = _get_program_or_404(request, program_id)
+    return [
+        _serialize_program_material(material, request)
+        for material in program.materials.select_related('created_by')
+    ]
+
+
+@router.post('/programs/{program_id}/materials', response={201: ProgramMaterialSchema})
+def upload_program_material(
+    request,
+    program_id: int,
+    file: UploadedFile = File(...),
+    title: str = Form(''),
+):
+    _require_supervisor(request)
+    program = _get_program_or_404(request, program_id)
+    material_type = _program_material_type_for(file)
+    material = ProgramMaterial.objects.create(
+        program=program,
+        title=(title or file.name).strip()[:255],
+        material_type=material_type,
+        file=file,
+        content_type=file.content_type or '',
+        file_size=file.size,
+        created_by=request.user,
+    )
+    return 201, _serialize_program_material(material, request)
+
+
+@router.delete('/program-materials/{material_id}', response={204: None})
+def delete_program_material(request, material_id: int):
+    _require_supervisor(request)
+    try:
+        material = ProgramMaterial.objects.select_related('program').get(id=material_id)
+    except ProgramMaterial.DoesNotExist:
+        raise HttpError(404, 'Learning material not found')
+    _get_program_or_404(request, material.program_id)
+    material.delete()
+    return 204, None
 
 
 @router.delete('/programs/{program_id}', response={204: None})
@@ -323,8 +440,85 @@ def _require_sub_items_if_needed(measurement_type: str, sub_items: list) -> None
         raise HttpError(400, f'{measurement_type} targets require at least one sub_item')
 
 
-def _validate_target_status(status: str) -> None:
-    if status and not TargetStatus.objects.filter(key=status).exists():
+def _default_sub_item_status(target: Target, index: int, total: int) -> str:
+    if target.sub_item_progression == Target.SubItemProgression.TOTAL_TASK:
+        return TargetSubItem.Status.ACQUISITION
+    if target.sub_item_progression == Target.SubItemProgression.BACKWARD:
+        return TargetSubItem.Status.ACQUISITION if index == total - 1 else TargetSubItem.Status.WAITING
+    return TargetSubItem.Status.ACQUISITION if index == 0 else TargetSubItem.Status.WAITING
+
+
+def _sync_target_sub_items(target: Target, items: list[dict], user=None) -> None:
+    existing = {item.key: item for item in target.child_items.all()}
+    seen: set[str] = set()
+    normalized: list[dict] = []
+    total = len(items)
+
+    for idx, raw in enumerate(items):
+        if not isinstance(raw, dict):
+            continue
+        key = str(raw.get('key') or f'item_{idx + 1}')[:100]
+        label = str(raw.get('label') or key)[:200]
+        status = str(raw.get('status') or '')
+        if status and not TargetSubItem.Status.values.__contains__(status):
+            raise HttpError(400, f'Invalid sub item status: {status}')
+        status = status or _default_sub_item_status(target, idx, total)
+        seen.add(key)
+
+        child = existing.get(key)
+        if child:
+            old_status = child.status
+            child.label = label
+            child.status = status
+            child.display_order = idx
+            child.save(update_fields=['label', 'status', 'display_order', 'updated_at'])
+            if old_status != status:
+                TargetSubItemStatusChange.objects.create(
+                    sub_item=child,
+                    from_status=old_status,
+                    to_status=status,
+                    trigger=TargetSubItemStatusChange.Trigger.MANUAL,
+                    created_by=user,
+                )
+        else:
+            child = TargetSubItem.objects.create(
+                target=target,
+                key=key,
+                label=label,
+                status=status,
+                display_order=idx,
+                created_by=user,
+            )
+            TargetSubItemStatusChange.objects.create(
+                sub_item=child,
+                from_status='',
+                to_status=status,
+                trigger=TargetSubItemStatusChange.Trigger.MANUAL,
+                created_by=user,
+            )
+        normalized.append({'key': key, 'label': label, 'status': status})
+
+    target.child_items.exclude(key__in=seen).delete()
+    if target.sub_items != normalized:
+        target.sub_items = normalized
+        target.save(update_fields=['sub_items', 'updated_at'])
+
+
+def _refresh_target_sub_items_json(target: Target) -> None:
+    children = list(target.child_items.all().order_by('display_order', 'id'))
+    if not children:
+        return
+    serialized = [
+        {'key': item.key, 'label': item.label, 'status': item.status}
+        for item in children
+    ]
+    if target.sub_items != serialized:
+        target.sub_items = serialized
+        target.save(update_fields=['sub_items', 'updated_at'])
+
+
+def _validate_target_status(request, status: str) -> None:
+    if status and not _settings_qs(TargetStatus, request).filter(key=status).exists():
         raise HttpError(400, f'Invalid status: {status}')
 
 
@@ -342,14 +536,16 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
     _require_supervisor(request)
     program = _get_program_or_404(request, program_id)
     target_data = data.dict()
+    if program.prompting_template_id and not target_data.get('prompting_template_id'):
+        target_data['prompting_template_id'] = program.prompting_template_id
     if program.workflow_template_id and not target_data.get('workflow_template_id'):
         target_data['workflow_template_id'] = program.workflow_template_id
     if program.fading_template_id and not target_data.get('fading_template_id'):
         target_data['fading_template_id'] = program.fading_template_id
     if target_data.get('status'):
-        _validate_target_status(target_data['status'])
+        _validate_target_status(request, target_data['status'])
     else:
-        default_status = TargetStatus.objects.filter(is_default=True).first()
+        default_status = _settings_qs(TargetStatus, request).filter(is_default=True).first()
         target_data['status'] = default_status.key if default_status else Target.Status.WAITING
     _require_sub_items_if_needed(target_data['measurement_type'], target_data['sub_items'])
     target = Target.objects.create(
@@ -357,6 +553,8 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
         created_by=request.user,
         **target_data,
     )
+    if target.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
+        _sync_target_sub_items(target, target.sub_items, request.user)
     return 201, target
 
 
@@ -377,9 +575,15 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
         # target was previously faded to — reset to the most-intrusive level.
         target.current_prompt_level_index = 0
     if 'status' in updates:
-        _validate_target_status(updates['status'])
+        _validate_target_status(request, updates['status'])
     _require_sub_items_if_needed(target.measurement_type, target.sub_items)
     target.save()
+    if target.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES and (
+        'sub_items' in updates or 'sub_item_progression' in updates
+    ):
+        _sync_target_sub_items(target, target.sub_items, request.user)
+    elif target.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
+        _refresh_target_sub_items_json(target)
     return target
 
 
@@ -481,7 +685,7 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
             raise HttpError(400, f'Invalid {field_name}: {fk_id}')
 
     if updates.get('status'):
-        _validate_target_status(updates['status'])
+        _validate_target_status(request, updates['status'])
 
     if updates.get('measurement_type') in _SUB_ITEM_MEASUREMENT_TYPES:
         missing_sub_items = Target.objects.filter(
@@ -809,6 +1013,10 @@ def _serialize_org_program(program: Program, request, include_targets: bool = Fa
         'tags': program.tags,
         'objective': program.objective,
         'instructions': program.instructions,
+        'prompting_template_id': program.prompting_template_id,
+        'workflow_template_id': program.workflow_template_id,
+        'maintenance_schedule_id': program.maintenance_schedule_id,
+        'fading_template_id': program.fading_template_id,
         'folder_id': program.folder_id,
         'image_url': _optimized_program_image_url(request, program.image),
         'display_order': program.display_order,
@@ -861,6 +1069,7 @@ def create_org_program(request, data: OrgProgramCreateRequest):
         tags=data.tags,
         objective=data.objective,
         instructions=data.instructions,
+        prompting_template_id=data.prompting_template_id,
         workflow_template_id=data.workflow_template_id,
         fading_template_id=data.fading_template_id,
         display_order=data.display_order,
@@ -969,6 +1178,15 @@ def update_org_program(request, program_id: int, data: ProgramUpdateRequest):
     for field, value in updates.items():
         setattr(program, field, value)
     program.save()
+    if 'prompting_template_id' in updates:
+        program.targets.update(
+            prompting_template_id=program.prompting_template_id,
+            current_prompt_level_index=0,
+        )
+    if 'workflow_template_id' in updates:
+        program.targets.update(workflow_template_id=program.workflow_template_id)
+    if 'fading_template_id' in updates:
+        program.targets.update(fading_template_id=program.fading_template_id)
     return _serialize_org_program(program, request, include_targets=True)
 
 
@@ -1008,8 +1226,22 @@ def _copy_image(source_image, dest) -> None:
     dest.image.save(filename, ContentFile(source_image.read()), save=True)
 
 
+def _copy_materials(source: Program, dest: Program, user) -> None:
+    for material in source.materials.all():
+        filename = material.file.name.rsplit('/', 1)[-1]
+        copied = ProgramMaterial.objects.create(
+            program=dest,
+            title=material.title,
+            material_type=material.material_type,
+            content_type=material.content_type,
+            file_size=material.file_size,
+            created_by=user,
+        )
+        copied.file.save(filename, ContentFile(material.file.read()), save=True)
+
+
 def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
-    """Deep-copy a program (+ all its targets) to a different client."""
+    """Deep-copy a program (+ modules, submodules, targets) to a different client."""
     dest = Program.objects.create(
         is_template=False,
         external_client_id=client_id,
@@ -1021,23 +1253,47 @@ def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
         tags=source.tags,
         objective=source.objective,
         instructions=source.instructions,
+        prompting_template=source.prompting_template,
+        workflow_template=source.workflow_template,
+        maintenance_schedule=source.maintenance_schedule,
+        fading_template=source.fading_template,
         display_order=source.display_order,
         created_by=user,
     )
     _copy_image(source.image, dest)
+    _copy_materials(source, dest, user)
+    # Clone modules + submodules, keeping a mapping from source id → dest instance
+    module_map: dict[int, ProgramModule] = {}
+    submodule_map: dict[int, ProgramSubmodule] = {}
+    for mod in source.modules.prefetch_related('submodules').all():
+        dest_mod = ProgramModule.objects.create(
+            program=dest, name=mod.name, display_order=mod.display_order, created_by=user,
+        )
+        module_map[mod.id] = dest_mod
+        for sub in mod.submodules.all():
+            dest_sub = ProgramSubmodule.objects.create(
+                module=dest_mod, name=sub.name, display_order=sub.display_order, created_by=user,
+            )
+            submodule_map[sub.id] = dest_sub
     for t in source.targets.all():
-        Target.objects.create(
+        copied = Target.objects.create(
             program=dest,
             name=t.name,
             measurement_type=t.measurement_type,
+            sub_items=t.sub_items,
+            sub_item_progression=t.sub_item_progression,
             prompting_template=t.prompting_template,
             sd_text=t.sd_text,
             teaching_instructions=t.teaching_instructions,
             status=t.status,
             display_order=t.display_order,
             is_visible_to_staff=t.is_visible_to_staff,
+            module=module_map.get(t.module_id) if t.module_id else None,
+            submodule=submodule_map.get(t.submodule_id) if t.submodule_id else None,
             created_by=user,
         )
+        if copied.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
+            _sync_target_sub_items(copied, copied.sub_items, user)
     dest.refresh_from_db()
     return dest
 
@@ -1052,7 +1308,7 @@ def assign_org_program_to_client(request, program_id: int, data: AssignOrgProgra
     except Program.DoesNotExist:
         raise HttpError(404, 'Program not found')
     dest = _copy_program_to_client(template, data.client_id, request.user)
-    return 201, {**_serialize_program(dest, include_targets=True)}
+    return 201, {**_serialize_program(dest, request, include_targets=True)}
 
 
 @router.post('/programs/{program_id}/copy', response={201: ProgramSchema})
@@ -1064,7 +1320,7 @@ def copy_program_to_client(request, program_id: int, data: AssignOrgProgramReque
     if source.is_template:
         raise HttpError(404, 'Program not found')
     dest = _copy_program_to_client(source, data.client_id, request.user)
-    return 201, {**_serialize_program(dest, include_targets=True)}
+    return 201, {**_serialize_program(dest, request, include_targets=True)}
 
 
 # ---------------------------------------------------------------------------
@@ -1112,6 +1368,7 @@ def _serialize_central_program(
         'tags': program.tags,
         'objective': program.objective,
         'instructions': program.instructions,
+        'prompting_template_id': None,
         'folder_id': program.folder_id,
         'image_url': _optimized_program_image_url(request, program.image),
         'already_imported': program.id in imported_ids,
@@ -1234,11 +1491,12 @@ def _clone_central_program(program_id: int, user) -> Program:
         created_by=user,
     )
     _copy_image(source.image, dest)
+    # Central programs have no modules/submodules, so no mapping needed here.
     for t in source.targets.all():
         prompting_template = None
         if t.prompting_levels:
             prompting_template = PromptingTemplate.objects.create(name=f'{t.name} Prompting', levels=t.prompting_levels)
-        Target.objects.create(
+        copied = Target.objects.create(
             program=dest,
             name=t.name,
             measurement_type=t.measurement_type,
@@ -1250,6 +1508,8 @@ def _clone_central_program(program_id: int, user) -> Program:
             prompting_template=prompting_template,
             created_by=user,
         )
+        if copied.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
+            _sync_target_sub_items(copied, copied.sub_items, user)
     dest.refresh_from_db()
     return dest
 
@@ -1260,6 +1520,158 @@ def import_central_program(request, program_id: int):
     require_permission(request, 'central_library_import')
     dest = _clone_central_program(program_id, request.user)
     return 201, _serialize_org_program(dest, request, include_targets=True)
+
+
+# ---------------------------------------------------------------------------
+# Program Modules & Submodules
+# ---------------------------------------------------------------------------
+
+def _serialize_module(module: ProgramModule) -> dict:
+    submodule_target_counts = {
+        row['submodule_id']: row['count']
+        for row in module.targets.filter(submodule_id__isnull=False)
+        .values('submodule_id')
+        .annotate(count=models.Count('id'))
+    }
+    return {
+        'id': module.id,
+        'program_id': module.program_id,
+        'name': module.name,
+        'display_order': module.display_order,
+        'target_count': module.targets.count(),
+        'submodules': [
+            {
+                'id': s.id,
+                'module_id': s.module_id,
+                'name': s.name,
+                'display_order': s.display_order,
+                'target_count': submodule_target_counts.get(s.id, 0),
+                'created_at': s.created_at,
+                'updated_at': s.updated_at,
+            }
+            for s in module.submodules.all()
+        ],
+        'created_at': module.created_at,
+        'updated_at': module.updated_at,
+    }
+
+
+@router.get('/programs/{program_id}/modules', response=list[ProgramModuleSchema])
+def list_modules(request, program_id: int):
+    _get_program_or_404(request, program_id)
+    return [_serialize_module(m) for m in ProgramModule.objects.filter(program_id=program_id).prefetch_related('submodules')]
+
+
+@router.post('/programs/{program_id}/modules', response={201: ProgramModuleSchema})
+def create_module(request, program_id: int, data: ProgramModuleRequest):
+    _require_supervisor(request)
+    program = _get_program_or_404(request, program_id)
+    module = ProgramModule.objects.create(
+        program=program,
+        name=data.name,
+        display_order=data.display_order,
+        created_by=request.user,
+    )
+    return 201, _serialize_module(module)
+
+
+@router.patch('/programs/{program_id}/modules/{module_id}', response=ProgramModuleSchema)
+def update_module(request, program_id: int, module_id: int, data: ProgramModuleRequest):
+    _require_supervisor(request)
+    _get_program_or_404(request, program_id)
+    try:
+        module = ProgramModule.objects.prefetch_related('submodules').get(id=module_id, program_id=program_id)
+    except ProgramModule.DoesNotExist:
+        raise HttpError(404, 'Module not found')
+    for k, v in data.dict().items():
+        setattr(module, k, v)
+    module.save()
+    return _serialize_module(module)
+
+
+@router.delete('/programs/{program_id}/modules/{module_id}', response={204: None})
+def delete_module(request, program_id: int, module_id: int):
+    _require_supervisor(request)
+    _get_program_or_404(request, program_id)
+    try:
+        ProgramModule.objects.get(id=module_id, program_id=program_id).delete()
+    except ProgramModule.DoesNotExist:
+        raise HttpError(404, 'Module not found')
+    return 204, None
+
+
+@router.post('/programs/{program_id}/modules/reorder', response={200: None})
+def reorder_modules(request, program_id: int, data: ReorderModulesRequest):
+    _require_supervisor(request)
+    _get_program_or_404(request, program_id)
+    for order, module_id in enumerate(data.ordered_ids):
+        ProgramModule.objects.filter(id=module_id, program_id=program_id).update(display_order=order)
+    return 200, None
+
+
+@router.post('/programs/{program_id}/modules/{module_id}/submodules', response={201: ProgramSubmoduleSchema})
+def create_submodule(request, program_id: int, module_id: int, data: ProgramSubmoduleRequest):
+    _require_supervisor(request)
+    _get_program_or_404(request, program_id)
+    try:
+        module = ProgramModule.objects.get(id=module_id, program_id=program_id)
+    except ProgramModule.DoesNotExist:
+        raise HttpError(404, 'Module not found')
+    submodule = ProgramSubmodule.objects.create(
+        module=module,
+        name=data.name,
+        display_order=data.display_order,
+        created_by=request.user,
+    )
+    return 201, {
+        'id': submodule.id,
+        'module_id': submodule.module_id,
+        'name': submodule.name,
+        'display_order': submodule.display_order,
+        'created_at': submodule.created_at,
+        'updated_at': submodule.updated_at,
+    }
+
+
+@router.patch('/programs/{program_id}/modules/{module_id}/submodules/{submodule_id}', response=ProgramSubmoduleSchema)
+def update_submodule(request, program_id: int, module_id: int, submodule_id: int, data: ProgramSubmoduleRequest):
+    _require_supervisor(request)
+    _get_program_or_404(request, program_id)
+    try:
+        submodule = ProgramSubmodule.objects.get(id=submodule_id, module_id=module_id)
+    except ProgramSubmodule.DoesNotExist:
+        raise HttpError(404, 'Submodule not found')
+    for k, v in data.dict().items():
+        setattr(submodule, k, v)
+    submodule.save()
+    return {
+        'id': submodule.id,
+        'module_id': submodule.module_id,
+        'name': submodule.name,
+        'display_order': submodule.display_order,
+        'created_at': submodule.created_at,
+        'updated_at': submodule.updated_at,
+    }
+
+
+@router.delete('/programs/{program_id}/modules/{module_id}/submodules/{submodule_id}', response={204: None})
+def delete_submodule(request, program_id: int, module_id: int, submodule_id: int):
+    _require_supervisor(request)
+    _get_program_or_404(request, program_id)
+    try:
+        ProgramSubmodule.objects.get(id=submodule_id, module_id=module_id).delete()
+    except ProgramSubmodule.DoesNotExist:
+        raise HttpError(404, 'Submodule not found')
+    return 204, None
+
+
+@router.post('/programs/{program_id}/modules/{module_id}/submodules/reorder', response={200: None})
+def reorder_submodules(request, program_id: int, module_id: int, data: ReorderSubmodulesRequest):
+    _require_supervisor(request)
+    _get_program_or_404(request, program_id)
+    for order, submodule_id in enumerate(data.ordered_ids):
+        ProgramSubmodule.objects.filter(id=submodule_id, module_id=module_id).update(display_order=order)
+    return 200, None
 
 
 # ---------------------------------------------------------------------------

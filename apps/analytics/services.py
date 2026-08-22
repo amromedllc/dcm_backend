@@ -2,7 +2,7 @@ from collections import defaultdict
 from datetime import date
 from typing import TypedDict
 
-from apps.programs.models import Program, Target
+from apps.programs.models import Program, Target, ProgramModule, ProgramSubmodule, TargetSubItem
 from apps.sessions.models import TrialEvent, BehaviorEvent, SessionRun
 
 
@@ -14,6 +14,10 @@ class TrialDataPoint(TypedDict):
     date: date
     target_id: int
     target_name: str
+    module_id: int | None
+    module_name: str | None
+    submodule_id: int | None
+    submodule_name: str | None
     total_trials: int
     correct_count: int
     pct_correct: float
@@ -23,6 +27,10 @@ class BehaviorDataPoint(TypedDict):
     date: date
     target_id: int
     target_name: str
+    module_id: int | None
+    module_name: str | None
+    submodule_id: int | None
+    submodule_name: str | None
     frequency: int
     total_duration_seconds: int
 
@@ -31,6 +39,11 @@ class TargetSummary(TypedDict):
     target_id: int
     target_name: str
     status: str
+    phase: str | None
+    module_id: int | None
+    module_name: str | None
+    submodule_id: int | None
+    submodule_name: str | None
     total_trials: int
     total_sessions: int
     avg_pct_correct: float
@@ -66,13 +79,30 @@ class ClientProgressReport(TypedDict):
 # ---------------------------------------------------------------------------
 
 def _max_scores_for_targets(target_ids: list[int]) -> dict[int, int | None]:
-    """Returns {target_id: success_score} for the given target IDs — the score
-    of the prompt level marked is_success on the target's template (falling
-    back to the highest configured score for templates with nothing marked).
-    Name kept as "max_scores" at call sites since that's still the common case."""
+    """Returns {target_id: success_score} for the given target IDs."""
     result: dict[int, int | None] = {}
     for target in Target.objects.filter(id__in=target_ids).select_related('prompting_template'):
         result[target.id] = target.prompting_template.success_score() if target.prompting_template else None
+    return result
+
+
+def _module_name_map(module_ids: set[int]) -> dict[int, str]:
+    return {m.id: m.name for m in ProgramModule.objects.filter(id__in=module_ids)}
+
+
+def _submodule_name_map(submodule_ids: set[int]) -> dict[int, str]:
+    return {s.id: s.name for s in ProgramSubmodule.objects.filter(id__in=submodule_ids)}
+
+
+def _sub_item_series(target_ids: list[int]) -> dict[tuple[int, str], dict]:
+    result: dict[tuple[int, str], dict] = {}
+    for item in TargetSubItem.objects.filter(target_id__in=target_ids).select_related('target'):
+        result[(item.target_id, item.key)] = {
+            'series_id': -item.id,
+            'name': f'{item.target.name} > {item.label}',
+            'status': item.status,
+            'target': item.target,
+        }
     return result
 
 
@@ -119,15 +149,28 @@ def get_trial_data_by_day(
             recorded_at__date__gte=date_from,
             recorded_at__date__lte=date_to,
         )
-        .values('recorded_at__date', 'target_id', 'target_name', 'response_score')
+        .values('recorded_at__date', 'target_id', 'target_name', 'response_score', 'sub_item_key')
     )
 
-    # Aggregate in Python — avoids N+1 and per-target subqueries
+    # Build module/submodule lookup from live Target rows
+    target_meta: dict[int, dict] = {
+        t.id: {'module_id': t.module_id, 'submodule_id': t.submodule_id}
+        for t in Target.objects.filter(id__in=target_ids).only('id', 'module_id', 'submodule_id')
+    }
+    mod_ids = {m['module_id'] for m in target_meta.values() if m['module_id']}
+    sub_ids = {m['submodule_id'] for m in target_meta.values() if m['submodule_id']}
+    mod_names = _module_name_map(mod_ids)
+    sub_names = _submodule_name_map(sub_ids)
+    child_series = _sub_item_series(target_ids)
+
     grouped: dict[tuple, dict] = defaultdict(lambda: {'total': 0, 'correct': 0, 'name': ''})
     for event in raw:
-        key = (event['recorded_at__date'], event['target_id'])
+        child = child_series.get((event['target_id'], event.get('sub_item_key') or ''))
+        series_id = child['series_id'] if child else event['target_id']
+        key = (event['recorded_at__date'], series_id)
         grouped[key]['total'] += 1
-        grouped[key]['name'] = event['target_name']
+        grouped[key]['name'] = child['name'] if child else event['target_name']
+        grouped[key]['parent_target_id'] = event['target_id']
         max_score = max_scores.get(event['target_id'])
         is_correct = (
             event['response_score'] >= max_score if max_score is not None
@@ -140,10 +183,17 @@ def get_trial_data_by_day(
     for (day, tid), data in sorted(grouped.items()):
         total = data['total']
         correct = data['correct']
+        meta = target_meta.get(data.get('parent_target_id', tid), {})
+        mid = meta.get('module_id')
+        sid = meta.get('submodule_id')
         result.append({
             'date': day,
             'target_id': tid,
             'target_name': data['name'],
+            'module_id': mid,
+            'module_name': mod_names.get(mid) if mid else None,
+            'submodule_id': sid,
+            'submodule_name': sub_names.get(sid) if sid else None,
             'total_trials': total,
             'correct_count': correct,
             'pct_correct': round(correct / total * 100, 1) if total else 0.0,
@@ -174,6 +224,15 @@ def get_behavior_data_by_day(
         .values('occurred_at__date', 'target_id', 'target_name', 'frequency_count', 'duration_seconds')
     )
 
+    target_meta: dict[int, dict] = {
+        t.id: {'module_id': t.module_id, 'submodule_id': t.submodule_id}
+        for t in Target.objects.filter(id__in=target_ids).only('id', 'module_id', 'submodule_id')
+    }
+    mod_ids = {m['module_id'] for m in target_meta.values() if m['module_id']}
+    sub_ids = {m['submodule_id'] for m in target_meta.values() if m['submodule_id']}
+    mod_names = _module_name_map(mod_ids)
+    sub_names = _submodule_name_map(sub_ids)
+
     grouped: dict[tuple, dict] = defaultdict(lambda: {'freq': 0, 'dur': 0, 'name': ''})
     for event in raw:
         key = (event['occurred_at__date'], event['target_id'])
@@ -181,16 +240,23 @@ def get_behavior_data_by_day(
         grouped[key]['dur'] += event['duration_seconds'] or 0
         grouped[key]['name'] = event['target_name']
 
-    return [
-        {
+    result: list[BehaviorDataPoint] = []
+    for (day, tid), data in sorted(grouped.items()):
+        meta = target_meta.get(tid, {})
+        mid = meta.get('module_id')
+        sid = meta.get('submodule_id')
+        result.append({
             'date': day,
             'target_id': tid,
             'target_name': data['name'],
+            'module_id': mid,
+            'module_name': mod_names.get(mid) if mid else None,
+            'submodule_id': sid,
+            'submodule_name': sub_names.get(sid) if sid else None,
             'frequency': data['freq'],
             'total_duration_seconds': data['dur'],
-        }
-        for (day, tid), data in sorted(grouped.items())
-    ]
+        })
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +271,160 @@ def get_program_summary(program_id: int, date_from: date, date_to: date) -> list
     targets = list(
         Target.objects
         .filter(program_id=program_id)
-        .select_related('prompting_template')
+        .select_related('prompting_template', 'module', 'submodule')
+    )
+    if not targets:
+        return []
+
+    target_ids = [t.id for t in targets]
+    max_scores = _max_scores_for_targets(target_ids)
+
+    raw = list(
+        TrialEvent.objects
+        .filter(
+            target_id__in=target_ids,
+            recorded_at__date__gte=date_from,
+            recorded_at__date__lte=date_to,
+        )
+        .values('recorded_at__date', 'target_id', 'response_score', 'session_run_id', 'sub_item_key')
+    )
+
+    # Per-target aggregation
+    child_series = _sub_item_series(target_ids)
+    per_target: dict[int, dict] = defaultdict(lambda: {
+        'totals': 0, 'correct': 0, 'sessions': set(), 'dates': [], 'daily_pct': defaultdict(dict),
+    })
+    for event in raw:
+        child = child_series.get((event['target_id'], event.get('sub_item_key') or ''))
+        tid = child['series_id'] if child else event['target_id']
+        per_target[tid]['totals'] += 1
+        per_target[tid]['sessions'].add(event['session_run_id'])
+        per_target[tid]['parent_target_id'] = event['target_id']
+        if child:
+            per_target[tid]['name'] = child['name']
+            per_target[tid]['status'] = child['status']
+        max_score = max_scores.get(event['target_id'])
+        is_correct = (
+            event['response_score'] >= max_score if max_score is not None
+            else event['response_score'] > 0
+        )
+        if is_correct:
+            per_target[tid]['correct'] += 1
+        per_target[tid]['dates'].append(event['recorded_at__date'])
+        day_key = event['recorded_at__date']
+        per_target[tid]['daily_pct'].setdefault(day_key, {'total': 0, 'correct': 0})
+        per_target[tid]['daily_pct'][day_key]['total'] += 1
+        if is_correct:
+            per_target[tid]['daily_pct'][day_key]['correct'] += 1
+
+    result: list[TargetSummary] = []
+    for target in targets:
+        tid = target.id
+        if any(child['target'].id == target.id for child in child_series.values()):
+            continue
+        data = per_target.get(tid)
+        if not data or data['totals'] == 0:
+            result.append({
+                'target_id': tid,
+                'target_name': target.name,
+                'status': target.status,
+                'phase': getattr(target, 'phase', None),
+                'module_id': target.module_id,
+                'module_name': target.module.name if target.module_id else None,
+                'submodule_id': target.submodule_id,
+                'submodule_name': target.submodule.name if target.submodule_id else None,
+                'total_trials': 0,
+                'total_sessions': 0,
+                'avg_pct_correct': 0.0,
+                'last_session_date': None,
+                'trend': 'insufficient_data',
+            })
+            continue
+
+        total = data['totals']
+        correct = data['correct']
+        avg = round(correct / total * 100, 1) if total else 0.0
+
+        daily_pcts = [
+            round(v['correct'] / v['total'] * 100, 1)
+            for v in data['daily_pct'].values()
+            if v['total'] > 0
+        ]
+        trend = _compute_trend(sorted(daily_pcts))
+
+        result.append({
+            'target_id': tid,
+            'target_name': target.name,
+            'status': target.status,
+            'phase': getattr(target, 'phase', None),
+            'module_id': target.module_id,
+            'module_name': target.module.name if target.module_id else None,
+            'submodule_id': target.submodule_id,
+            'submodule_name': target.submodule.name if target.submodule_id else None,
+            'total_trials': total,
+            'total_sessions': len(data['sessions']),
+            'avg_pct_correct': avg,
+            'last_session_date': max(data['dates']) if data['dates'] else None,
+            'trend': trend,
+        })
+
+    for child in child_series.values():
+        tid = child['series_id']
+        target = child['target']
+        data = per_target.get(tid)
+        if not data or data['totals'] == 0:
+            result.append({
+                'target_id': tid,
+                'target_name': child['name'],
+                'status': child['status'],
+                'phase': None,
+                'module_id': target.module_id,
+                'module_name': target.module.name if target.module_id else None,
+                'submodule_id': target.submodule_id,
+                'submodule_name': target.submodule.name if target.submodule_id else None,
+                'total_trials': 0,
+                'total_sessions': 0,
+                'avg_pct_correct': 0.0,
+                'last_session_date': None,
+                'trend': 'insufficient_data',
+            })
+            continue
+        total = data['totals']
+        correct = data['correct']
+        daily_pcts = [
+            round(v['correct'] / v['total'] * 100, 1)
+            for v in data['daily_pct'].values()
+            if v['total'] > 0
+        ]
+        result.append({
+            'target_id': tid,
+            'target_name': child['name'],
+            'status': child['status'],
+            'phase': None,
+            'module_id': target.module_id,
+            'module_name': target.module.name if target.module_id else None,
+            'submodule_id': target.submodule_id,
+            'submodule_name': target.submodule.name if target.submodule_id else None,
+            'total_trials': total,
+            'total_sessions': len(data['sessions']),
+            'avg_pct_correct': round(correct / total * 100, 1) if total else 0.0,
+            'last_session_date': max(data['dates']) if data['dates'] else None,
+            'trend': _compute_trend(sorted(daily_pcts)),
+        })
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Module summary — per-module analytics (subset of program summary)
+# ---------------------------------------------------------------------------
+
+def get_module_summary(module_id: int, date_from: date, date_to: date) -> list[TargetSummary]:
+    """Same as get_program_summary but scoped to a single module."""
+    targets = list(
+        Target.objects
+        .filter(module_id=module_id)
+        .select_related('prompting_template', 'module', 'submodule')
     )
     if not targets:
         return []
@@ -223,7 +442,6 @@ def get_program_summary(program_id: int, date_from: date, date_to: date) -> list
         .values('recorded_at__date', 'target_id', 'response_score', 'session_run_id')
     )
 
-    # Per-target aggregation
     per_target: dict[int, dict] = defaultdict(lambda: {
         'totals': 0, 'correct': 0, 'sessions': set(), 'dates': [], 'daily_pct': defaultdict(dict),
     })
@@ -254,6 +472,11 @@ def get_program_summary(program_id: int, date_from: date, date_to: date) -> list
                 'target_id': tid,
                 'target_name': target.name,
                 'status': target.status,
+                'phase': getattr(target, 'phase', None),
+                'module_id': target.module_id,
+                'module_name': target.module.name if target.module_id else None,
+                'submodule_id': target.submodule_id,
+                'submodule_name': target.submodule.name if target.submodule_id else None,
                 'total_trials': 0,
                 'total_sessions': 0,
                 'avg_pct_correct': 0.0,
@@ -261,29 +484,28 @@ def get_program_summary(program_id: int, date_from: date, date_to: date) -> list
                 'trend': 'insufficient_data',
             })
             continue
-
         total = data['totals']
         correct = data['correct']
         avg = round(correct / total * 100, 1) if total else 0.0
-
         daily_pcts = [
             round(v['correct'] / v['total'] * 100, 1)
-            for v in data['daily_pct'].values()
-            if v['total'] > 0
+            for v in data['daily_pct'].values() if v['total'] > 0
         ]
-        trend = _compute_trend(sorted(daily_pcts))
-
         result.append({
             'target_id': tid,
             'target_name': target.name,
             'status': target.status,
+            'phase': getattr(target, 'phase', None),
+            'module_id': target.module_id,
+            'module_name': target.module.name if target.module_id else None,
+            'submodule_id': target.submodule_id,
+            'submodule_name': target.submodule.name if target.submodule_id else None,
             'total_trials': total,
             'total_sessions': len(data['sessions']),
             'avg_pct_correct': avg,
             'last_session_date': max(data['dates']) if data['dates'] else None,
-            'trend': trend,
+            'trend': _compute_trend(sorted(daily_pcts)),
         })
-
     return result
 
 
@@ -322,7 +544,7 @@ def get_client_progress_report(
     programs = list(
         Program.objects
         .filter(external_client_id=dcm_client_id)
-        .prefetch_related('targets__prompting_template')
+        .prefetch_related('targets__prompting_template', 'targets__module', 'targets__submodule')
         .order_by('display_order', 'name')
     )
 
@@ -409,6 +631,11 @@ def get_client_progress_report(
                     'target_id': tid,
                     'target_name': target.name,
                     'status': target.status,
+                    'phase': getattr(target, 'phase', None),
+                    'module_id': target.module_id,
+                    'module_name': target.module.name if target.module_id else None,
+                    'submodule_id': target.submodule_id,
+                    'submodule_name': target.submodule.name if target.submodule_id else None,
                     'total_trials': 0,
                     'total_sessions': 0,
                     'avg_pct_correct': 0.0,
@@ -429,6 +656,11 @@ def get_client_progress_report(
                 'target_id': tid,
                 'target_name': target.name,
                 'status': target.status,
+                'phase': getattr(target, 'phase', None),
+                'module_id': target.module_id,
+                'module_name': target.module.name if target.module_id else None,
+                'submodule_id': target.submodule_id,
+                'submodule_name': target.submodule.name if target.submodule_id else None,
                 'total_trials': total,
                 'total_sessions': len(data['sessions']),
                 'avg_pct_correct': avg,

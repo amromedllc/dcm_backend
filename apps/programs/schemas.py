@@ -224,6 +224,18 @@ class TargetSummarySchema(Schema):
     is_visible_to_staff: bool
 
 
+class ProgramMaterialSchema(Schema):
+    id: int
+    program_id: int
+    title: str
+    material_type: str
+    file_url: str
+    content_type: str
+    file_size: int
+    uploaded_by: str | None = None
+    created_at: datetime
+
+
 class ProgramSchema(Schema):
     id: int
     client_id: int | None = None
@@ -236,14 +248,17 @@ class ProgramSchema(Schema):
     baseline_notes: str = ''
     objective: str = ''
     instructions: str = ''
+    prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
+    image_url: str | None = None
     display_order: int
     archived_at: datetime | None
     created_at: datetime
     updated_at: datetime
     targets: list[TargetSummarySchema] = []
+    materials: list[ProgramMaterialSchema] = []
 
 
 class ProgramListSchema(Schema):
@@ -255,9 +270,14 @@ class ProgramListSchema(Schema):
     phase: str = 'teaching'
     treatment_area: str = ''
     tags: list[str] = []
+    baseline_notes: str = ''
+    objective: str = ''
+    instructions: str = ''
+    prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
+    image_url: str | None = None
     display_order: int
     target_count: int = 0
     target_status_counts: dict[str, int] = {}
@@ -275,6 +295,7 @@ class ProgramCreateRequest(Schema):
     baseline_notes: str = ''
     objective: str = ''
     instructions: str = ''
+    prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
@@ -291,6 +312,7 @@ class ProgramUpdateRequest(Schema):
     baseline_notes: str | None = None
     objective: str | None = None
     instructions: str | None = None
+    prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
@@ -298,8 +320,39 @@ class ProgramUpdateRequest(Schema):
 
 
 # ---------------------------------------------------------------------------
-# Targets
+# Modules / Submodules
 # ---------------------------------------------------------------------------
+
+class ProgramSubmoduleSchema(Schema):
+    id: int
+    module_id: int
+    name: str
+    display_order: int
+    target_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProgramModuleSchema(Schema):
+    id: int
+    program_id: int
+    name: str
+    display_order: int
+    target_count: int = 0
+    submodules: list[ProgramSubmoduleSchema] = []
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProgramModuleRequest(Schema):
+    name: NonEmptyStr
+    display_order: int = Field(default=0, ge=0)
+
+
+class ProgramSubmoduleRequest(Schema):
+    name: NonEmptyStr
+    display_order: int = Field(default=0, ge=0)
+
 
 class TargetSchema(Schema):
     id: int
@@ -307,6 +360,7 @@ class TargetSchema(Schema):
     name: str
     measurement_type: str
     sub_items: list[dict] = []
+    sub_item_progression: str = 'forward'
     prompting_template_id: int | None
     workflow_template_id: int | None
     maintenance_schedule_id: int | None
@@ -320,14 +374,19 @@ class TargetSchema(Schema):
     current_prompt_level_index: int
     display_order: int
     is_visible_to_staff: bool
+    module_id: int | None = None
+    submodule_id: int | None = None
     created_at: datetime
     updated_at: datetime
 
-
+# ---------------------------------------------------------------------------
+# Targets
+# ---------------------------------------------------------------------------
 class TargetCreateRequest(Schema):
     name: NonEmptyStr
     measurement_type: Target.MeasurementType = Target.MeasurementType.DISCRETE_TRIAL
     sub_items: list[dict] = []
+    sub_item_progression: Target.SubItemProgression = Target.SubItemProgression.FORWARD
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
@@ -335,14 +394,19 @@ class TargetCreateRequest(Schema):
     sd_text: str = ''
     teaching_instructions: str = ''
     status: str = ''  # empty = resolve server-side to the org's default TargetStatus
+    mastery_mode: Target.MasteryMode = Target.MasteryMode.MANUAL
+    fading_mode: Target.FadingMode = Target.FadingMode.MANUAL
     display_order: int = Field(default=0, ge=0)
     is_visible_to_staff: bool = True
+    module_id: int | None = None
+    submodule_id: int | None = None
 
 
 class TargetUpdateRequest(Schema):
     name: NonEmptyStr | None = None
     measurement_type: Target.MeasurementType | None = None
     sub_items: list[dict] | None = None
+    sub_item_progression: Target.SubItemProgression | None = None
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
@@ -355,6 +419,8 @@ class TargetUpdateRequest(Schema):
     current_prompt_level_index: int | None = Field(default=None, ge=0)
     display_order: int | None = Field(default=None, ge=0)
     is_visible_to_staff: bool | None = None
+    module_id: int | None = None
+    submodule_id: int | None = None
 
 
 class BulkUpdateTargetsRequest(Schema):
@@ -381,6 +447,14 @@ class BulkUpdateResult(Schema):
 
 
 class ReorderTargetsRequest(Schema):
+    ordered_ids: list[int]
+
+
+class ReorderModulesRequest(Schema):
+    ordered_ids: list[int]
+
+
+class ReorderSubmodulesRequest(Schema):
     ordered_ids: list[int]
 
 
@@ -439,6 +513,7 @@ class OrgProgramSchema(Schema):
     tags: list[str]
     objective: str
     instructions: str
+    prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
@@ -460,6 +535,7 @@ class OrgProgramCreateRequest(Schema):
     tags: list[str] = []
     objective: str = ''
     instructions: str = ''
+    prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None

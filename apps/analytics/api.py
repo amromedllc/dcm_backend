@@ -4,14 +4,14 @@ from ninja import Router
 from ninja.errors import HttpError
 
 from apps.accounts.auth import jwt_auth
-from apps.programs.models import Program, Target
+from apps.programs.models import Program, Target, ProgramModule
 from .models import GraphAnnotation
 from .schemas import (
     TrialDataPointSchema, BehaviorDataPointSchema,
-    ProgramSummarySchema, TargetSummarySchema,
+    ProgramSummarySchema, ModuleSummarySchema, TargetSummarySchema,
     GraphAnnotationSchema, GraphAnnotationCreateRequest, GraphAnnotationUpdateRequest,
 )
-from .services import get_trial_data_by_day, get_behavior_data_by_day, get_program_summary, get_client_progress_report
+from .services import get_trial_data_by_day, get_behavior_data_by_day, get_program_summary, get_module_summary, get_client_progress_report
 
 router = Router(auth=jwt_auth)
 
@@ -132,6 +132,34 @@ def client_progress_report(
     require_permission(request, 'client_report')
     frm, to = _resolve_dates(date_from, date_to)
     return get_client_progress_report(client_id, frm, to)
+
+
+# ---------------------------------------------------------------------------
+# Module summary
+# ---------------------------------------------------------------------------
+
+@router.get('/analytics/programs/{program_id}/modules/{module_id}/summary', response=ModuleSummarySchema)
+def module_summary(
+    request,
+    program_id: int,
+    module_id: int,
+    date_from: date | None = None,
+    date_to: date | None = None,
+):
+    """Per-target summary scoped to a single module."""
+    frm, to = _resolve_dates(date_from, date_to)
+    try:
+        mod = ProgramModule.objects.get(id=module_id, program_id=program_id)
+    except ProgramModule.DoesNotExist:
+        raise HttpError(404, 'Module not found')
+    targets = get_module_summary(module_id, frm, to)
+    return {
+        'module_id': module_id,
+        'module_name': mod.name,
+        'date_from': frm,
+        'date_to': to,
+        'targets': targets,
+    }
 
 
 # ---------------------------------------------------------------------------

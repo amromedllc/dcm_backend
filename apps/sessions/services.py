@@ -1,7 +1,95 @@
+from datetime import timedelta
+
 from django.utils import timezone
 from ninja.errors import HttpError
 
 from apps.programs.models import Program, Lesson
+
+
+def _workflow_phase_for_target(target, phase: str) -> dict | None:
+    wf = target.workflow_template or target.program.workflow_template
+    if not wf:
+        return None
+    return next((p for p in wf.phases if p.get('phase') == phase), None)
+
+
+def _maintenance_interval_days(row: dict) -> int:
+    try:
+        value = max(1, int(row.get('value') or 1))
+    except (TypeError, ValueError):
+        value = 1
+    interval_type = row.get('type') or 'daily'
+    if interval_type == 'weekly':
+        return value * 7
+    if interval_type == 'biweekly':
+        return value * 14
+    if interval_type == 'monthly':
+        return value * 30
+    return value
+
+
+def _target_due_for_session(target) -> bool:
+    """Keep mastered maintenance targets out of session snapshots until due.
+
+    A target that has not yet completed a successful maintenance episode, or
+    failed the most recent maintenance check, remains due every day because
+    `maintenance_episodes_completed` is reset to 0 by the evaluator.
+    """
+    if target.status != 'mastered':
+        return True
+
+    phase = _workflow_phase_for_target(target, 'mastered')
+    maintenance = (phase or {}).get('maintenance') or {}
+    intervals = maintenance.get('intervals') or []
+    if not intervals:
+        return True
+    if target.maintenance_episodes_completed <= 0:
+        return True
+
+    from apps.sessions.models import BehaviorEvent, TrialEvent
+    from apps.programs.models import TargetStatusChange
+
+    entered = (
+        TargetStatusChange.objects
+        .filter(target=target, to_status='mastered')
+        .order_by('-created_at')
+        .first()
+    )
+    data_since = {'session_run__submitted_at__isnull': False}
+    if entered:
+        data_since['session_run__submitted_at__gte'] = entered.created_at
+
+    last_trial = (
+        TrialEvent.objects
+        .filter(target_id=target.id, **data_since)
+        .order_by('-session_run__submitted_at')
+        .values_list('session_run__submitted_at', flat=True)
+        .first()
+    )
+    last_behavior = (
+        BehaviorEvent.objects
+        .filter(target_id=target.id, **data_since)
+        .order_by('-session_run__submitted_at')
+        .values_list('session_run__submitted_at', flat=True)
+        .first()
+    )
+    last_seen = max([dt for dt in (last_trial, last_behavior) if dt], default=None)
+    if not last_seen:
+        return True
+
+    interval_index = min(target.maintenance_episodes_completed - 1, len(intervals) - 1)
+    due_at = last_seen + timedelta(days=_maintenance_interval_days(intervals[interval_index]))
+    return timezone.now() >= due_at
+
+
+def _snapshot_sub_items(target) -> list[dict]:
+    children = list(target.child_items.all().order_by('display_order', 'id'))
+    if children:
+        return [
+            {'key': item.key, 'label': item.label, 'status': item.status}
+            for item in children
+        ]
+    return target.sub_items
 
 
 def build_program_snapshot(client_id: int, lesson_id: int | None = None, restrict_to_lesson: bool = False) -> dict:
@@ -34,13 +122,13 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
         programs_qs = (
             Program.objects
             .filter(id__in=program_ids, status=Program.Status.ACTIVE)
-            .prefetch_related('targets__prompting_template')
+            .prefetch_related('targets__prompting_template', 'targets__child_items')
         )
     elif not restrict_to_lesson:
         programs_qs = (
             Program.objects
             .filter(external_client_id=client_id, status=Program.Status.ACTIVE)
-            .prefetch_related('targets__prompting_template')
+            .prefetch_related('targets__prompting_template', 'targets__child_items')
         )
     else:
         programs_qs = Program.objects.none()
@@ -48,13 +136,16 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
     for program in programs_qs:
         targets_data = []
         for target in program.targets.visible_to_staff():
+            if not _target_due_for_session(target):
+                continue
             pt = target.prompting_template
             targets_data.append({
                 'id': target.id,
                 'name': target.name,
                 'status': target.status,
                 'measurement_type': target.measurement_type,
-                'sub_items': target.sub_items,
+                'sub_items': _snapshot_sub_items(target),
+                'sub_item_progression': target.sub_item_progression,
                 'sd_text': target.sd_text,
                 'teaching_instructions': target.teaching_instructions,
                 'prompting_template': {

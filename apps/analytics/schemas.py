@@ -6,6 +6,10 @@ class TrialDataPointSchema(Schema):
     date: Date
     target_id: int
     target_name: str
+    module_id: int | None
+    module_name: str | None
+    submodule_id: int | None
+    submodule_name: str | None
     total_trials: int
     correct_count: int
     pct_correct: float
@@ -15,6 +19,10 @@ class BehaviorDataPointSchema(Schema):
     date: Date
     target_id: int
     target_name: str
+    module_id: int | None
+    module_name: str | None
+    submodule_id: int | None
+    submodule_name: str | None
     frequency: int
     total_duration_seconds: int
 
@@ -23,6 +31,11 @@ class TargetSummarySchema(Schema):
     target_id: int
     target_name: str
     status: str
+    phase: str | None
+    module_id: int | None
+    module_name: str | None
+    submodule_id: int | None
+    submodule_name: str | None
     total_trials: int
     total_sessions: int
     avg_pct_correct: float
@@ -32,6 +45,14 @@ class TargetSummarySchema(Schema):
 
 class ProgramSummarySchema(Schema):
     program_id: int
+    date_from: Date
+    date_to: Date
+    targets: list[TargetSummarySchema]
+
+
+class ModuleSummarySchema(Schema):
+    module_id: int
+    module_name: str
     date_from: Date
     date_to: Date
     targets: list[TargetSummarySchema]

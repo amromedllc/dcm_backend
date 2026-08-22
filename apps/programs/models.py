@@ -1,5 +1,6 @@
 import uuid
 
+from django.conf import settings
 from django.db import models
 from shared.models import OrganizationScopedMixin, TenantAwareModel
 from shared.tenancy import TenantManager, TenantQuerySet
@@ -7,6 +8,10 @@ from shared.tenancy import TenantManager, TenantQuerySet
 
 def _program_upload_path(instance, filename):
     return f'programs/{uuid.uuid4().hex}/{filename}'
+
+
+def _program_material_upload_path(instance, filename):
+    return f'program_materials/{instance.program_id}/{uuid.uuid4().hex}/{filename}'
 
 
 class PromptingTemplate(TenantAwareModel):
@@ -94,6 +99,12 @@ class Program(TenantAwareModel):
     # same central program into this org twice.
     source_central_program_id = models.PositiveIntegerField(null=True, blank=True, db_index=True)
     name = models.CharField(max_length=200)
+    prompting_template = models.ForeignKey(
+        'PromptingTemplate',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='programs',
+    )
     workflow_template = models.ForeignKey(
         'WorkflowTemplate',
         on_delete=models.SET_NULL,
@@ -130,7 +141,7 @@ class Program(TenantAwareModel):
         related_name='programs',
     )
 
-    _org_scoped_fk_fields = ('workflow_template', 'maintenance_schedule', 'fading_template', 'folder')
+    _org_scoped_fk_fields = ('prompting_template', 'workflow_template', 'maintenance_schedule', 'fading_template', 'folder')
 
     class Meta:
         app_label = 'programs'
@@ -171,6 +182,11 @@ class Target(TenantAwareModel):
         MANUAL    = 'manual',    'Manual'
         AUTOMATIC = 'automatic', 'Automatic'
 
+    class SubItemProgression(models.TextChoices):
+        FORWARD = 'forward', 'Forward Chain'
+        BACKWARD = 'backward', 'Backward Chain'
+        TOTAL_TASK = 'total_task', 'Total Task'
+
     class MeasurementType(models.TextChoices):
         DISCRETE_TRIAL  = 'discrete_trial',  'Discrete Trial'
         DURATION        = 'duration',        'Duration'
@@ -206,6 +222,11 @@ class Target(TenantAwareModel):
     # steps), set_of_targets (independent items), and shaping (approximation levels,
     # last entry = terminal/goal level). Unused (empty) by every other measurement type.
     sub_items = models.JSONField(default=list, blank=True)
+    sub_item_progression = models.CharField(
+        max_length=20,
+        choices=SubItemProgression.choices,
+        default=SubItemProgression.FORWARD,
+    )
     prompting_template = models.ForeignKey(
         PromptingTemplate,
         on_delete=models.SET_NULL,
@@ -244,6 +265,18 @@ class Target(TenantAwareModel):
     mastery_mode = models.CharField(max_length=10, choices=MasteryMode.choices, default=MasteryMode.MANUAL)
     display_order = models.PositiveIntegerField(default=0, db_index=True)
     is_visible_to_staff = models.BooleanField(default=True)
+    module = models.ForeignKey(
+        'ProgramModule',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='targets',
+    )
+    submodule = models.ForeignKey(
+        'ProgramSubmodule',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='targets',
+    )
 
     # program is the owning parent — a Target can never legitimately belong
     # to a different organization than its Program, so derive rather than
@@ -263,6 +296,70 @@ class Target(TenantAwareModel):
 
     def __str__(self) -> str:
         return f'{self.name} [{self.status}]'
+
+
+class TargetSubItem(TenantAwareModel):
+    class Status(models.TextChoices):
+        WAITING      = 'waiting',      'Waiting'
+        PROBE        = 'probe',        'Probe'
+        ACQUISITION  = 'acquisition',  'Acquisition'
+        MASTERED     = 'mastered',     'Mastered'
+        CLOSED       = 'closed',       'Closed'
+        HOLD         = 'hold',         'Hold'
+        DISCONTINUED = 'discontinued', 'Discontinued'
+
+    target = models.ForeignKey(
+        Target,
+        on_delete=models.CASCADE,
+        related_name='child_items',
+    )
+    key = models.CharField(max_length=100)
+    label = models.CharField(max_length=200)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.WAITING, db_index=True)
+    display_order = models.PositiveIntegerField(default=0, db_index=True)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.target.organization_id
+
+    class Meta:
+        app_label = 'programs'
+        ordering = ['display_order', 'id']
+        unique_together = [('target', 'key')]
+
+    def __str__(self) -> str:
+        return f'{self.target_id}:{self.label} [{self.status}]'
+
+
+class TargetSubItemStatusChange(OrganizationScopedMixin):
+    class Trigger(models.TextChoices):
+        MANUAL = 'manual', 'Manual'
+        AUTO_MASTERY = 'auto_mastery', 'Automatic — Mastery Criteria Met'
+
+    sub_item = models.ForeignKey(
+        TargetSubItem,
+        on_delete=models.CASCADE,
+        related_name='status_changes',
+    )
+    from_status = models.CharField(max_length=20)
+    to_status = models.CharField(max_length=20)
+    trigger = models.CharField(max_length=20, choices=Trigger.choices, default=Trigger.MANUAL)
+    session_run_id = models.PositiveIntegerField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+        db_constraint=False,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.sub_item.organization_id
+
+    class Meta:
+        app_label = 'programs'
+        ordering = ['-created_at']
 
 
 class WorkflowTemplate(TenantAwareModel):
@@ -440,6 +537,47 @@ class ProgramFolder(TenantAwareModel):
         return self.name
 
 
+class ProgramModule(TenantAwareModel):
+    """
+    A named grouping of targets within a program (e.g. "Receptive Language").
+    Programs can have zero or more modules; targets may optionally belong to one.
+    """
+    program = models.ForeignKey(
+        Program,
+        on_delete=models.CASCADE,
+        related_name='modules',
+    )
+    name = models.CharField(max_length=200)
+    display_order = models.PositiveIntegerField(default=0, db_index=True)
+
+    class Meta:
+        app_label = 'programs'
+        ordering = ['display_order', 'name']
+
+    def __str__(self):
+        return f'{self.program.name} / {self.name}'
+
+
+class ProgramSubmodule(TenantAwareModel):
+    """
+    A sub-grouping within a module (e.g. "Colors" inside "Receptive Language").
+    """
+    module = models.ForeignKey(
+        ProgramModule,
+        on_delete=models.CASCADE,
+        related_name='submodules',
+    )
+    name = models.CharField(max_length=200)
+    display_order = models.PositiveIntegerField(default=0, db_index=True)
+
+    class Meta:
+        app_label = 'programs'
+        ordering = ['display_order', 'name']
+
+    def __str__(self):
+        return f'{self.module.name} / {self.name}'
+
+
 class ProgramTag(TenantAwareModel):
     name = models.CharField(max_length=100)
     color = models.CharField(max_length=7, default='#6366f1')  # hex color
@@ -505,6 +643,36 @@ class ProgramDataField(TenantAwareModel):
 
     def __str__(self):
         return self.name
+
+
+class ProgramMaterial(TenantAwareModel):
+    class MaterialType(models.TextChoices):
+        IMAGE = 'image', 'Image'
+        VIDEO = 'video', 'Video'
+        DOCUMENT = 'document', 'Document'
+
+    program = models.ForeignKey(
+        Program,
+        on_delete=models.CASCADE,
+        related_name='materials',
+    )
+    title = models.CharField(max_length=255)
+    material_type = models.CharField(max_length=20, choices=MaterialType.choices)
+    file = models.FileField(upload_to=_program_material_upload_path, max_length=500)
+    content_type = models.CharField(max_length=120, blank=True)
+    file_size = models.PositiveIntegerField(default=0)
+
+    _org_scoped_fk_fields = ('program',)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.program.organization_id
+
+    class Meta:
+        app_label = 'programs'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.title
 
 
 class Lesson(TenantAwareModel):
