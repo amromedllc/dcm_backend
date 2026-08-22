@@ -1,7 +1,7 @@
 import os
 
 from django.db import models
-from ninja import Router, File
+from ninja import Router, File, Form
 from ninja.errors import HttpError
 from ninja.files import UploadedFile
 from django.core.files.base import ContentFile
@@ -14,7 +14,7 @@ from apps.accounts.permissions import require_permission
 from apps.central_library.models import CentralProgram, CentralProgramFolder
 from shared.uploads import validate_image_upload
 from .models import (
-    Program, Target, PromptingTemplate,
+    Program, ProgramMaterial, Target, PromptingTemplate,
     WorkflowTemplate, MaintenanceSchedule, FadingTemplate,
     Lesson, LessonProgram,
     TreatmentArea, ProgramTag, ProgramDataField, TargetStatus,
@@ -22,7 +22,7 @@ from .models import (
     ProgramModule, ProgramSubmodule, TargetSubItem, TargetSubItemStatusChange,
 )
 from .schemas import (
-    ProgramSchema, ProgramListSchema, ProgramCreateRequest, ProgramUpdateRequest,
+    ProgramSchema, ProgramListSchema, ProgramCreateRequest, ProgramUpdateRequest, ProgramMaterialSchema,
     TargetSchema, TargetCreateRequest, TargetUpdateRequest,
     BulkUpdateTargetsRequest, BulkUpdateResult, ReorderTargetsRequest,
     ReorderModulesRequest, ReorderSubmodulesRequest,
@@ -164,7 +164,54 @@ def _check_unique_name(model, request, name: str, *, exclude_id: int | None = No
         raise HttpError(409, f'{model.__name__} named "{name}" already exists')
 
 
-def _serialize_program(program: Program, include_targets: bool = False) -> dict:
+PROGRAM_MATERIAL_IMAGE_TYPES = {'image/jpeg', 'image/png'}
+PROGRAM_MATERIAL_VIDEO_TYPES = {'video/mp4', 'video/quicktime'}
+PROGRAM_MATERIAL_DOCUMENT_TYPES = {
+    'application/pdf',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.ms-powerpoint',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+}
+MAX_PROGRAM_MATERIAL_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_PROGRAM_MATERIAL_VIDEO_BYTES = 100 * 1024 * 1024
+MAX_PROGRAM_MATERIAL_DOCUMENT_BYTES = 10 * 1024 * 1024
+
+
+def _program_material_type_for(file: UploadedFile) -> str:
+    content_type = file.content_type or ''
+    if content_type in PROGRAM_MATERIAL_IMAGE_TYPES:
+        if file.size > MAX_PROGRAM_MATERIAL_IMAGE_BYTES:
+            raise HttpError(400, 'Images must be under 5MB')
+        validate_image_upload(file, max_bytes=MAX_PROGRAM_MATERIAL_IMAGE_BYTES)
+        return ProgramMaterial.MaterialType.IMAGE
+    if content_type in PROGRAM_MATERIAL_VIDEO_TYPES:
+        if file.size > MAX_PROGRAM_MATERIAL_VIDEO_BYTES:
+            raise HttpError(400, 'Videos must be under 100MB')
+        return ProgramMaterial.MaterialType.VIDEO
+    if content_type in PROGRAM_MATERIAL_DOCUMENT_TYPES:
+        if file.size > MAX_PROGRAM_MATERIAL_DOCUMENT_BYTES:
+            raise HttpError(400, 'Documents must be under 10MB')
+        return ProgramMaterial.MaterialType.DOCUMENT
+    allowed = sorted(PROGRAM_MATERIAL_IMAGE_TYPES | PROGRAM_MATERIAL_VIDEO_TYPES | PROGRAM_MATERIAL_DOCUMENT_TYPES)
+    raise HttpError(400, f'Learning material must be one of: {", ".join(allowed)}')
+
+
+def _serialize_program_material(material: ProgramMaterial, request) -> ProgramMaterialSchema:
+    return ProgramMaterialSchema(
+        id=material.id,
+        program_id=material.program_id,
+        title=material.title,
+        material_type=material.material_type,
+        file_url=request.build_absolute_uri(material.file.url),
+        content_type=material.content_type,
+        file_size=material.file_size,
+        uploaded_by=material.created_by.email if material.created_by_id else None,
+        created_at=material.created_at,
+    )
+
+
+def _serialize_program(program: Program, request=None, include_targets: bool = False) -> dict:
     data = {
         'id': program.id,
         'client_id': program.external_client_id,
@@ -177,9 +224,11 @@ def _serialize_program(program: Program, include_targets: bool = False) -> dict:
         'baseline_notes': program.baseline_notes,
         'objective': program.objective,
         'instructions': program.instructions,
+        'prompting_template_id': program.prompting_template_id,
         'workflow_template_id': program.workflow_template_id,
         'maintenance_schedule_id': program.maintenance_schedule_id,
         'fading_template_id': program.fading_template_id,
+        'image_url': _optimized_program_image_url(request, program.image) if request is not None else None,
         'display_order': program.display_order,
         'archived_at': program.archived_at,
         'created_at': program.created_at,
@@ -190,6 +239,10 @@ def _serialize_program(program: Program, include_targets: bool = False) -> dict:
             'id', 'name', 'status', 'display_order', 'is_visible_to_staff',
             'module_id', 'submodule_id',
         ))
+        data['materials'] = [
+            _serialize_program_material(material, request)
+            for material in program.materials.select_related('created_by')
+        ] if request is not None else []
     return data
 
 
@@ -244,7 +297,7 @@ def list_programs(request, client_id: int, category: str | None = None, status: 
         for t in targets:
             status_counts[t.status] = status_counts.get(t.status, 0) + 1
         result.append({
-            **_serialize_program(p),
+            **_serialize_program(p, request),
             'target_count': len(targets),
             'target_status_counts': status_counts,
         })
@@ -266,19 +319,20 @@ def create_program(request, data: ProgramCreateRequest):
         baseline_notes=data.baseline_notes,
         objective=data.objective,
         instructions=data.instructions,
+        prompting_template_id=data.prompting_template_id,
         workflow_template_id=data.workflow_template_id,
         maintenance_schedule_id=data.maintenance_schedule_id,
         fading_template_id=data.fading_template_id,
         display_order=data.display_order,
         created_by=request.user,
     )
-    return 201, {**_serialize_program(program), 'targets': []}
+    return 201, {**_serialize_program(program, request), 'targets': []}
 
 
 @router.get('/programs/{program_id}', response=ProgramSchema)
 def get_program(request, program_id: int):
     program = _get_program_or_404(request, program_id)
-    return {**_serialize_program(program, include_targets=True)}
+    return {**_serialize_program(program, request, include_targets=True)}
 
 
 @router.patch('/programs/{program_id}', response=ProgramSchema)
@@ -297,9 +351,67 @@ def update_program(request, program_id: int, data: ProgramUpdateRequest):
     program.save()
     if 'workflow_template_id' in updates:
         program.targets.update(workflow_template_id=program.workflow_template_id)
+    if 'prompting_template_id' in updates:
+        program.targets.update(
+            prompting_template_id=program.prompting_template_id,
+            current_prompt_level_index=0,
+        )
     if 'fading_template_id' in updates:
         program.targets.update(fading_template_id=program.fading_template_id)
-    return {**_serialize_program(program, include_targets=True)}
+    return {**_serialize_program(program, request, include_targets=True)}
+
+
+@router.post('/programs/{program_id}/image', response=ProgramSchema)
+def upload_program_image(request, program_id: int, file: UploadedFile = File(...)):
+    _require_supervisor(request)
+    program = _get_program_or_404(request, program_id)
+    validate_image_upload(file)
+    program.image = file
+    program.save(update_fields=['image'])
+    return {**_serialize_program(program, request, include_targets=True)}
+
+
+@router.get('/programs/{program_id}/materials', response=list[ProgramMaterialSchema])
+def list_program_materials(request, program_id: int):
+    program = _get_program_or_404(request, program_id)
+    return [
+        _serialize_program_material(material, request)
+        for material in program.materials.select_related('created_by')
+    ]
+
+
+@router.post('/programs/{program_id}/materials', response={201: ProgramMaterialSchema})
+def upload_program_material(
+    request,
+    program_id: int,
+    file: UploadedFile = File(...),
+    title: str = Form(''),
+):
+    _require_supervisor(request)
+    program = _get_program_or_404(request, program_id)
+    material_type = _program_material_type_for(file)
+    material = ProgramMaterial.objects.create(
+        program=program,
+        title=(title or file.name).strip()[:255],
+        material_type=material_type,
+        file=file,
+        content_type=file.content_type or '',
+        file_size=file.size,
+        created_by=request.user,
+    )
+    return 201, _serialize_program_material(material, request)
+
+
+@router.delete('/program-materials/{material_id}', response={204: None})
+def delete_program_material(request, material_id: int):
+    _require_supervisor(request)
+    try:
+        material = ProgramMaterial.objects.select_related('program').get(id=material_id)
+    except ProgramMaterial.DoesNotExist:
+        raise HttpError(404, 'Learning material not found')
+    _get_program_or_404(request, material.program_id)
+    material.delete()
+    return 204, None
 
 
 @router.delete('/programs/{program_id}', response={204: None})
@@ -424,6 +536,8 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
     _require_supervisor(request)
     program = _get_program_or_404(request, program_id)
     target_data = data.dict()
+    if program.prompting_template_id and not target_data.get('prompting_template_id'):
+        target_data['prompting_template_id'] = program.prompting_template_id
     if program.workflow_template_id and not target_data.get('workflow_template_id'):
         target_data['workflow_template_id'] = program.workflow_template_id
     if program.fading_template_id and not target_data.get('fading_template_id'):
@@ -899,6 +1013,7 @@ def _serialize_org_program(program: Program, request, include_targets: bool = Fa
         'tags': program.tags,
         'objective': program.objective,
         'instructions': program.instructions,
+        'prompting_template_id': program.prompting_template_id,
         'workflow_template_id': program.workflow_template_id,
         'maintenance_schedule_id': program.maintenance_schedule_id,
         'fading_template_id': program.fading_template_id,
@@ -954,6 +1069,7 @@ def create_org_program(request, data: OrgProgramCreateRequest):
         tags=data.tags,
         objective=data.objective,
         instructions=data.instructions,
+        prompting_template_id=data.prompting_template_id,
         workflow_template_id=data.workflow_template_id,
         fading_template_id=data.fading_template_id,
         display_order=data.display_order,
@@ -1062,6 +1178,15 @@ def update_org_program(request, program_id: int, data: ProgramUpdateRequest):
     for field, value in updates.items():
         setattr(program, field, value)
     program.save()
+    if 'prompting_template_id' in updates:
+        program.targets.update(
+            prompting_template_id=program.prompting_template_id,
+            current_prompt_level_index=0,
+        )
+    if 'workflow_template_id' in updates:
+        program.targets.update(workflow_template_id=program.workflow_template_id)
+    if 'fading_template_id' in updates:
+        program.targets.update(fading_template_id=program.fading_template_id)
     return _serialize_org_program(program, request, include_targets=True)
 
 
@@ -1101,6 +1226,20 @@ def _copy_image(source_image, dest) -> None:
     dest.image.save(filename, ContentFile(source_image.read()), save=True)
 
 
+def _copy_materials(source: Program, dest: Program, user) -> None:
+    for material in source.materials.all():
+        filename = material.file.name.rsplit('/', 1)[-1]
+        copied = ProgramMaterial.objects.create(
+            program=dest,
+            title=material.title,
+            material_type=material.material_type,
+            content_type=material.content_type,
+            file_size=material.file_size,
+            created_by=user,
+        )
+        copied.file.save(filename, ContentFile(material.file.read()), save=True)
+
+
 def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
     """Deep-copy a program (+ modules, submodules, targets) to a different client."""
     dest = Program.objects.create(
@@ -1114,10 +1253,15 @@ def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
         tags=source.tags,
         objective=source.objective,
         instructions=source.instructions,
+        prompting_template=source.prompting_template,
+        workflow_template=source.workflow_template,
+        maintenance_schedule=source.maintenance_schedule,
+        fading_template=source.fading_template,
         display_order=source.display_order,
         created_by=user,
     )
     _copy_image(source.image, dest)
+    _copy_materials(source, dest, user)
     # Clone modules + submodules, keeping a mapping from source id → dest instance
     module_map: dict[int, ProgramModule] = {}
     submodule_map: dict[int, ProgramSubmodule] = {}
@@ -1164,7 +1308,7 @@ def assign_org_program_to_client(request, program_id: int, data: AssignOrgProgra
     except Program.DoesNotExist:
         raise HttpError(404, 'Program not found')
     dest = _copy_program_to_client(template, data.client_id, request.user)
-    return 201, {**_serialize_program(dest, include_targets=True)}
+    return 201, {**_serialize_program(dest, request, include_targets=True)}
 
 
 @router.post('/programs/{program_id}/copy', response={201: ProgramSchema})
@@ -1176,7 +1320,7 @@ def copy_program_to_client(request, program_id: int, data: AssignOrgProgramReque
     if source.is_template:
         raise HttpError(404, 'Program not found')
     dest = _copy_program_to_client(source, data.client_id, request.user)
-    return 201, {**_serialize_program(dest, include_targets=True)}
+    return 201, {**_serialize_program(dest, request, include_targets=True)}
 
 
 # ---------------------------------------------------------------------------
@@ -1224,6 +1368,7 @@ def _serialize_central_program(
         'tags': program.tags,
         'objective': program.objective,
         'instructions': program.instructions,
+        'prompting_template_id': None,
         'folder_id': program.folder_id,
         'image_url': _optimized_program_image_url(request, program.image),
         'already_imported': program.id in imported_ids,

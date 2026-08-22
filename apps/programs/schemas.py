@@ -224,6 +224,18 @@ class TargetSummarySchema(Schema):
     is_visible_to_staff: bool
 
 
+class ProgramMaterialSchema(Schema):
+    id: int
+    program_id: int
+    title: str
+    material_type: str
+    file_url: str
+    content_type: str
+    file_size: int
+    uploaded_by: str | None = None
+    created_at: datetime
+
+
 class ProgramSchema(Schema):
     id: int
     client_id: int | None = None
@@ -236,14 +248,17 @@ class ProgramSchema(Schema):
     baseline_notes: str = ''
     objective: str = ''
     instructions: str = ''
+    prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
+    image_url: str | None = None
     display_order: int
     archived_at: datetime | None
     created_at: datetime
     updated_at: datetime
     targets: list[TargetSummarySchema] = []
+    materials: list[ProgramMaterialSchema] = []
 
 
 class ProgramListSchema(Schema):
@@ -255,9 +270,14 @@ class ProgramListSchema(Schema):
     phase: str = 'teaching'
     treatment_area: str = ''
     tags: list[str] = []
+    baseline_notes: str = ''
+    objective: str = ''
+    instructions: str = ''
+    prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
+    image_url: str | None = None
     display_order: int
     target_count: int = 0
     target_status_counts: dict[str, int] = {}
@@ -275,6 +295,7 @@ class ProgramCreateRequest(Schema):
     baseline_notes: str = ''
     objective: str = ''
     instructions: str = ''
+    prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
@@ -291,6 +312,7 @@ class ProgramUpdateRequest(Schema):
     baseline_notes: str | None = None
     objective: str | None = None
     instructions: str | None = None
+    prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
@@ -491,6 +513,7 @@ class OrgProgramSchema(Schema):
     tags: list[str]
     objective: str
     instructions: str
+    prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
@@ -512,6 +535,7 @@ class OrgProgramCreateRequest(Schema):
     tags: list[str] = []
     objective: str = ''
     instructions: str = ''
+    prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None

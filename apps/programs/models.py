@@ -10,6 +10,10 @@ def _program_upload_path(instance, filename):
     return f'programs/{uuid.uuid4().hex}/{filename}'
 
 
+def _program_material_upload_path(instance, filename):
+    return f'program_materials/{instance.program_id}/{uuid.uuid4().hex}/{filename}'
+
+
 class PromptingTemplate(TenantAwareModel):
     """
     Defines the scored response levels used during trial data entry.
@@ -95,6 +99,12 @@ class Program(TenantAwareModel):
     # same central program into this org twice.
     source_central_program_id = models.PositiveIntegerField(null=True, blank=True, db_index=True)
     name = models.CharField(max_length=200)
+    prompting_template = models.ForeignKey(
+        'PromptingTemplate',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='programs',
+    )
     workflow_template = models.ForeignKey(
         'WorkflowTemplate',
         on_delete=models.SET_NULL,
@@ -131,7 +141,7 @@ class Program(TenantAwareModel):
         related_name='programs',
     )
 
-    _org_scoped_fk_fields = ('workflow_template', 'maintenance_schedule', 'fading_template', 'folder')
+    _org_scoped_fk_fields = ('prompting_template', 'workflow_template', 'maintenance_schedule', 'fading_template', 'folder')
 
     class Meta:
         app_label = 'programs'
@@ -633,6 +643,36 @@ class ProgramDataField(TenantAwareModel):
 
     def __str__(self):
         return self.name
+
+
+class ProgramMaterial(TenantAwareModel):
+    class MaterialType(models.TextChoices):
+        IMAGE = 'image', 'Image'
+        VIDEO = 'video', 'Video'
+        DOCUMENT = 'document', 'Document'
+
+    program = models.ForeignKey(
+        Program,
+        on_delete=models.CASCADE,
+        related_name='materials',
+    )
+    title = models.CharField(max_length=255)
+    material_type = models.CharField(max_length=20, choices=MaterialType.choices)
+    file = models.FileField(upload_to=_program_material_upload_path, max_length=500)
+    content_type = models.CharField(max_length=120, blank=True)
+    file_size = models.PositiveIntegerField(default=0)
+
+    _org_scoped_fk_fields = ('program',)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.program.organization_id
+
+    class Meta:
+        app_label = 'programs'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.title
 
 
 class Lesson(TenantAwareModel):
