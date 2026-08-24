@@ -569,6 +569,33 @@ class SetProgramFolderRequest(Schema):
 
 
 # ---------------------------------------------------------------------------
+# Saved table views (Programs table — filters/group-by/columns)
+# ---------------------------------------------------------------------------
+
+class SavedTableViewSchema(Schema):
+    id: int
+    table_key: str
+    name: str
+    config: dict
+    visibility: str
+    roles: list[str]
+    display_order: int
+    created_by_id: int | None = None
+    is_mine: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+class SavedTableViewCreateRequest(Schema):
+    table_key: NonEmptyStr
+    name: NonEmptyStr
+    config: dict = {}
+    visibility: str = 'private'
+    roles: list[str] = []
+    display_order: int = Field(default=0, ge=0)
+
+
+# ---------------------------------------------------------------------------
 # Central Library folders (platform-owned, read-only for orgs)
 # ---------------------------------------------------------------------------
 
