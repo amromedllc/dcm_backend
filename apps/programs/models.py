@@ -702,6 +702,38 @@ class Lesson(TenantAwareModel):
         return f'{self.name} ({self.external_client_id})'
 
 
+class SavedTableView(TenantAwareModel):
+    """
+    A user-saved configuration (filters, group-by, visible columns) for a
+    program list/table, so it can be reapplied later without rebuilding it.
+
+    ``table_key`` identifies which table this view belongs to (e.g.
+    'client_programs', 'org_programs') — one organization can have saved
+    views for multiple tables. ``config`` is a free-form JSON blob owned by
+    the frontend (filters/group_by/columns), not modeled field-by-field here,
+    since the table's filterable/groupable/sortable fields are a frontend
+    concern that will keep changing.
+    """
+    class Visibility(models.TextChoices):
+        PRIVATE = 'private', 'Only me'
+        EVERYONE = 'everyone', 'All users'
+        ROLES = 'roles', 'Specific roles'
+
+    table_key = models.CharField(max_length=50, db_index=True)
+    name = models.CharField(max_length=100)
+    config = models.JSONField(default=dict)
+    visibility = models.CharField(max_length=20, choices=Visibility.choices, default=Visibility.PRIVATE)
+    roles = models.JSONField(default=list)
+    display_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        app_label = 'programs'
+        ordering = ['display_order', 'name']
+
+    def __str__(self) -> str:
+        return f'{self.name} ({self.table_key})'
+
+
 class LessonProgram(OrganizationScopedMixin):
     """Join table — controls which programs appear in a lesson and in what order."""
     lesson = models.ForeignKey(Lesson, on_delete=models.CASCADE, related_name='lesson_programs')

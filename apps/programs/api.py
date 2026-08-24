@@ -20,6 +20,7 @@ from .models import (
     TreatmentArea, ProgramTag, ProgramDataField, TargetStatus,
     TargetStatusChange, TargetPromptLevelChange, ProgramFolder,
     ProgramModule, ProgramSubmodule, TargetSubItem, TargetSubItemStatusChange,
+    SavedTableView,
 )
 from .schemas import (
     ProgramSchema, ProgramListSchema, ProgramCreateRequest, ProgramUpdateRequest, ProgramMaterialSchema,
@@ -41,6 +42,7 @@ from .schemas import (
     TargetStatusChangeSchema, TargetPromptLevelChangeSchema,
     TargetStatusSchema, TargetStatusRequest, TargetStatusUpdateRequest,
     ProgramModuleSchema, ProgramModuleRequest, ProgramSubmoduleSchema, ProgramSubmoduleRequest,
+    SavedTableViewSchema, SavedTableViewCreateRequest,
 )
 
 router = Router(auth=jwt_auth)
@@ -1135,6 +1137,66 @@ def delete_program_folder(request, folder_id: int):
         raise HttpError(404, 'Folder not found')
     # Programs inside fall back to unfiled (Program.folder is on_delete=SET_NULL)
     folder.delete()
+    return 204, None
+
+
+def _serialize_saved_view(view: SavedTableView, request) -> dict:
+    return {
+        'id': view.id,
+        'table_key': view.table_key,
+        'name': view.name,
+        'config': view.config,
+        'visibility': view.visibility,
+        'roles': view.roles,
+        'display_order': view.display_order,
+        'created_by_id': view.created_by_id,
+        'is_mine': view.created_by_id == request.user.id,
+        'created_at': view.created_at,
+        'updated_at': view.updated_at,
+    }
+
+
+def _visible_saved_views_qs(request, table_key: str):
+    """Views a user may see for a given table: their own (any visibility),
+    plus anyone's 'everyone' views, plus 'roles' views naming their role."""
+    return _settings_qs(SavedTableView, request).filter(table_key=table_key).filter(
+        models.Q(created_by=request.user)
+        | models.Q(visibility=SavedTableView.Visibility.EVERYONE)
+        | models.Q(visibility=SavedTableView.Visibility.ROLES, roles__contains=[request.user.role])
+    )
+
+
+@router.get('/programs/saved-views', response=list[SavedTableViewSchema])
+def list_saved_views(request, table_key: str):
+    qs = _visible_saved_views_qs(request, table_key)
+    return [_serialize_saved_view(v, request) for v in qs]
+
+
+@router.post('/programs/saved-views', response={201: SavedTableViewSchema})
+def create_saved_view(request, data: SavedTableViewCreateRequest):
+    if data.visibility not in SavedTableView.Visibility.values:
+        raise HttpError(400, f'Invalid visibility: {data.visibility}')
+    view = SavedTableView.objects.create(
+        table_key=data.table_key,
+        name=data.name,
+        config=data.config,
+        visibility=data.visibility,
+        roles=data.roles,
+        display_order=data.display_order,
+        created_by=request.user,
+    )
+    return 201, _serialize_saved_view(view, request)
+
+
+@router.delete('/programs/saved-views/{view_id}', response={204: None})
+def delete_saved_view(request, view_id: int):
+    try:
+        view = _settings_qs(SavedTableView, request).get(id=view_id)
+    except SavedTableView.DoesNotExist:
+        raise HttpError(404, 'Saved view not found')
+    if view.created_by_id != request.user.id and request.user.role not in ('admin', 'supervisor'):
+        raise HttpError(403, 'Only the creator or a supervisor/admin can delete this saved view')
+    view.delete()
     return 204, None
 
 
