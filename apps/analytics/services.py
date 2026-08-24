@@ -21,6 +21,7 @@ class TrialDataPoint(TypedDict):
     total_trials: int
     correct_count: int
     pct_correct: float
+    duration_seconds: float
 
 
 class BehaviorDataPoint(TypedDict):
@@ -153,7 +154,7 @@ def get_trial_data_by_day(
 
     max_scores = _max_scores_for_targets(target_ids)
 
-    base_fields = ['recorded_at__date', 'target_id', 'target_name', 'response_score', 'sub_item_key']
+    base_fields = ['recorded_at__date', 'target_id', 'target_name', 'response_score', 'sub_item_key', 'session_run_id']
     qs = TrialEvent.objects.filter(
         target_id__in=target_ids,
         recorded_at__date__gte=date_from,
@@ -165,6 +166,16 @@ def get_trial_data_by_day(
         raw = list(qs.values(*base_fields, 'session_run__staff_id', 'session_run__staff__first_name', 'session_run__staff__last_name'))
     else:
         raw = list(qs.values(*base_fields))
+
+    # Rate/Learning-Opps-rate metrics divide by session duration — each
+    # session's (ended_at - started_at) counted once, not once per trial,
+    # since one session can hold many trials across many targets. Sessions
+    # still open (no ended_at) contribute 0 rather than skewing the rate.
+    session_ids = {e['session_run_id'] for e in raw}
+    session_seconds: dict[int, float] = {
+        s.id: (s.ended_at - s.started_at).total_seconds()
+        for s in SessionRun.objects.filter(id__in=session_ids, ended_at__isnull=False).only('id', 'started_at', 'ended_at')
+    }
 
     # Build module/submodule lookup from live Target rows — only meaningful
     # for the per-target grouping; other groupings collapse across targets.
@@ -178,7 +189,7 @@ def get_trial_data_by_day(
     sub_names = _submodule_name_map(sub_ids)
     child_series = _sub_item_series(target_ids) if group_by == 'target' else {}
 
-    grouped: dict[tuple, dict] = defaultdict(lambda: {'total': 0, 'correct': 0, 'name': '', 'parent_target_id': None})
+    grouped: dict[tuple, dict] = defaultdict(lambda: {'total': 0, 'correct': 0, 'name': '', 'parent_target_id': None, 'session_ids': set()})
     for event in raw:
         if group_by == 'prompt_level':
             series_id: int | str = event['prompt_level_label'] or 'Unscored'
@@ -196,6 +207,7 @@ def get_trial_data_by_day(
         grouped[key]['total'] += 1
         grouped[key]['name'] = series_name
         grouped[key]['parent_target_id'] = event['target_id']
+        grouped[key]['session_ids'].add(event['session_run_id'])
         max_score = max_scores.get(event['target_id'])
         is_correct = (
             event['response_score'] >= max_score if max_score is not None
@@ -211,6 +223,7 @@ def get_trial_data_by_day(
         meta = target_meta.get(data['parent_target_id'], {}) if group_by == 'target' else {}
         mid = meta.get('module_id')
         subid = meta.get('submodule_id')
+        duration_seconds = sum(session_seconds.get(rid, 0.0) for rid in data['session_ids'])
         result.append({
             'date': day,
             'target_id': sid,
@@ -222,6 +235,7 @@ def get_trial_data_by_day(
             'total_trials': total,
             'correct_count': correct,
             'pct_correct': round(correct / total * 100, 1) if total else 0.0,
+            'duration_seconds': duration_seconds,
         })
     return result
 

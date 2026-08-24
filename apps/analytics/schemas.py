@@ -13,6 +13,7 @@ class TrialDataPointSchema(Schema):
     total_trials: int
     correct_count: int
     pct_correct: float
+    duration_seconds: float
 
 
 class BehaviorDataPointSchema(Schema):
