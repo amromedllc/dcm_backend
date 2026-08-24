@@ -33,6 +33,9 @@ def _require_supervisor(request):
 # Trial graph data
 # ---------------------------------------------------------------------------
 
+_VALID_GROUP_BY = {'target', 'prompt_level', 'user'}
+
+
 @router.get('/analytics/programs/{program_id}/trials', response=list[TrialDataPointSchema])
 def program_trial_data(
     request,
@@ -40,11 +43,14 @@ def program_trial_data(
     date_from: date | None = None,
     date_to: date | None = None,
     target_ids: str | None = None,   # comma-separated IDs to filter to specific targets
+    group_by: str = 'target',        # 'target' (default) | 'prompt_level' | 'user'
 ):
     """
-    Daily trial accuracy per target for a program.
-    Powers the main program graph. Each target becomes one data series.
+    Daily trial accuracy for a program, grouped into data series by `group_by`.
+    Powers the main program graph.
     """
+    if group_by not in _VALID_GROUP_BY:
+        raise HttpError(400, f'Invalid group_by: {group_by}')
     frm, to = _resolve_dates(date_from, date_to)
 
     qs = Target.objects.filter(program_id=program_id)
@@ -53,7 +59,7 @@ def program_trial_data(
         qs = qs.filter(id__in=ids)
 
     ids_list = list(qs.values_list('id', flat=True))
-    return get_trial_data_by_day(ids_list, frm, to)
+    return get_trial_data_by_day(ids_list, frm, to, group_by=group_by)
 
 
 @router.get('/analytics/targets/{target_id}/trials', response=list[TrialDataPointSchema])

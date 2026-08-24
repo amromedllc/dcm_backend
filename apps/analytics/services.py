@@ -12,7 +12,7 @@ from apps.sessions.models import TrialEvent, BehaviorEvent, SessionRun
 
 class TrialDataPoint(TypedDict):
     date: date
-    target_id: int
+    target_id: int | str
     target_name: str
     module_id: int | None
     module_name: str | None
@@ -132,27 +132,42 @@ def get_trial_data_by_day(
     target_ids: list[int],
     date_from: date,
     date_to: date,
+    group_by: str = 'target',
 ) -> list[TrialDataPoint]:
     """
-    Returns daily trial accuracy per target between two dates.
-    Suitable for rendering per-target accuracy lines on a program graph.
+    Returns daily trial accuracy between two dates, one series per day+group.
+
+    group_by='target' (default) — one series per target (or per sub-item for
+    task-analysis-style targets, via _sub_item_series), suitable for
+    rendering per-target accuracy lines on a program graph.
+
+    group_by='prompt_level' — collapses all targets into one series per
+    prompt_level_label, useful for automatic-prompt-fading programs.
+
+    group_by='user' — collapses all targets into one series per the staff
+    member who ran the session (SessionRun.staff), useful for comparing
+    accuracy across RBTs.
     """
     if not target_ids:
         return []
 
     max_scores = _max_scores_for_targets(target_ids)
 
-    raw = list(
-        TrialEvent.objects
-        .filter(
-            target_id__in=target_ids,
-            recorded_at__date__gte=date_from,
-            recorded_at__date__lte=date_to,
-        )
-        .values('recorded_at__date', 'target_id', 'target_name', 'response_score', 'sub_item_key')
+    base_fields = ['recorded_at__date', 'target_id', 'target_name', 'response_score', 'sub_item_key']
+    qs = TrialEvent.objects.filter(
+        target_id__in=target_ids,
+        recorded_at__date__gte=date_from,
+        recorded_at__date__lte=date_to,
     )
+    if group_by == 'prompt_level':
+        raw = list(qs.values(*base_fields, 'prompt_level_label'))
+    elif group_by == 'user':
+        raw = list(qs.values(*base_fields, 'session_run__staff_id', 'session_run__staff__first_name', 'session_run__staff__last_name'))
+    else:
+        raw = list(qs.values(*base_fields))
 
-    # Build module/submodule lookup from live Target rows
+    # Build module/submodule lookup from live Target rows — only meaningful
+    # for the per-target grouping; other groupings collapse across targets.
     target_meta: dict[int, dict] = {
         t.id: {'module_id': t.module_id, 'submodule_id': t.submodule_id}
         for t in Target.objects.filter(id__in=target_ids).only('id', 'module_id', 'submodule_id')
@@ -161,15 +176,25 @@ def get_trial_data_by_day(
     sub_ids = {m['submodule_id'] for m in target_meta.values() if m['submodule_id']}
     mod_names = _module_name_map(mod_ids)
     sub_names = _submodule_name_map(sub_ids)
-    child_series = _sub_item_series(target_ids)
+    child_series = _sub_item_series(target_ids) if group_by == 'target' else {}
 
-    grouped: dict[tuple, dict] = defaultdict(lambda: {'total': 0, 'correct': 0, 'name': ''})
+    grouped: dict[tuple, dict] = defaultdict(lambda: {'total': 0, 'correct': 0, 'name': '', 'parent_target_id': None})
     for event in raw:
-        child = child_series.get((event['target_id'], event.get('sub_item_key') or ''))
-        series_id = child['series_id'] if child else event['target_id']
+        if group_by == 'prompt_level':
+            series_id: int | str = event['prompt_level_label'] or 'Unscored'
+            series_name = series_id
+        elif group_by == 'user':
+            series_id = event['session_run__staff_id'] or 0
+            full_name = f"{event.get('session_run__staff__first_name') or ''} {event.get('session_run__staff__last_name') or ''}".strip()
+            series_name = full_name or 'Unknown'
+        else:
+            child = child_series.get((event['target_id'], event.get('sub_item_key') or ''))
+            series_id = child['series_id'] if child else event['target_id']
+            series_name = child['name'] if child else event['target_name']
+
         key = (event['recorded_at__date'], series_id)
         grouped[key]['total'] += 1
-        grouped[key]['name'] = child['name'] if child else event['target_name']
+        grouped[key]['name'] = series_name
         grouped[key]['parent_target_id'] = event['target_id']
         max_score = max_scores.get(event['target_id'])
         is_correct = (
@@ -180,20 +205,20 @@ def get_trial_data_by_day(
             grouped[key]['correct'] += 1
 
     result: list[TrialDataPoint] = []
-    for (day, tid), data in sorted(grouped.items()):
+    for (day, sid), data in sorted(grouped.items()):
         total = data['total']
         correct = data['correct']
-        meta = target_meta.get(data.get('parent_target_id', tid), {})
+        meta = target_meta.get(data['parent_target_id'], {}) if group_by == 'target' else {}
         mid = meta.get('module_id')
-        sid = meta.get('submodule_id')
+        subid = meta.get('submodule_id')
         result.append({
             'date': day,
-            'target_id': tid,
+            'target_id': sid,
             'target_name': data['name'],
             'module_id': mid,
             'module_name': mod_names.get(mid) if mid else None,
-            'submodule_id': sid,
-            'submodule_name': sub_names.get(sid) if sid else None,
+            'submodule_id': subid,
+            'submodule_name': sub_names.get(subid) if subid else None,
             'total_trials': total,
             'correct_count': correct,
             'pct_correct': round(correct / total * 100, 1) if total else 0.0,

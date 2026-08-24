@@ -4,7 +4,7 @@ from ninja import Schema
 
 class TrialDataPointSchema(Schema):
     date: Date
-    target_id: int
+    target_id: int | str
     target_name: str
     module_id: int | None
     module_name: str | None
