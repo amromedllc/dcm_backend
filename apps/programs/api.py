@@ -128,7 +128,7 @@ def _require_settings_permission(request, permission: str):
     require_permission(request, permission)
 
 
-def _settings_qs(model, request):
+def _settings_qs(model, request, *, include_org_defaults: bool = False):
     """Practice-scoped queryset for shared facility settings (treatment areas,
     tags, statuses, prompting/fading/workflow templates, maintenance schedules,
     data fields). These carry `created_by` but were previously read/written
@@ -138,13 +138,21 @@ def _settings_qs(model, request):
     configuration. Reuses _same_practice_q exactly as APIKey/User already do,
     reached through created_by since these settings models don't carry
     external_admin_id/organization directly on the row.
-    created_by is null for org-level defaults copied at org-creation time
-    from the platform's DefaultTargetStatus templates (see
-    apps.tenants.services.copy_default_target_statuses_to_org) rather than
-    authored by one practice's user — those belong to every practice in the
-    org's schema, so they're included alongside this practice's own rows
-    rather than excluded by the join."""
-    return model.objects.filter(_same_practice_q(request.user, 'created_by__') | models.Q(created_by__isnull=True))
+
+    include_org_defaults=True additionally includes created_by=NULL rows —
+    ONLY correct for TargetStatus, where NULL means "org-level default
+    copied at org-creation time from the platform's DefaultTargetStatus
+    templates" (see apps.tenants.services.copy_default_target_statuses_to_org),
+    which belongs to every practice in the org's schema. Every other
+    settings model's NULL created_by rows are legacy data from before this
+    practice filter existed — ownership is simply unknown for those, NOT
+    "belongs to everyone" — so defaulting this to True broke practice
+    isolation across every settings tab, not just statuses. Leave it False
+    unless the model is TargetStatus."""
+    qs = model.objects.filter(_same_practice_q(request.user, 'created_by__'))
+    if include_org_defaults:
+        qs = model.objects.filter(_same_practice_q(request.user, 'created_by__') | models.Q(created_by__isnull=True))
+    return qs
 
 
 def _validate_treatment_area_and_tags(request, treatment_area: str | None, tags: list[str] | None) -> None:
@@ -628,7 +636,7 @@ def _refresh_target_sub_items_json(target: Target) -> None:
 
 
 def _validate_target_status(request, status: str) -> None:
-    if status and not _settings_qs(TargetStatus, request).filter(key=status).exists():
+    if status and not _settings_qs(TargetStatus, request, include_org_defaults=True).filter(key=status).exists():
         raise HttpError(400, f'Invalid status: {status}')
 
 
@@ -655,7 +663,7 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
     if target_data.get('status'):
         _validate_target_status(request, target_data['status'])
     else:
-        default_status = _settings_qs(TargetStatus, request).filter(is_default=True).first()
+        default_status = _settings_qs(TargetStatus, request, include_org_defaults=True).filter(is_default=True).first()
         target_data['status'] = default_status.key if default_status else 'waiting'
     _require_sub_items_if_needed(target_data['measurement_type'], target_data['sub_items'])
     target = Target.objects.create(
@@ -1883,7 +1891,7 @@ def delete_program_tag(request, pk: int):
 
 @router.get('/programs/settings/statuses', response=list[TargetStatusSchema])
 def list_target_statuses(request, include_inactive: bool = False):
-    qs = _settings_qs(TargetStatus, request)
+    qs = _settings_qs(TargetStatus, request, include_org_defaults=True)
     if not include_inactive:
         qs = qs.filter(is_active=True)
     return list(qs)
@@ -1892,13 +1900,13 @@ def list_target_statuses(request, include_inactive: bool = False):
 def create_target_status(request, data: TargetStatusRequest):
     if not request.user.is_superuser:
         raise HttpError(403, 'Only a superuser can add a status')
-    if _settings_qs(TargetStatus, request).filter(key=data.key).exists():
+    if _settings_qs(TargetStatus, request, include_org_defaults=True).filter(key=data.key).exists():
         raise HttpError(409, f'A status with key "{data.key}" already exists')
     payload = data.dict()
     if payload['is_default'] and not payload['is_active']:
         raise HttpError(400, 'An inactive status cannot be the default')
     if payload['is_default']:
-        _settings_qs(TargetStatus, request).filter(is_default=True).update(is_default=False)
+        _settings_qs(TargetStatus, request, include_org_defaults=True).filter(is_default=True).update(is_default=False)
     return 201, TargetStatus.objects.create(created_by=request.user, **payload)
 
 
@@ -1906,7 +1914,7 @@ def create_target_status(request, data: TargetStatusRequest):
 def update_target_status(request, pk: int, data: TargetStatusUpdateRequest):
     _require_settings_permission(request, 'settings_statuses_edit')
     try:
-        obj = _settings_qs(TargetStatus, request).get(id=pk)
+        obj = _settings_qs(TargetStatus, request, include_org_defaults=True).get(id=pk)
     except TargetStatus.DoesNotExist:
         raise HttpError(404, 'Not found')
     update = data.dict(exclude_none=True)
@@ -1915,7 +1923,7 @@ def update_target_status(request, pk: int, data: TargetStatusUpdateRequest):
     if is_default and not is_active:
         raise HttpError(400, 'An inactive status cannot be the default')
     if update.get('is_default'):
-        _settings_qs(TargetStatus, request).filter(is_default=True).exclude(id=pk).update(is_default=False)
+        _settings_qs(TargetStatus, request, include_org_defaults=True).filter(is_default=True).exclude(id=pk).update(is_default=False)
     for k, v in update.items():
         setattr(obj, k, v)
     obj.save()
@@ -1926,7 +1934,7 @@ def update_target_status(request, pk: int, data: TargetStatusUpdateRequest):
 def delete_target_status(request, pk: int):
     _require_settings_permission(request, 'settings_statuses_delete')
     try:
-        obj = _settings_qs(TargetStatus, request).get(id=pk)
+        obj = _settings_qs(TargetStatus, request, include_org_defaults=True).get(id=pk)
     except TargetStatus.DoesNotExist:
         raise HttpError(404, 'Not found')
     if obj.created_by_id is None and not request.user.is_superuser:
