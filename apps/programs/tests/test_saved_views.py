@@ -4,13 +4,14 @@ Programs table's "Save Preferred Views" feature.
 """
 from types import SimpleNamespace
 
-from django.test import TestCase
+from django.test import Client as DjangoClient, TestCase
 from django_tenants.utils import schema_context
 
+from apps.accounts.auth import create_access_token
 from apps.accounts.models import User
 from apps.programs.api import _visible_saved_views_qs
 from apps.programs.models import SavedTableView
-from apps.tenants.models import Organization
+from apps.tenants.models import Domain, Organization
 from shared.tenancy import tenant_context
 
 
@@ -73,3 +74,30 @@ class SavedViewVisibilityTests(TestCase):
             )
             self.assertEqual(_visible_saved_views_qs(_request_for(self.staff), 'client_programs').count(), 0)
             self.assertEqual(_visible_saved_views_qs(_request_for(self.staff), 'org_programs').count(), 1)
+
+    def test_create_saved_view_endpoint_accepts_post(self):
+        Domain.objects.create(domain='localhost', tenant=self.org, is_primary=True)
+        token = create_access_token(self.owner, self.org.pk)
+
+        response = DjangoClient().post(
+            '/api/v1/programs/saved-views',
+            data={
+                'table_key': 'client_programs',
+                'name': 'Current View',
+                'config': {'filters': {'status': 'active'}},
+                'visibility': SavedTableView.Visibility.PRIVATE,
+            },
+            content_type='application/json',
+            HTTP_AUTHORIZATION=f'Bearer {token}',
+            HTTP_HOST='localhost',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            self.assertTrue(
+                SavedTableView.objects.filter(
+                    table_key='client_programs',
+                    name='Current View',
+                    created_by=self.owner,
+                ).exists()
+            )

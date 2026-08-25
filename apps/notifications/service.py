@@ -23,18 +23,32 @@ def _create(recipient_id: int, event_type: str, title: str, body: str = '', data
         logger.exception('Failed to create notification (event=%s recipient=%s)', event_type, recipient_id)
 
 
+def _client_display_name(client_id: int | None) -> str:
+    """SessionRun.external_client_id is the local clients.Client row's own
+    pk — resolve it to a name for notification text instead of showing the
+    raw id, which means nothing to the person reading the notification."""
+    if not client_id:
+        return 'a client'
+    try:
+        from apps.clients.models import Client
+        return Client.objects.get(id=client_id).full_name
+    except Exception:
+        return 'a client'
+
+
 def notify_session_submitted(session_run):
     """Notify all admins/supervisors that a session needs review."""
     from apps.accounts.models import User
     reviewers = User.objects.filter(role__in=['admin', 'supervisor'])
     client_id = session_run.external_client_id
+    client_name = _client_display_name(client_id)
     staff_name = f'{session_run.staff.first_name} {session_run.staff.last_name}'.strip() if session_run.staff else 'Staff'
     for reviewer in reviewers:
         _create(
             recipient_id=reviewer.id,
             event_type='session_submitted',
             title='Session submitted for review',
-            body=f'{staff_name} submitted a session for client #{client_id}.',
+            body=f'{staff_name} submitted a session for {client_name}.',
             data={'session_id': session_run.id, 'client_id': client_id},
         )
 
@@ -43,11 +57,12 @@ def notify_session_approved(session_run):
     """Notify the staff member their session was approved."""
     if not session_run.staff_id:
         return
+    client_name = _client_display_name(session_run.external_client_id)
     _create(
         recipient_id=session_run.staff_id,
         event_type='session_approved',
         title='Session approved',
-        body=f'Your session for client #{session_run.external_client_id} has been approved.',
+        body=f'Your session for {client_name} has been approved.',
         data={'session_id': session_run.id, 'client_id': session_run.external_client_id},
     )
 
@@ -56,11 +71,12 @@ def notify_session_rejected(session_run):
     """Notify the staff member their session was rejected."""
     if not session_run.staff_id:
         return
+    client_name = _client_display_name(session_run.external_client_id)
     _create(
         recipient_id=session_run.staff_id,
         event_type='session_rejected',
         title='Session rejected',
-        body=f'Your session for client #{session_run.external_client_id} was rejected: {session_run.rejection_reason}',
+        body=f'Your session for {client_name} was rejected: {session_run.rejection_reason}',
         data={'session_id': session_run.id, 'client_id': session_run.external_client_id,
               'reason': session_run.rejection_reason},
     )
