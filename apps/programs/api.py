@@ -650,7 +650,7 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
         _validate_target_status(request, target_data['status'])
     else:
         default_status = _settings_qs(TargetStatus, request).filter(is_default=True).first()
-        target_data['status'] = default_status.key if default_status else Target.Status.WAITING
+        target_data['status'] = default_status.key if default_status else 'waiting'
     _require_sub_items_if_needed(target_data['measurement_type'], target_data['sub_items'])
     target = Target.objects.create(
         program=program,

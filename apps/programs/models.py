@@ -165,14 +165,17 @@ class TargetQuerySet(TenantQuerySet):
 
 
 class Target(TenantAwareModel):
-    class Status(models.TextChoices):
-        WAITING      = 'waiting',      'Waiting'
-        PROBE        = 'probe',        'Probe'
-        ACQUISITION  = 'acquisition',  'Acquisition'
-        MASTERED     = 'mastered',     'Mastered'
-        CLOSED       = 'closed',       'Closed'
-        HOLD         = 'hold',         'Hold'
-        DISCONTINUED = 'discontinued', 'Discontinued'
+    # Status is org-configurable via TargetStatus (see below) — no longer a fixed
+    # enum. Kept here as a comment for reference to the legacy built-in keys,
+    # which are duplicated independently in migration 0015_target_status_model.py.
+    # class Status(models.TextChoices):
+    #     WAITING      = 'waiting',      'Waiting'
+    #     PROBE        = 'probe',        'Probe'
+    #     ACQUISITION  = 'acquisition',  'Acquisition'
+    #     MASTERED     = 'mastered',     'Mastered'
+    #     CLOSED       = 'closed',       'Closed'
+    #     HOLD         = 'hold',         'Hold'
+    #     DISCONTINUED = 'discontinued', 'Discontinued'
 
     class MasteryMode(models.TextChoices):
         MANUAL    = 'manual',    'Manual'
@@ -260,8 +263,7 @@ class Target(TenantAwareModel):
     sd_text = models.TextField(blank=True, verbose_name='Discriminative Stimulus')
     teaching_instructions = models.TextField(blank=True)
     # No longer choice-constrained — status keys are org-configurable via TargetStatus.
-    # Status class above is kept as a reference to the legacy built-in keys (used by the seed migration).
-    status = models.CharField(max_length=20, default=Status.WAITING, db_index=True)
+    status = models.CharField(max_length=20, default='waiting', db_index=True)
     mastery_mode = models.CharField(max_length=10, choices=MasteryMode.choices, default=MasteryMode.MANUAL)
     display_order = models.PositiveIntegerField(default=0, db_index=True)
     is_visible_to_staff = models.BooleanField(default=True)
@@ -610,10 +612,6 @@ class TargetStatus(TenantAwareModel):
     class Meta:
         app_label = 'programs'
         ordering = ['display_order', 'label']
-        # 'key' used to be unique per-tenant only because each tenant had its
-        # own schema — now that all orgs share one table, it must be unique
-        # per-organization instead, or Org A and Org B could never both have
-        # a status keyed 'waiting'.
         unique_together = [('organization', 'key')]
 
     def __str__(self):
