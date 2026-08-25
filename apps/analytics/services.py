@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime
 from typing import TypedDict
 
 from apps.programs.models import Program, Target, ProgramModule, ProgramSubmodule, TargetSubItem
@@ -73,6 +73,37 @@ class ClientProgressReport(TypedDict):
     mastered_targets: int
     total_targets: int
     programs: list[ProgramReport]
+
+
+class MasteryEvent(TypedDict):
+    target_id: int
+    target_name: str
+    program_id: int
+    program_name: str
+    treatment_area: str
+    program_status: str
+    program_tags: list[str]
+    mastered_at: datetime
+
+
+class ProgramProgressStats(TypedDict):
+    program_id: int
+    program_name: str
+    treatment_area: str
+    status: str  # Program.status (active | inactive | archived) — not a target status
+    tags: list[str]
+    status_counts: dict[str, int]
+    avg_trials_to_mastery: float | None
+    avg_sessions_to_mastery: float | None
+
+
+class ClientProgressOverview(TypedDict):
+    client_id: int
+    # All-time — mastery is a point-in-time fact, not a report-window metric.
+    # date_from/date_to filtering (if wanted) happens client-side over
+    # mastery_events, same as the chart-type/group-by/cumulative controls.
+    mastery_events: list[MasteryEvent]
+    programs: list[ProgramProgressStats]
 
 
 # ---------------------------------------------------------------------------
@@ -730,4 +761,130 @@ def get_client_progress_report(
         'mastered_targets': mastered_targets,
         'total_targets': total_targets,
         'programs': program_reports,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Client progress overview — cumulative mastery timeline + per-program rollup,
+# consolidated across every program for one client (powers the Progress screen)
+# ---------------------------------------------------------------------------
+
+def get_client_progress_overview(client_id: int) -> ClientProgressOverview:
+    """
+    Two things, computed across ALL of a client's programs at once:
+    1. mastery_events — every target's transition into 'mastered', with its
+       program/treatment-area/tags/status attached, so the frontend can
+       bucket (day/week/month), filter (by tag/status), and toggle
+       cumulative vs. per-period entirely client-side without another round
+       trip — same source data powers both the "Accumulated" chart and the
+       "Recently Mastered" list.
+    2. programs — per-program rollup: current target counts by status, plus
+       avg trials/sessions to mastery (lifetime — mastery is a point-in-time
+       fact, not a report-window metric).
+
+    Mirrors get_client_progress_report's client_id resolution (accepts either
+    the local Client.id or the TPMS external id).
+    """
+    from apps.clients.models import Client
+    from apps.programs.models import TargetStatusChange
+
+    client = Client.objects.filter(id=client_id).first() or Client.objects.filter(external_id=str(client_id)).first()
+    dcm_client_id = client.id if client else client_id
+
+    programs = list(
+        Program.objects
+        .filter(external_client_id=dcm_client_id)
+        .prefetch_related('targets')
+        .order_by('display_order', 'name')
+    )
+
+    all_targets: list[Target] = []
+    for program in programs:
+        all_targets.extend(program.targets.all())
+    target_ids = [t.id for t in all_targets]
+
+    targets_by_program: dict[int, list[Target]] = defaultdict(list)
+    for t in all_targets:
+        targets_by_program[t.program_id].append(t)
+
+    # Earliest transition into 'mastered' per target — 'mastered' is the
+    # built-in seed status key (see Target model comment); same convention
+    # already used by get_client_progress_report's mastered_targets count.
+    mastery_ts: dict[int, 'date'] = {}
+    for change in (
+        TargetStatusChange.objects
+        .filter(target_id__in=target_ids, to_status='mastered')
+        .order_by('target_id', 'created_at')
+        .values('target_id', 'created_at')
+    ):
+        mastery_ts.setdefault(change['target_id'], change['created_at'])
+
+    # Trials/sessions up to each target's mastery timestamp, in one query.
+    trials_by_target: dict[int, list[dict]] = defaultdict(list)
+    for row in (
+        TrialEvent.objects
+        .filter(target_id__in=mastery_ts.keys())
+        .values('target_id', 'recorded_at', 'session_run_id')
+    ):
+        trials_by_target[row['target_id']].append(row)
+
+    trials_to_mastery: dict[int, int] = {}
+    sessions_to_mastery: dict[int, int] = {}
+    for tid, mastered_at in mastery_ts.items():
+        rows = [r for r in trials_by_target.get(tid, []) if r['recorded_at'] <= mastered_at]
+        trials_to_mastery[tid] = len(rows)
+        sessions_to_mastery[tid] = len({r['session_run_id'] for r in rows})
+
+    # ── Mastery events (raw — frontend buckets/filters/cumulates) ───────────
+    targets_by_id = {t.id: t for t in all_targets}
+    programs_by_id = {p.id: p for p in programs}
+    mastery_events: list[MasteryEvent] = []
+    for tid, mastered_at in mastery_ts.items():
+        target = targets_by_id[tid]
+        program = programs_by_id[target.program_id]
+        mastery_events.append({
+            'target_id': tid,
+            'target_name': target.name,
+            'program_id': program.id,
+            'program_name': program.name,
+            'treatment_area': program.treatment_area,
+            'program_status': program.status,
+            'program_tags': program.tags or [],
+            'mastered_at': mastered_at,
+        })
+    mastery_events.sort(key=lambda e: e['mastered_at'])
+
+    # ── Per-program rollup ─────────────────────────────────────────────────
+    program_stats: list[ProgramProgressStats] = []
+    for program in programs:
+        targets = targets_by_program.get(program.id, [])
+        status_counts: dict[str, int] = defaultdict(int)
+        for t in targets:
+            status_counts[t.status] += 1
+
+        mastered_ids = [t.id for t in targets if t.id in trials_to_mastery]
+        avg_trials = (
+            round(sum(trials_to_mastery[tid] for tid in mastered_ids) / len(mastered_ids), 1)
+            if mastered_ids else None
+        )
+        avg_sessions = (
+            round(sum(sessions_to_mastery[tid] for tid in mastered_ids) / len(mastered_ids), 1)
+            if mastered_ids else None
+        )
+
+        program_stats.append({
+            'program_id': program.id,
+            'program_name': program.name,
+            'treatment_area': program.treatment_area,
+            'status': program.status,
+            'tags': program.tags or [],
+            'status_counts': dict(status_counts),
+            'avg_trials_to_mastery': avg_trials,
+            'avg_sessions_to_mastery': avg_sessions,
+        })
+
+    return {
+        'client_id': client_id,
+        'mastery_events': mastery_events,
+        'programs': program_stats,
     }

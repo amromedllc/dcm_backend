@@ -95,3 +95,34 @@ class GraphAnnotationUpdateRequest(Schema):
     color: str | None = None
     style: str | None = None
     notes: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Client-level annotations (Progress screen mastery chart)
+# ---------------------------------------------------------------------------
+
+class ClientAnnotationSchema(Schema):
+    id: int
+    external_client_id: int
+    date: Date
+    label: str
+    color: str
+    style: str
+    notes: str
+    created_at: datetime
+
+
+class ClientAnnotationCreateRequest(Schema):
+    date: Date
+    label: str
+    color: str = '#666666'
+    style: str = 'solid'
+    notes: str = ''
+
+
+class ClientAnnotationUpdateRequest(Schema):
+    date: Date | None = None
+    label: str | None = None
+    color: str | None = None
+    style: str | None = None
+    notes: str | None = None

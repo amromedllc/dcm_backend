@@ -54,3 +54,25 @@ class GraphAnnotation(TenantAwareModel):
 
     def __str__(self) -> str:
         return f'{self.annotation_type} — {self.label} ({self.date})'
+
+
+class ClientAnnotation(TenantAwareModel):
+    """
+    Supervisor-authored date markers on the client-level Progress screen's
+    mastery chart — client-scoped, unlike GraphAnnotation which is anchored
+    to one program. Deliberately minimal (a labeled vertical line) since the
+    chart aggregates across every program at once.
+    """
+    external_client_id = models.PositiveIntegerField(db_index=True)
+    date = models.DateField(db_index=True)
+    label = models.CharField(max_length=200)
+    color = models.CharField(max_length=7, default='#666666')  # hex
+    style = models.CharField(max_length=10, choices=GraphAnnotation.LineStyle.choices, default=GraphAnnotation.LineStyle.SOLID)
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        app_label = 'analytics'
+        ordering = ['date']
+
+    def __str__(self) -> str:
+        return f'{self.label} ({self.date})'

@@ -137,8 +137,14 @@ def _settings_qs(model, request):
     tenants.OrganizationTpmsAdminId) could see and edit the other practice's
     configuration. Reuses _same_practice_q exactly as APIKey/User already do,
     reached through created_by since these settings models don't carry
-    external_admin_id/organization directly on the row."""
-    return model.objects.filter(_same_practice_q(request.user, 'created_by__'))
+    external_admin_id/organization directly on the row.
+    created_by is null for org-level defaults copied at org-creation time
+    from the platform's DefaultTargetStatus templates (see
+    apps.tenants.services.copy_default_target_statuses_to_org) rather than
+    authored by one practice's user — those belong to every practice in the
+    org's schema, so they're included alongside this practice's own rows
+    rather than excluded by the join."""
+    return model.objects.filter(_same_practice_q(request.user, 'created_by__') | models.Q(created_by__isnull=True))
 
 
 def _validate_treatment_area_and_tags(request, treatment_area: str | None, tags: list[str] | None) -> None:
@@ -1884,7 +1890,8 @@ def list_target_statuses(request, include_inactive: bool = False):
 
 @router.post('/programs/settings/statuses', response={201: TargetStatusSchema})
 def create_target_status(request, data: TargetStatusRequest):
-    _require_settings_permission(request, 'settings_statuses_create')
+    if not request.user.is_superuser:
+        raise HttpError(403, 'Only a superuser can add a status')
     if _settings_qs(TargetStatus, request).filter(key=data.key).exists():
         raise HttpError(409, f'A status with key "{data.key}" already exists')
     payload = data.dict()
@@ -1919,9 +1926,12 @@ def update_target_status(request, pk: int, data: TargetStatusUpdateRequest):
 def delete_target_status(request, pk: int):
     _require_settings_permission(request, 'settings_statuses_delete')
     try:
-        _settings_qs(TargetStatus, request).get(id=pk).delete()
+        obj = _settings_qs(TargetStatus, request).get(id=pk)
     except TargetStatus.DoesNotExist:
         raise HttpError(404, 'Not found')
+    if obj.created_by_id is None and not request.user.is_superuser:
+        raise HttpError(403, 'Only a superuser can delete a built-in default status')
+    obj.delete()
     return 204, None
 
 
