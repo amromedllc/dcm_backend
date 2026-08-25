@@ -1,6 +1,7 @@
 import os
 
 from django.db import models
+from django_tenants.utils import get_public_schema_name, schema_context
 from ninja import Router, File, Form
 from ninja.errors import HttpError
 from ninja.files import UploadedFile
@@ -11,7 +12,7 @@ from PIL import Image
 from apps.accounts.api import _same_practice_q
 from apps.accounts.auth import jwt_auth
 from apps.accounts.permissions import require_permission
-from apps.central_library.models import CentralProgram, CentralProgramFolder
+from apps.central_library.models import CentralProgram, CentralProgramFolder, KnowledgeBaseModule
 from shared.uploads import validate_image_upload
 from .models import (
     Program, ProgramMaterial, Target, PromptingTemplate,
@@ -43,6 +44,7 @@ from .schemas import (
     TargetStatusSchema, TargetStatusRequest, TargetStatusUpdateRequest,
     ProgramModuleSchema, ProgramModuleRequest, ProgramSubmoduleSchema, ProgramSubmoduleRequest,
     SavedTableViewSchema, SavedTableViewCreateRequest,
+    KnowledgeBaseModuleSchema,
 )
 
 router = Router(auth=jwt_auth)
@@ -227,6 +229,43 @@ def delete_saved_view(request, view_id: int):
         raise HttpError(403, 'Only the creator or a supervisor/admin can delete this saved view')
     view.delete()
     return 204, None
+
+
+def _serialize_knowledge_base_module(module: KnowledgeBaseModule) -> dict:
+    return {
+        'id': module.id,
+        'slug': module.slug,
+        'title': module.title,
+        'path': module.path,
+        'icon': module.icon,
+        'overview': module.overview,
+        'audience': module.audience,
+        'display_order': module.display_order,
+        'updated_at': module.updated_at,
+        'topics': [
+            {
+                'id': topic.id,
+                'title': topic.title,
+                'summary': topic.summary,
+                'items': topic.items,
+                'display_order': topic.display_order,
+            }
+            for topic in module.topics.all()
+            if topic.is_active
+        ],
+    }
+
+
+@router.get('/knowledge-base/modules', response=list[KnowledgeBaseModuleSchema])
+def list_knowledge_base_modules(request):
+    with schema_context(get_public_schema_name()):
+        modules = (
+            KnowledgeBaseModule.objects
+            .filter(is_active=True)
+            .prefetch_related('topics')
+            .order_by('display_order', 'title')
+        )
+        return [_serialize_knowledge_base_module(module) for module in modules]
 
 
 PROGRAM_MATERIAL_IMAGE_TYPES = {'image/jpeg', 'image/png'}
