@@ -59,3 +59,21 @@ class OrganizationTpmsAdminId(models.Model):
 
     def __str__(self):
         return f'{self.admin_id} → {self.organization.name}'
+
+class DefaultTargetStatus(models.Model):
+    key = models.SlugField(max_length=20, unique=True)
+    label = models.CharField(max_length=50)
+    color = models.CharField(max_length=7, default='#6366f1')  # hex
+    icon = models.CharField(max_length=30, default='circle')
+    is_staff_visible = models.BooleanField(default=False, help_text='Shown to staff in the session recording view')
+    is_default = models.BooleanField(default=False, help_text='Starting status for newly created targets')
+    display_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = 'tenants'
+        ordering = ['display_order', 'label']
+
+    def __str__(self):
+        return self.label

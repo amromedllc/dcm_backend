@@ -63,6 +63,10 @@ class Command(BaseCommand):
             Domain.objects.create(tenant=org, domain=domain, is_primary=True)
             self.stdout.write(self.style.SUCCESS(f'  Schema "{schema}" created'))
             self.stdout.write(self.style.SUCCESS(f'  Domain "{domain}" registered'))
+            from apps.tenants.services import copy_default_target_statuses_to_org
+            with schema_context(schema):
+                copy_default_target_statuses_to_org(org.id)
+            self.stdout.write(self.style.SUCCESS('  Default target statuses copied from platform templates'))
 
             for admin_id in tpms_admin_ids:
                 OrganizationTpmsAdminId.objects.create(organization=org, admin_id=admin_id)

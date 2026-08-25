@@ -613,6 +613,27 @@ class ImportCentralFolderResult(Schema):
     skipped_count: int
 
 
+class KnowledgeBaseTopicSchema(Schema):
+    id: int
+    title: str
+    summary: str
+    items: list[str]
+    display_order: int
+
+
+class KnowledgeBaseModuleSchema(Schema):
+    id: int
+    slug: str
+    title: str
+    path: str
+    icon: str
+    overview: str
+    audience: list[str]
+    display_order: int
+    updated_at: datetime
+    topics: list[KnowledgeBaseTopicSchema]
+
+
 # ---------------------------------------------------------------------------
 # Treatment Areas
 # ---------------------------------------------------------------------------

@@ -5,13 +5,17 @@ from ninja.errors import HttpError
 
 from apps.accounts.auth import jwt_auth
 from apps.programs.models import Program, Target, ProgramModule
-from .models import GraphAnnotation
+from .models import GraphAnnotation, ClientAnnotation
 from .schemas import (
     TrialDataPointSchema, BehaviorDataPointSchema,
     ProgramSummarySchema, ModuleSummarySchema, TargetSummarySchema,
     GraphAnnotationSchema, GraphAnnotationCreateRequest, GraphAnnotationUpdateRequest,
+    ClientAnnotationSchema, ClientAnnotationCreateRequest, ClientAnnotationUpdateRequest,
 )
-from .services import get_trial_data_by_day, get_behavior_data_by_day, get_program_summary, get_module_summary, get_client_progress_report
+from .services import (
+    get_trial_data_by_day, get_behavior_data_by_day, get_program_summary, get_module_summary,
+    get_client_progress_report, get_client_progress_overview,
+)
 
 router = Router(auth=jwt_auth)
 
@@ -138,6 +142,68 @@ def client_progress_report(
     require_permission(request, 'client_report')
     frm, to = _resolve_dates(date_from, date_to)
     return get_client_progress_report(client_id, frm, to)
+
+
+# ---------------------------------------------------------------------------
+# Client progress overview — cumulative mastery timeline + per-program rollup
+# across every program at once (powers the top-level Progress screen)
+# ---------------------------------------------------------------------------
+
+@router.get('/analytics/clients/{client_id}/progress-overview')
+def client_progress_overview(request, client_id: int):
+    """
+    Consolidated client progress: raw mastery events (target/program/
+    treatment-area/tags/status + timestamp) plus a per-program rollup
+    (status counts, avg trials/sessions to mastery), across every program
+    for the client in a single request. All-time — the frontend buckets,
+    filters, and toggles cumulative vs. per-period client-side.
+    """
+    from apps.accounts.permissions import require_permission
+    require_permission(request, 'client_progress')
+    return get_client_progress_overview(client_id)
+
+
+# ---------------------------------------------------------------------------
+# Client-level annotations (Progress screen mastery chart)
+# ---------------------------------------------------------------------------
+
+@router.get('/analytics/clients/{client_id}/annotations', response=list[ClientAnnotationSchema])
+def list_client_annotations(request, client_id: int):
+    return list(ClientAnnotation.objects.filter(external_client_id=client_id))
+
+
+@router.post('/analytics/clients/{client_id}/annotations', response={201: ClientAnnotationSchema})
+def create_client_annotation(request, client_id: int, data: ClientAnnotationCreateRequest):
+    _require_supervisor(request)
+    annotation = ClientAnnotation.objects.create(
+        external_client_id=client_id,
+        created_by=request.user,
+        **data.dict(),
+    )
+    return 201, annotation
+
+
+@router.patch('/analytics/client-annotations/{annotation_id}', response=ClientAnnotationSchema)
+def update_client_annotation(request, annotation_id: int, data: ClientAnnotationUpdateRequest):
+    _require_supervisor(request)
+    try:
+        annotation = ClientAnnotation.objects.get(id=annotation_id)
+    except ClientAnnotation.DoesNotExist:
+        raise HttpError(404, 'Annotation not found')
+    for field, value in data.dict(exclude_none=True).items():
+        setattr(annotation, field, value)
+    annotation.save()
+    return annotation
+
+
+@router.delete('/analytics/client-annotations/{annotation_id}', response={204: None})
+def delete_client_annotation(request, annotation_id: int):
+    _require_supervisor(request)
+    try:
+        ClientAnnotation.objects.get(id=annotation_id).delete()
+    except ClientAnnotation.DoesNotExist:
+        raise HttpError(404, 'Annotation not found')
+    return 204, None
 
 
 # ---------------------------------------------------------------------------

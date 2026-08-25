@@ -4,6 +4,7 @@ Programs table's "Save Preferred Views" feature.
 """
 from types import SimpleNamespace
 
+from django.db import connection
 from django.test import Client as DjangoClient, TestCase
 from django_tenants.utils import schema_context
 
@@ -79,18 +80,21 @@ class SavedViewVisibilityTests(TestCase):
         Domain.objects.create(domain='localhost', tenant=self.org, is_primary=True)
         token = create_access_token(self.owner, self.org.pk)
 
-        response = DjangoClient().post(
-            '/api/v1/programs/saved-views',
-            data={
-                'table_key': 'client_programs',
-                'name': 'Current View',
-                'config': {'filters': {'status': 'active'}},
-                'visibility': SavedTableView.Visibility.PRIVATE,
-            },
-            content_type='application/json',
-            HTTP_AUTHORIZATION=f'Bearer {token}',
-            HTTP_HOST='localhost',
-        )
+        try:
+            response = DjangoClient().post(
+                '/api/v1/programs/saved-views',
+                data={
+                    'table_key': 'client_programs',
+                    'name': 'Current View',
+                    'config': {'filters': {'status': 'active'}},
+                    'visibility': SavedTableView.Visibility.PRIVATE,
+                },
+                content_type='application/json',
+                HTTP_AUTHORIZATION=f'Bearer {token}',
+                HTTP_HOST='localhost',
+            )
+        finally:
+            connection.set_schema_to_public()
 
         self.assertEqual(response.status_code, 201)
         with schema_context(self.org.schema_name), tenant_context(self.org.pk):

@@ -129,3 +129,67 @@ class CentralTarget(models.Model):
 
     def __str__(self) -> str:
         return self.name
+
+
+class KnowledgeBaseModule(models.Model):
+    """Platform-managed product help shown on /knowledge-base.
+
+    This lives in the shared Central Library app so sales, marketing, and
+    product admins can update copy once for every organization.
+    """
+
+    class Icon(models.TextChoices):
+        BAR_CHART = 'bar_chart', 'Bar chart'
+        BOOK = 'book', 'Book'
+        BUILDING = 'building', 'Building'
+        CHECKLIST = 'checklist', 'Checklist'
+        CLIPBOARD = 'clipboard', 'Clipboard'
+        DOWNLOAD = 'download', 'Download'
+        FILE_TEXT = 'file_text', 'File text'
+        GLOBE = 'globe', 'Globe'
+        LIBRARY = 'library', 'Library'
+        SETTINGS = 'settings', 'Settings'
+        SHIELD = 'shield', 'Shield'
+        USERS = 'users', 'Users'
+
+    slug = models.SlugField(max_length=80, unique=True)
+    title = models.CharField(max_length=160)
+    path = models.CharField(max_length=240, blank=True)
+    icon = models.CharField(max_length=30, choices=Icon.choices, default=Icon.BOOK)
+    overview = models.TextField()
+    audience = models.JSONField(default=list, blank=True)
+    display_order = models.PositiveIntegerField(default=0, db_index=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='+',
+    )
+
+    class Meta:
+        app_label = 'central_library'
+        ordering = ['display_order', 'title']
+
+    def __str__(self) -> str:
+        return self.title
+
+
+class KnowledgeBaseTopic(models.Model):
+    module = models.ForeignKey(KnowledgeBaseModule, on_delete=models.CASCADE, related_name='topics')
+    title = models.CharField(max_length=180)
+    summary = models.TextField(blank=True)
+    items = models.JSONField(default=list, blank=True)
+    display_order = models.PositiveIntegerField(default=0, db_index=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = 'central_library'
+        ordering = ['display_order', 'title']
+
+    def __str__(self) -> str:
+        return f'{self.module.title}: {self.title}'

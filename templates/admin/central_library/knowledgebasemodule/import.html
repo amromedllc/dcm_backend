@@ -1,0 +1,71 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+  <style>
+    .kb-import-actions {
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin: 24px 0;
+    }
+
+    .kb-import-primary,
+    .kb-import-secondary {
+      border: 0;
+      border-radius: 8px;
+      cursor: pointer;
+      display: inline-flex;
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 1;
+      padding: 12px 16px;
+      text-decoration: none;
+    }
+
+    .kb-import-primary {
+      background: #2563eb;
+      color: #fff;
+    }
+
+    .kb-import-secondary {
+      background: #334155;
+      color: #fff;
+    }
+
+    .kb-import-cancel {
+      color: #cbd5e1;
+      font-weight: 600;
+      text-decoration: none;
+    }
+  </style>
+
+  <div id="content-main">
+    <form method="post" enctype="multipart/form-data" novalidate>
+      {% csrf_token %}
+      <fieldset class="module aligned">
+        <div class="form-row">
+          {{ form.file.errors }}
+          <div>
+            {{ form.file.label_tag }}
+            {{ form.file }}
+            <div class="help">{{ form.file.help_text }}</div>
+          </div>
+        </div>
+      </fieldset>
+
+      <div class="kb-import-actions">
+        <button type="submit" class="kb-import-primary">Import file</button>
+        <a href="{{ sample_url }}" class="kb-import-secondary">Download sample CSV</a>
+        <a href="{% url 'admin:central_library_knowledgebasemodule_changelist' %}" class="kb-import-cancel">Cancel</a>
+      </div>
+    </form>
+
+    <div class="module" style="margin-top: 20px; padding: 16px;">
+      <h2>Upload format</h2>
+      <p>CSV and Excel .xlsx files are supported. Use one row per topic. Repeat module columns for each topic in the same module.</p>
+      <p>For lists like audience and topic_items, separate values with a pipe character, for example: Admin|Supervisor|Staff.</p>
+      <p>Word files are not imported directly because they do not preserve the module/topic structure reliably. Convert Word content into the sample spreadsheet or paste it into the admin fields.</p>
+    </div>
+  </div>
+{% endblock %}

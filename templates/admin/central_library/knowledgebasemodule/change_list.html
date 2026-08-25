@@ -1,0 +1,11 @@
+{% extends "admin/change_list.html" %}
+
+{% block object-tools-items %}
+  <li>
+    <a href="{{ sample_url }}" class="button">Download sample CSV</a>
+  </li>
+  <li>
+    <a href="{{ import_url }}" class="addlink">Import knowledge base</a>
+  </li>
+  {{ block.super }}
+{% endblock %}

@@ -1,6 +1,7 @@
 import os
 
 from django.db import models
+from django_tenants.utils import get_public_schema_name, schema_context
 from ninja import Router, File, Form
 from ninja.errors import HttpError
 from ninja.files import UploadedFile
@@ -11,7 +12,7 @@ from PIL import Image
 from apps.accounts.api import _same_practice_q
 from apps.accounts.auth import jwt_auth
 from apps.accounts.permissions import require_permission
-from apps.central_library.models import CentralProgram, CentralProgramFolder
+from apps.central_library.models import CentralProgram, CentralProgramFolder, KnowledgeBaseModule
 from shared.uploads import validate_image_upload
 from .models import (
     Program, ProgramMaterial, Target, PromptingTemplate,
@@ -43,6 +44,7 @@ from .schemas import (
     TargetStatusSchema, TargetStatusRequest, TargetStatusUpdateRequest,
     ProgramModuleSchema, ProgramModuleRequest, ProgramSubmoduleSchema, ProgramSubmoduleRequest,
     SavedTableViewSchema, SavedTableViewCreateRequest,
+    KnowledgeBaseModuleSchema,
 )
 
 router = Router(auth=jwt_auth)
@@ -135,8 +137,14 @@ def _settings_qs(model, request):
     tenants.OrganizationTpmsAdminId) could see and edit the other practice's
     configuration. Reuses _same_practice_q exactly as APIKey/User already do,
     reached through created_by since these settings models don't carry
-    external_admin_id/organization directly on the row."""
-    return model.objects.filter(_same_practice_q(request.user, 'created_by__'))
+    external_admin_id/organization directly on the row.
+    created_by is null for org-level defaults copied at org-creation time
+    from the platform's DefaultTargetStatus templates (see
+    apps.tenants.services.copy_default_target_statuses_to_org) rather than
+    authored by one practice's user — those belong to every practice in the
+    org's schema, so they're included alongside this practice's own rows
+    rather than excluded by the join."""
+    return model.objects.filter(_same_practice_q(request.user, 'created_by__') | models.Q(created_by__isnull=True))
 
 
 def _validate_treatment_area_and_tags(request, treatment_area: str | None, tags: list[str] | None) -> None:
@@ -227,6 +235,43 @@ def delete_saved_view(request, view_id: int):
         raise HttpError(403, 'Only the creator or a supervisor/admin can delete this saved view')
     view.delete()
     return 204, None
+
+
+def _serialize_knowledge_base_module(module: KnowledgeBaseModule) -> dict:
+    return {
+        'id': module.id,
+        'slug': module.slug,
+        'title': module.title,
+        'path': module.path,
+        'icon': module.icon,
+        'overview': module.overview,
+        'audience': module.audience,
+        'display_order': module.display_order,
+        'updated_at': module.updated_at,
+        'topics': [
+            {
+                'id': topic.id,
+                'title': topic.title,
+                'summary': topic.summary,
+                'items': topic.items,
+                'display_order': topic.display_order,
+            }
+            for topic in module.topics.all()
+            if topic.is_active
+        ],
+    }
+
+
+@router.get('/knowledge-base/modules', response=list[KnowledgeBaseModuleSchema])
+def list_knowledge_base_modules(request):
+    with schema_context(get_public_schema_name()):
+        modules = (
+            KnowledgeBaseModule.objects
+            .filter(is_active=True)
+            .prefetch_related('topics')
+            .order_by('display_order', 'title')
+        )
+        return [_serialize_knowledge_base_module(module) for module in modules]
 
 
 PROGRAM_MATERIAL_IMAGE_TYPES = {'image/jpeg', 'image/png'}
@@ -611,7 +656,7 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
         _validate_target_status(request, target_data['status'])
     else:
         default_status = _settings_qs(TargetStatus, request).filter(is_default=True).first()
-        target_data['status'] = default_status.key if default_status else Target.Status.WAITING
+        target_data['status'] = default_status.key if default_status else 'waiting'
     _require_sub_items_if_needed(target_data['measurement_type'], target_data['sub_items'])
     target = Target.objects.create(
         program=program,
@@ -1845,7 +1890,8 @@ def list_target_statuses(request, include_inactive: bool = False):
 
 @router.post('/programs/settings/statuses', response={201: TargetStatusSchema})
 def create_target_status(request, data: TargetStatusRequest):
-    _require_settings_permission(request, 'settings_statuses_create')
+    if not request.user.is_superuser:
+        raise HttpError(403, 'Only a superuser can add a status')
     if _settings_qs(TargetStatus, request).filter(key=data.key).exists():
         raise HttpError(409, f'A status with key "{data.key}" already exists')
     payload = data.dict()
@@ -1880,9 +1926,12 @@ def update_target_status(request, pk: int, data: TargetStatusUpdateRequest):
 def delete_target_status(request, pk: int):
     _require_settings_permission(request, 'settings_statuses_delete')
     try:
-        _settings_qs(TargetStatus, request).get(id=pk).delete()
+        obj = _settings_qs(TargetStatus, request).get(id=pk)
     except TargetStatus.DoesNotExist:
         raise HttpError(404, 'Not found')
+    if obj.created_by_id is None and not request.user.is_superuser:
+        raise HttpError(403, 'Only a superuser can delete a built-in default status')
+    obj.delete()
     return 204, None
 
 
