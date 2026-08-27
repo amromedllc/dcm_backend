@@ -1,0 +1,202 @@
+{% extends "admin/base_site.html" %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Home</a>
+    &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+    &rsaquo; <a href="{% url 'admin:central_library_knowledgebasemodule_changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a>
+    &rsaquo; <a href="{% url 'admin:central_library_knowledgebasemodule_import_docx' %}">Import from Word</a>
+    &rsaquo; Map
+  </div>
+{% endblock %}
+
+{% block content %}
+  <style>
+    .kb-grid { display: grid; gap: 20px; grid-template-columns: minmax(0, 1fr) 360px; align-items: start; }
+    @media (max-width: 1100px) { .kb-grid { grid-template-columns: 1fr; } }
+
+    .kb-blocks { display: flex; flex-direction: column; gap: 10px; max-height: 70vh; overflow: auto; padding-right: 6px; }
+    .kb-block { border: 1px solid var(--hairline-color); border-radius: 8px; padding: 10px 12px; }
+    .kb-block.assigned { border-color: #2563eb; box-shadow: inset 3px 0 0 #2563eb; }
+    .kb-block-head { align-items: center; display: flex; gap: 8px; justify-content: space-between; margin-bottom: 6px; }
+    .kb-badge { background: var(--darkened-bg, #f0f0f0); border-radius: 4px; color: var(--body-quiet-color);
+      font-size: 11px; font-weight: 700; letter-spacing: .03em; padding: 2px 6px; text-transform: uppercase; }
+    .kb-block-body { font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+    .kb-block-body table { border-collapse: collapse; }
+    .kb-block-body td { border: 1px solid var(--hairline-color); padding: 3px 6px; }
+    .kb-block select { margin-top: 8px; max-width: 100%; }
+
+    .kb-panel { border: 1px solid var(--hairline-color); border-radius: 8px; padding: 16px; position: sticky; top: 12px; }
+    .kb-panel h2 { margin-top: 0; }
+    .kb-field { margin-bottom: 12px; }
+    .kb-field label { display: block; font-weight: 600; margin-bottom: 4px; }
+    .kb-field input[type=text], .kb-field input[type=number], .kb-field select { width: 100%; }
+    .kb-inline { align-items: center; display: flex; gap: 8px; }
+    .kb-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+    .kb-btn-primary { background: #16a34a; border: 0; border-radius: 8px; color: #fff; cursor: pointer;
+      font-size: 14px; font-weight: 700; padding: 11px 16px; }
+    .kb-btn-secondary { background: #334155; border: 0; border-radius: 8px; color: #fff; cursor: pointer;
+      font-size: 14px; font-weight: 600; padding: 11px 16px; }
+    .kb-preview { border: 1px solid var(--hairline-color); border-radius: 8px; margin-top: 20px; padding: 16px; }
+    .kb-preview .kb-tag { background: #dbeafe; border-radius: 4px; color: #1e3a8a; font-size: 12px; font-weight: 700; padding: 2px 8px; }
+    .kb-preview pre { background: var(--darkened-bg, #f6f6f6); border-radius: 6px; overflow: auto; padding: 8px; white-space: pre-wrap; }
+    .kb-error { background: #fee2e2; border: 1px solid #fca5a5; border-radius: 8px; color: #991b1b; margin-top: 16px; padding: 12px 14px; }
+    .kb-note { background: #dcfce7; border: 1px solid #86efac; border-radius: 8px; color: #166534; margin-bottom: 16px; padding: 12px 14px; }
+    .kb-images-warn { color: #92400e; font-size: 12px; margin-top: 6px; }
+  </style>
+
+  {% if already_applied %}
+    <div class="kb-note">
+      This upload was already applied
+      {% if kb_import.target_module_id %}
+        &mdash; <a href="{% url 'admin:central_library_knowledgebasemodule_change' kb_import.target_module_id %}">open the module</a>.
+      {% endif %}
+      The mapping below is read-only.
+    </div>
+  {% endif %}
+
+  <div id="content-main">
+    <form method="post" novalidate>
+      {% csrf_token %}
+      <div class="kb-grid">
+
+        <div>
+          <p class="help">
+            {{ block_rows|length }} block(s) from <strong>{{ kb_import.original_filename }}</strong>.
+            Assign each to a field on the right.
+            {% if kb_import.image_count %}
+              <span class="kb-images-warn">{{ kb_import.image_count }} embedded image(s) were ignored.</span>
+            {% endif %}
+          </p>
+          <div class="kb-blocks">
+            {% for row in block_rows %}
+              <div class="kb-block {% if row.selected %}assigned{% endif %}">
+                <div class="kb-block-head">
+                  <span class="kb-badge">{{ row.badge }}</span>
+                  <code>{{ row.block.id }}</code>
+                </div>
+                <div class="kb-block-body">{{ row.html }}</div>
+                <select name="assign_{{ row.block.id }}" {% if already_applied %}disabled{% endif %}>
+                  <option value="">&mdash; Unassigned &mdash;</option>
+                  {% for group in option_groups %}
+                    <optgroup label="{{ group.label }}">
+                      {% for value, label in group.options %}
+                        <option value="{{ value }}" {% if value == row.selected %}selected{% endif %}>{{ label }}</option>
+                      {% endfor %}
+                    </optgroup>
+                  {% endfor %}
+                </select>
+              </div>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="kb-panel">
+          <h2>Module settings</h2>
+
+          <div class="kb-field">
+            <label for="id_slug">Slug</label>
+            <input type="text" id="id_slug" name="slug" value="{{ settings.slug }}" placeholder="derived from title">
+          </div>
+
+          <div class="kb-field">
+            <label for="id_icon">Icon</label>
+            <select id="id_icon" name="icon" {% if already_applied %}disabled{% endif %}>
+              {% for value, label in icon_choices %}
+                <option value="{{ value }}" {% if value == settings.icon %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+
+          <div class="kb-field">
+            <label for="id_display_order">Display order</label>
+            <input type="number" id="id_display_order" name="display_order" value="{{ settings.display_order }}">
+          </div>
+
+          <div class="kb-field kb-inline">
+            <input type="checkbox" id="id_is_active" name="is_active" {% if settings.is_active %}checked{% endif %}>
+            <label for="id_is_active" style="margin:0;">Active</label>
+          </div>
+
+          <div class="kb-field kb-inline">
+            <input type="checkbox" id="id_replace_topics" name="replace_topics" {% if settings.replace_topics %}checked{% endif %}>
+            <label for="id_replace_topics" style="margin:0;">Replace existing topics on apply</label>
+          </div>
+
+          <hr>
+
+          <div class="kb-field">
+            <label for="id_topic_count">Topic slots</label>
+            <div class="kb-inline">
+              <select id="id_topic_count" name="topic_count" {% if already_applied %}disabled{% endif %}>
+                {% for n in topic_slot_options %}
+                  <option value="{{ n }}" {% if n == settings.topic_count %}selected{% endif %}>{{ n }}</option>
+                {% endfor %}
+              </select>
+              {% if not already_applied %}
+                <button type="submit" name="action" value="rebuild" class="kb-btn-secondary">Update</button>
+              {% endif %}
+            </div>
+          </div>
+
+          {% if not already_applied %}
+            <div class="kb-actions">
+              <button type="submit" name="action" value="preview" class="kb-btn-secondary">Preview</button>
+              <button type="submit" name="action" value="apply" class="kb-btn-primary">Apply</button>
+            </div>
+          {% endif %}
+        </div>
+      </div>
+    </form>
+
+    {% if preview_error %}
+      <div class="kb-error"><strong>Can't apply yet:</strong> {{ preview_error }}</div>
+    {% endif %}
+
+    {% if preview %}
+      <div class="kb-preview">
+        <h2>
+          Preview
+          <span class="kb-tag">{% if preview.will_update %}Updates existing module{% else %}Creates new module{% endif %}</span>
+        </h2>
+        <p><strong>Slug:</strong> <code>{{ preview.slug }}</code></p>
+        <p><strong>Title:</strong> {{ preview.module.title }}</p>
+        {% if preview.module.path %}<p><strong>Path:</strong> {{ preview.module.path }}</p>{% endif %}
+        <p><strong>Icon:</strong> {{ preview.module.icon }} &nbsp; <strong>Order:</strong> {{ preview.module.display_order }}
+           &nbsp; <strong>Active:</strong> {{ preview.module.is_active }}</p>
+        {% if preview.module.audience %}<p><strong>Audience:</strong> {{ preview.module.audience|join:", " }}</p>{% endif %}
+        {% if preview.module.overview %}
+          <p><strong>Overview (Markdown):</strong></p>
+          <pre>{{ preview.module.overview }}</pre>
+        {% endif %}
+
+        <h3>Topics ({{ preview.topics|length }})</h3>
+        {% for topic in preview.topics %}
+          <div style="border-top:1px solid var(--hairline-color); margin-top:10px; padding-top:10px;">
+            <p><strong>{{ forloop.counter }}. {{ topic.title }}</strong></p>
+            {% if topic.summary %}<pre>{{ topic.summary }}</pre>{% endif %}
+            {% if topic.items %}
+              <ul>{% for item in topic.items %}<li>{{ item }}</li>{% endfor %}</ul>
+            {% endif %}
+          </div>
+        {% endfor %}
+
+        {% if not already_applied %}
+          <form method="post" novalidate style="margin-top:16px;">
+            {% csrf_token %}
+            {% for row in block_rows %}
+              <input type="hidden" name="assign_{{ row.block.id }}" value="{{ row.selected }}">
+            {% endfor %}
+            <input type="hidden" name="slug" value="{{ settings.slug }}">
+            <input type="hidden" name="icon" value="{{ settings.icon }}">
+            <input type="hidden" name="display_order" value="{{ settings.display_order }}">
+            {% if settings.is_active %}<input type="hidden" name="is_active" value="on">{% endif %}
+            {% if settings.replace_topics %}<input type="hidden" name="replace_topics" value="on">{% endif %}
+            <input type="hidden" name="topic_count" value="{{ settings.topic_count }}">
+            <button type="submit" name="action" value="apply" class="kb-btn-primary">Apply this now</button>
+          </form>
+        {% endif %}
+      </div>
+    {% endif %}
+  </div>
+{% endblock %}

@@ -1,0 +1,81 @@
+{% extends "admin/base_site.html" %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Home</a>
+    &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+    &rsaquo; <a href="{% url 'admin:central_library_knowledgebasemodule_changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a>
+    &rsaquo; Import from Word
+  </div>
+{% endblock %}
+
+{% block content %}
+  <style>
+    .kb-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; margin: 24px 0; }
+    .kb-btn-primary { background: #2563eb; border: 0; border-radius: 8px; color: #fff; cursor: pointer;
+      font-size: 14px; font-weight: 600; padding: 12px 16px; text-decoration: none; }
+    .kb-cancel { color: var(--body-quiet-color); font-weight: 600; text-decoration: none; }
+    .kb-recent { border-collapse: collapse; margin-top: 12px; width: 100%; }
+    .kb-recent th, .kb-recent td { border-bottom: 1px solid var(--hairline-color); padding: 8px 10px; text-align: left; }
+    .kb-status { border-radius: 999px; font-size: 12px; font-weight: 700; padding: 2px 8px; text-transform: capitalize; }
+    .kb-status.draft { background: #fef9c3; color: #854d0e; }
+    .kb-status.applied { background: #dcfce7; color: #166534; }
+  </style>
+
+  <div id="content-main">
+    <form method="post" enctype="multipart/form-data" novalidate>
+      {% csrf_token %}
+      <fieldset class="module aligned">
+        <div class="form-row">
+          {{ form.file.errors }}
+          <div>
+            {{ form.file.label_tag }}
+            {{ form.file }}
+            <div class="help">{{ form.file.help_text }}</div>
+          </div>
+        </div>
+      </fieldset>
+
+      <div class="kb-actions">
+        <button type="submit" class="kb-btn-primary">Upload &amp; continue</button>
+        <a href="{% url 'admin:central_library_knowledgebasemodule_changelist' %}" class="kb-cancel">Cancel</a>
+      </div>
+    </form>
+
+    <div class="module" style="margin-top: 20px; padding: 16px;">
+      <h2>How it works</h2>
+      <ol>
+        <li>Upload a <code>.docx</code> article. Its headings, paragraphs, bullet lists and tables are extracted as separate blocks.</li>
+        <li>On the next screen, assign each block to a field — module title, overview, audience, or a topic's title / summary / items.</li>
+        <li>Preview the module that will be created, then apply it. Bold, italics and links in paragraphs are kept as Markdown.</li>
+      </ol>
+      <p class="help">Embedded images are ignored. Nested lists are flattened to a single level.</p>
+    </div>
+
+    {% if recent_imports %}
+      <div class="module" style="margin-top: 20px; padding: 16px;">
+        <h2>Recent uploads</h2>
+        <table class="kb-recent">
+          <thead>
+            <tr><th>File</th><th>Status</th><th>Blocks</th><th>Updated</th><th></th></tr>
+          </thead>
+          <tbody>
+            {% for imp in recent_imports %}
+              <tr>
+                <td>{{ imp.original_filename }}</td>
+                <td><span class="kb-status {{ imp.status }}">{{ imp.status }}</span></td>
+                <td>{{ imp.blocks|length }}</td>
+                <td>{{ imp.updated_at }}</td>
+                <td>
+                  <a href="{% url 'admin:central_library_knowledgebasemodule_map_docx' import_id=imp.id %}">
+                    {% if imp.status == 'applied' %}View{% else %}Resume{% endif %}
+                  </a>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+  </div>
+{% endblock %}

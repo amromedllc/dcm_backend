@@ -2,10 +2,13 @@
 
 {% block object-tools-items %}
   <li>
+    <a href="{{ import_docx_url }}" class="addlink">Import from Word</a>
+  </li>
+  <li>
     <a href="{{ sample_url }}" class="button">Download sample CSV</a>
   </li>
   <li>
-    <a href="{{ import_url }}" class="addlink">Import knowledge base</a>
+    <a href="{{ import_url }}" class="button">Import CSV / Excel</a>
   </li>
   {{ block.super }}
 {% endblock %}

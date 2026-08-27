@@ -8,6 +8,10 @@ def _central_program_upload_path(instance, filename):
     return f'central_library/programs/{uuid.uuid4().hex}/{filename}'
 
 
+def _knowledge_base_import_upload_path(instance, filename):
+    return f'central_library/knowledge_base_imports/{uuid.uuid4().hex}/{filename}'
+
+
 class CentralProgramFolder(models.Model):
     """Platform-owned grouping for Central Library programs — same
     "not tenant-scoped, superuser-authored" model as CentralProgram itself.
@@ -193,3 +197,49 @@ class KnowledgeBaseTopic(models.Model):
 
     def __str__(self) -> str:
         return f'{self.module.title}: {self.title}'
+
+
+class KnowledgeBaseImport(models.Model):
+    """A Word (.docx) article uploaded for the Knowledge Base, plus the
+    author/admin's in-progress mapping of its parsed blocks onto module and
+    topic fields. Superuser-only, like the rest of Knowledge Base authoring.
+
+    The parsed `blocks` and the saved `mapping` are both JSON so the mapping
+    UI can be left and resumed; `apply()` is done through the API, which
+    writes a KnowledgeBaseModule + KnowledgeBaseTopic rows from them.
+    """
+
+    class Status(models.TextChoices):
+        DRAFT = 'draft', 'Draft'
+        APPLIED = 'applied', 'Applied'
+        DISCARDED = 'discarded', 'Discarded'
+
+    file = models.FileField(upload_to=_knowledge_base_import_upload_path)
+    original_filename = models.CharField(max_length=255)
+    status = models.CharField(
+        max_length=12, choices=Status.choices, default=Status.DRAFT, db_index=True,
+    )
+    blocks = models.JSONField(default=list, blank=True)
+    image_count = models.PositiveIntegerField(default=0)
+    mapping = models.JSONField(default=dict, blank=True)
+    target_module = models.ForeignKey(
+        KnowledgeBaseModule,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='+',
+    )
+
+    class Meta:
+        app_label = 'central_library'
+        ordering = ['-updated_at']
+
+    def __str__(self) -> str:
+        return f'{self.original_filename} ({self.status})'
