@@ -1394,16 +1394,20 @@ def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
             )
             submodule_map[sub.id] = dest_sub
     for t in source.targets.all():
+        reset_sub_items = [
+            {k: v for k, v in item.items() if k != 'status'}
+            for item in t.sub_items
+        ]
         copied = Target.objects.create(
             program=dest,
             name=t.name,
             measurement_type=t.measurement_type,
-            sub_items=t.sub_items,
+            sub_items=reset_sub_items,
             sub_item_progression=t.sub_item_progression,
             prompting_template=t.prompting_template,
             sd_text=t.sd_text,
             teaching_instructions=t.teaching_instructions,
-            status=t.status,
+            status='waiting',
             display_order=t.display_order,
             is_visible_to_staff=t.is_visible_to_staff,
             module=module_map.get(t.module_id) if t.module_id else None,
