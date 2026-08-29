@@ -12,14 +12,14 @@ from .models import (
 class TargetInline(OrganizationScopedAdminMixin, TabularInline):
     model = Target
     extra = 0
-    fields = ['name', 'measurement_type', 'status', 'display_order', 'is_visible_to_staff']
+    fields = ['name', 'measurement_type', 'measurement', 'timer_type', 'status', 'display_order', 'is_visible_to_staff']
     ordering = ['display_order']
 
 
 class TargetSubItemInline(OrganizationScopedAdminMixin, TabularInline):
     model = TargetSubItem
     extra = 0
-    fields = ['label', 'key', 'status', 'display_order']
+    fields = ['label', 'key', 'status', 'measurement_type', 'measurement', 'prompting_template', 'workflow_template', 'display_order']
     ordering = ['display_order']
 
 
@@ -41,8 +41,8 @@ class ProgramAdmin(OrganizationScopedAdminMixin, ModelAdmin):
 
 @admin.register(Target)
 class TargetAdmin(OrganizationScopedAdminMixin, ModelAdmin):
-    list_display = ['name', 'program', 'measurement_type', 'status', 'sub_item_progression', 'display_order', 'is_visible_to_staff']
-    list_filter = ['status', 'measurement_type', 'sub_item_progression']
+    list_display = ['name', 'program', 'measurement_type', 'measurement', 'timer_type', 'status', 'sub_item_progression', 'display_order', 'is_visible_to_staff']
+    list_filter = ['status', 'measurement_type', 'measurement', 'sub_item_progression']
     search_fields = ['name', 'sd_text']
     readonly_fields = ['created_at', 'updated_at']
     inlines = [TargetSubItemInline]
@@ -50,8 +50,8 @@ class TargetAdmin(OrganizationScopedAdminMixin, ModelAdmin):
 
 @admin.register(TargetSubItem)
 class TargetSubItemAdmin(OrganizationScopedAdminMixin, ModelAdmin):
-    list_display = ['label', 'target', 'status', 'display_order']
-    list_filter = ['status']
+    list_display = ['label', 'target', 'status', 'measurement_type', 'measurement', 'display_order']
+    list_filter = ['status', 'measurement_type', 'measurement']
     search_fields = ['label', 'target__name']
 
 

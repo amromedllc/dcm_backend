@@ -155,6 +155,14 @@ class Program(TenantAwareModel):
         return f'{self.name} ({self.external_client_id})'
 
 
+class SubTargetMeasurementType(models.TextChoices):
+    """A task-analysis / set-of-targets / shaping step ("step to target") is a
+    mini-target. Its collection method is limited to these two — a step is
+    never itself a chain, rate, etc."""
+    DISCRETE_TRIAL = 'discrete_trial', 'Discrete Trial'
+    DURATION       = 'duration',       'Duration'
+
+
 class TargetQuerySet(TenantQuerySet):
     def visible_to_staff(self) -> 'TargetQuerySet':
         """Returns only the targets that should appear in the mobile session execution view."""
@@ -199,10 +207,29 @@ class Target(TenantAwareModel):
         SHAPING         = 'shaping',         'Shaping'
         INSTRUCTIONS    = 'instructions',    'Instructions'
         # Legacy — kept so old rows stay valid
-        TRIAL_BY_TRIAL   = 'trial_by_trial',   'Trial by Trial (legacy)'
-        FREQUENCY        = 'frequency',        'Frequency (legacy)'
-        WHOLE_INTERVAL   = 'whole_interval',   'Whole Interval (legacy)'
-        PARTIAL_INTERVAL = 'partial_interval', 'Partial Interval (legacy)'
+        # TRIAL_BY_TRIAL   = 'trial_by_trial',   'Trial by Trial (legacy)'
+        # FREQUENCY        = 'frequency',        'Frequency (legacy)'
+        # WHOLE_INTERVAL   = 'whole_interval',   'Whole Interval (legacy)'
+        INTERVAL = 'interval', 'Interval (legacy)'
+
+    class Measurement(models.TextChoices):
+        """The metric a target's raw session data rolls up into. Which values are
+        valid depends on `measurement_type` (the "target type") — see
+        MEASUREMENTS_BY_TARGET_TYPE below."""
+        PERCENT_CORRECT         = 'percent_correct',         'Percent Correct'
+        FREQUENCY               = 'frequency',               'Frequency'
+        RATE_PER_HOUR           = 'rate_per_hour',           'Rate per Hour'
+        RATE_PER_MINUTE         = 'rate_per_minute',         'Rate per Minute'
+        TOTAL_OBSERVED_DURATION = 'total_observed_duration', 'Total Observed Duration'
+        MIN_OBSERVED_DURATION   = 'min_observed_duration',   'Min. Observed Duration'
+        MAX_OBSERVED_DURATION   = 'max_observed_duration',   'Max. Observed Duration'
+        AVG_OBSERVED_DURATION   = 'avg_observed_duration',   'Avg. Observed Duration'
+
+    class TimerType(models.TextChoices):
+        """How the recording screen's timer behaves for a rate target."""
+        COUNT_UP      = 'count_up',      'Count Up (stopwatch)'
+        COUNTDOWN     = 'countdown',     'Countdown (egg-timer)'
+        SESSION_TIMER = 'session_timer', 'Link to Session Timer'
 
     # Rebuilt (not TargetQuerySet.as_manager()) so this still gets the
     # auto tenant-scoping every other TenantAwareModel manager has — see
@@ -221,6 +248,18 @@ class Target(TenantAwareModel):
         choices=MeasurementType.choices,
         default=MeasurementType.DISCRETE_TRIAL,
     )
+    measurement = models.CharField(
+        max_length=32,
+        choices=Measurement.choices,
+        blank=True,
+        default='',
+    )
+    timer_type = models.CharField(
+        max_length=20,
+        choices=TimerType.choices,
+        blank=True,
+        default='',
+    )
     # Ordered list of {"key": str, "label": str}. Used by task_analysis (sequential
     # steps), set_of_targets (independent items), and shaping (approximation levels,
     # last entry = terminal/goal level). Unused (empty) by every other measurement type.
@@ -229,6 +268,27 @@ class Target(TenantAwareModel):
         max_length=20,
         choices=SubItemProgression.choices,
         default=SubItemProgression.FORWARD,
+    )
+    # Defaults a newly added step ("step to target") inherits — only meaningful
+    # when measurement_type is task_analysis / set_of_targets / shaping.
+    default_sub_measurement_type = models.CharField(
+        max_length=20,
+        choices=SubTargetMeasurementType.choices,
+        blank=True,
+        default=SubTargetMeasurementType.DISCRETE_TRIAL,
+    )
+    default_sub_measurement = models.CharField(max_length=32, blank=True, default='')
+    default_sub_prompting_template = models.ForeignKey(
+        PromptingTemplate,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='+',
+    )
+    default_sub_workflow_template = models.ForeignKey(
+        'WorkflowTemplate',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='+',
     )
     prompting_template = models.ForeignKey(
         PromptingTemplate,
@@ -287,6 +347,7 @@ class Target(TenantAwareModel):
     _org_scoped_fk_fields = (
         'prompting_template', 'workflow_template',
         'maintenance_schedule', 'fading_template',
+        'default_sub_prompting_template', 'default_sub_workflow_template',
     )
 
     def _derive_organization_id(self) -> int | None:
@@ -298,6 +359,46 @@ class Target(TenantAwareModel):
 
     def __str__(self) -> str:
         return f'{self.name} [{self.status}]'
+
+
+_ACCURACY_MEASUREMENTS = [Target.Measurement.PERCENT_CORRECT, Target.Measurement.FREQUENCY]
+
+MEASUREMENTS_BY_TARGET_TYPE: dict[str, list[str]] = {
+    Target.MeasurementType.DISCRETE_TRIAL: _ACCURACY_MEASUREMENTS,
+    Target.MeasurementType.DURATION: [
+        Target.Measurement.PERCENT_CORRECT,
+        Target.Measurement.FREQUENCY,
+        Target.Measurement.TOTAL_OBSERVED_DURATION,
+        Target.Measurement.MIN_OBSERVED_DURATION,
+        Target.Measurement.MAX_OBSERVED_DURATION,
+        Target.Measurement.AVG_OBSERVED_DURATION,
+    ],
+    Target.MeasurementType.RATE: [
+        Target.Measurement.PERCENT_CORRECT,
+        Target.Measurement.FREQUENCY,
+        Target.Measurement.RATE_PER_HOUR,
+        Target.Measurement.RATE_PER_MINUTE,
+    ],
+}
+
+DEFAULT_MEASUREMENT_BY_TARGET_TYPE: dict[str, str] = {
+    Target.MeasurementType.DISCRETE_TRIAL: Target.Measurement.PERCENT_CORRECT,
+    Target.MeasurementType.DURATION: Target.Measurement.TOTAL_OBSERVED_DURATION,
+    Target.MeasurementType.RATE: Target.Measurement.RATE_PER_MINUTE,
+}
+
+# Target types for which timer_type is surfaced / stored.
+TIMER_TARGET_TYPES = {Target.MeasurementType.RATE}
+
+
+def allowed_measurements(measurement_type: str) -> list[str]:
+    return MEASUREMENTS_BY_TARGET_TYPE.get(measurement_type, _ACCURACY_MEASUREMENTS)
+
+
+def default_measurement(measurement_type: str) -> str:
+    return DEFAULT_MEASUREMENT_BY_TARGET_TYPE.get(
+        measurement_type, Target.Measurement.PERCENT_CORRECT,
+    )
 
 
 class TargetSubItem(TenantAwareModel):
@@ -319,6 +420,30 @@ class TargetSubItem(TenantAwareModel):
     label = models.CharField(max_length=200)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.WAITING, db_index=True)
     display_order = models.PositiveIntegerField(default=0, db_index=True)
+    # Per-step ("step to target") configuration — each step is a mini-target
+    # collected as Discrete Trial or Duration, with its own metric, prompt
+    # hierarchy, and mastery workflow. New steps inherit the parent Target's
+    # default_sub_* values (see api._sync_target_sub_items).
+    measurement_type = models.CharField(
+        max_length=20,
+        choices=SubTargetMeasurementType.choices,
+        default=SubTargetMeasurementType.DISCRETE_TRIAL,
+    )
+    measurement = models.CharField(max_length=32, blank=True, default='')
+    prompting_template = models.ForeignKey(
+        PromptingTemplate,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='+',
+    )
+    workflow_template = models.ForeignKey(
+        'WorkflowTemplate',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='+',
+    )
+
+    _org_scoped_fk_fields = ('prompting_template', 'workflow_template')
 
     def _derive_organization_id(self) -> int | None:
         return self.target.organization_id

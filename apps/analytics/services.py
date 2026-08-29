@@ -3,6 +3,10 @@ from datetime import date, datetime
 from typing import TypedDict
 
 from apps.programs.models import Program, Target, ProgramModule, ProgramSubmodule, TargetSubItem
+from apps.programs.measurements import (
+    aggregate_measurement, MEASUREMENT_LABELS, MEASUREMENT_UNIT,
+    DURATION_MEASUREMENTS, RATE_MEASUREMENTS,
+)
 from apps.sessions.models import TrialEvent, BehaviorEvent, SessionRun
 
 
@@ -34,6 +38,14 @@ class BehaviorDataPoint(TypedDict):
     submodule_name: str | None
     frequency: int
     total_duration_seconds: int
+    # The target's configured `measurement` (blank for legacy rows) and the
+    # single value that measurement rolls this day's events up to, plus a
+    # ready-to-render label/unit. Charts should plot `measurement_value` when
+    # `measurement` is set rather than picking frequency vs duration themselves.
+    measurement: str
+    measurement_value: float
+    measurement_label: str
+    measurement_unit: str
 
 
 class TargetSummary(TypedDict):
@@ -291,30 +303,57 @@ def get_behavior_data_by_day(
             occurred_at__date__gte=date_from,
             occurred_at__date__lte=date_to,
         )
-        .values('occurred_at__date', 'target_id', 'target_name', 'frequency_count', 'duration_seconds')
+        .values(
+            'occurred_at__date', 'occurred_at', 'target_id', 'target_name',
+            'frequency_count', 'duration_seconds',
+        )
     )
 
     target_meta: dict[int, dict] = {
-        t.id: {'module_id': t.module_id, 'submodule_id': t.submodule_id}
-        for t in Target.objects.filter(id__in=target_ids).only('id', 'module_id', 'submodule_id')
+        t.id: {'module_id': t.module_id, 'submodule_id': t.submodule_id, 'measurement': t.measurement}
+        for t in Target.objects.filter(id__in=target_ids).only(
+            'id', 'module_id', 'submodule_id', 'measurement',
+        )
     }
     mod_ids = {m['module_id'] for m in target_meta.values() if m['module_id']}
     sub_ids = {m['submodule_id'] for m in target_meta.values() if m['submodule_id']}
     mod_names = _module_name_map(mod_ids)
     sub_names = _submodule_name_map(sub_ids)
 
-    grouped: dict[tuple, dict] = defaultdict(lambda: {'freq': 0, 'dur': 0, 'name': ''})
+    grouped: dict[tuple, dict] = defaultdict(
+        lambda: {'freq': 0, 'dur': 0, 'name': '', 'durations': [], 'first': None, 'last': None}
+    )
     for event in raw:
         key = (event['occurred_at__date'], event['target_id'])
-        grouped[key]['freq'] += event['frequency_count']
-        grouped[key]['dur'] += event['duration_seconds'] or 0
-        grouped[key]['name'] = event['target_name']
+        g = grouped[key]
+        g['freq'] += event['frequency_count']
+        g['dur'] += event['duration_seconds'] or 0
+        g['name'] = event['target_name']
+        if event['duration_seconds'] is not None:
+            g['durations'].append(event['duration_seconds'])
+        ts = event['occurred_at']
+        g['first'] = ts if g['first'] is None or ts < g['first'] else g['first']
+        g['last'] = ts if g['last'] is None or ts > g['last'] else g['last']
 
     result: list[BehaviorDataPoint] = []
     for (day, tid), data in sorted(grouped.items()):
         meta = target_meta.get(tid, {})
         mid = meta.get('module_id')
         sid = meta.get('submodule_id')
+        measurement = meta.get('measurement') or ''
+
+        if measurement in DURATION_MEASUREMENTS:
+            value = aggregate_measurement(measurement, durations=data['durations'])
+        elif measurement in RATE_MEASUREMENTS:
+            span = (
+                (data['last'] - data['first']).total_seconds()
+                if data['first'] and data['last'] and data['last'] > data['first']
+                else None
+            )
+            value = aggregate_measurement(measurement, event_count=data['freq'], seconds_elapsed=span)
+        else:
+            value = float(data['freq'])  # frequency / percent_correct / legacy
+
         result.append({
             'date': day,
             'target_id': tid,
@@ -325,6 +364,10 @@ def get_behavior_data_by_day(
             'submodule_name': sub_names.get(sid) if sid else None,
             'frequency': data['freq'],
             'total_duration_seconds': data['dur'],
+            'measurement': measurement,
+            'measurement_value': round(value, 2),
+            'measurement_label': MEASUREMENT_LABELS.get(measurement, 'Frequency'),
+            'measurement_unit': MEASUREMENT_UNIT.get(measurement, 'count'),
         })
     return result
 

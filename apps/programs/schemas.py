@@ -221,6 +221,8 @@ class TargetSummarySchema(Schema):
     name: str
     status: str
     measurement_type: str = ''
+    measurement: str = ''
+    timer_type: str = ''
     display_order: int
     is_visible_to_staff: bool
     # Central Library targets only — whether this target is already copied
@@ -363,8 +365,17 @@ class TargetSchema(Schema):
     program_id: int
     name: str
     measurement_type: str
+    measurement: str = ''
+    timer_type: str = ''
+    # Each sub_item (step) may carry: measurement_type ('discrete_trial' |
+    # 'duration'), measurement, prompting_template_id, workflow_template_id,
+    # in addition to key/label/status.
     sub_items: list[dict] = []
     sub_item_progression: str = 'forward'
+    default_sub_measurement_type: str = 'discrete_trial'
+    default_sub_measurement: str = ''
+    default_sub_prompting_template_id: int | None = None
+    default_sub_workflow_template_id: int | None = None
     prompting_template_id: int | None
     workflow_template_id: int | None
     maintenance_schedule_id: int | None
@@ -388,9 +399,19 @@ class TargetSchema(Schema):
 # ---------------------------------------------------------------------------
 class TargetCreateRequest(Schema):
     name: NonEmptyStr
-    measurement_type: Target.MeasurementType = Target.MeasurementType.DISCRETE_TRIAL
+    # Plain str (not the enum) so legacy values on existing rows don't 422 an
+    # otherwise-unrelated edit; the API validates it (see _validate_measurement_type).
+    measurement_type: str = Target.MeasurementType.DISCRETE_TRIAL.value
+    # Blank = resolve server-side to the default for measurement_type. A value
+    # that is invalid for the chosen measurement_type is a 400 (see api.py).
+    measurement: str = ''
+    timer_type: str = ''
     sub_items: list[dict] = []
     sub_item_progression: Target.SubItemProgression = Target.SubItemProgression.FORWARD
+    default_sub_measurement_type: str = 'discrete_trial'
+    default_sub_measurement: str = ''
+    default_sub_prompting_template_id: int | None = None
+    default_sub_workflow_template_id: int | None = None
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
@@ -408,9 +429,15 @@ class TargetCreateRequest(Schema):
 
 class TargetUpdateRequest(Schema):
     name: NonEmptyStr | None = None
-    measurement_type: Target.MeasurementType | None = None
+    measurement_type: str | None = None
+    measurement: str | None = None
+    timer_type: str | None = None
     sub_items: list[dict] | None = None
     sub_item_progression: Target.SubItemProgression | None = None
+    default_sub_measurement_type: str | None = None
+    default_sub_measurement: str | None = None
+    default_sub_prompting_template_id: int | None = None
+    default_sub_workflow_template_id: int | None = None
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
@@ -435,7 +462,9 @@ class BulkUpdateTargetsRequest(Schema):
     mastery_mode: Target.MasteryMode | None = None
     fading_mode: Target.FadingMode | None = None
     status: str | None = None
-    measurement_type: Target.MeasurementType | None = None
+    measurement_type: str | None = None
+    measurement: str | None = None
+    timer_type: str | None = None
     sd_text: str | None = None
     teaching_instructions: str | None = None
     prompting_template_id: int | None = None
