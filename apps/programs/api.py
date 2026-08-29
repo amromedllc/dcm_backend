@@ -1,5 +1,6 @@
 import os
 
+from django.core.exceptions import ObjectDoesNotExist
 from django.db import models
 from django_tenants.utils import get_public_schema_name, schema_context
 from ninja import Router, File, Form
@@ -1458,31 +1459,42 @@ def _central_qs():
     return CentralProgram.objects.filter(status=CentralProgram.Status.ACTIVE)
 
 
-def _imported_central_program_ids(request) -> set[int]:
-    """Central program ids already cloned into the caller's org — used to
-    show "Already in Library" up front rather than only erroring on click."""
-    return set(
+def _central_import_progress(request) -> dict[int, int]:
+    """central_program_id -> how many of its targets are already copied into
+    the caller's linked org program (0 if there's no linked program at all).
+    Used both to show "Already in Library" only once every target has been
+    pulled in, and to render a partial-progress fill bar otherwise."""
+    rows = (
         Program.objects
         .filter(
             _same_practice_q(request.user, 'created_by__'),
             source_central_program_id__isnull=False,
+            is_template=True,
         )
-        .values_list('source_central_program_id', flat=True)
+        .annotate(copied_count=models.Count('targets'))
+        .values_list('source_central_program_id', 'copied_count')
     )
+    return {central_id: count for central_id, count in rows}
 
 
 def _serialize_central_program(
-    program: CentralProgram, request, include_targets: bool = False, imported_ids: set[int] = frozenset(),
+    program: CentralProgram, request, include_targets: bool = False, import_progress: dict[int, int] = {},
 ) -> dict:
     targets = []
     if include_targets:
+        linked = _find_linked_org_program(program, request.user)
+        copied_names = set(linked.targets.values_list('name', flat=True)) if linked else set()
         targets = [
             {
                 'id': t['id'], 'name': t['name'], 'status': 'waiting',
+                'measurement_type': t['measurement_type'],
                 'display_order': t['display_order'], 'is_visible_to_staff': t['is_visible_to_staff'],
+                'already_copied': t['name'] in copied_names,
             }
-            for t in program.targets.all().values('id', 'name', 'display_order', 'is_visible_to_staff')
+            for t in program.targets.all().values('id', 'name', 'measurement_type', 'display_order', 'is_visible_to_staff')
         ]
+    target_count = program.targets.count()
+    imported_target_count = min(import_progress.get(program.id, 0), target_count)
     return {
         'id': program.id,
         'is_template': True,
@@ -1497,9 +1509,10 @@ def _serialize_central_program(
         'prompting_template_id': None,
         'folder_id': program.folder_id,
         'image_url': _optimized_program_image_url(request, program.image),
-        'already_imported': program.id in imported_ids,
+        'already_imported': target_count > 0 and imported_target_count >= target_count,
+        'imported_target_count': imported_target_count,
         'display_order': program.display_order,
-        'target_count': program.targets.count(),
+        'target_count': target_count,
         'targets': targets,
         'created_at': program.created_at,
         'updated_at': program.updated_at,
@@ -1519,8 +1532,8 @@ def list_central_programs(
         qs = qs.filter(folder_id=folder_id)
     elif unfiled:
         qs = qs.filter(folder_id__isnull=True)
-    imported_ids = _imported_central_program_ids(request)
-    return [_serialize_central_program(p, request, imported_ids=imported_ids) for p in qs.prefetch_related('targets')]
+    import_progress = _central_import_progress(request)
+    return [_serialize_central_program(p, request, import_progress=import_progress) for p in qs.prefetch_related('targets')]
 
 
 # Registered before /central-programs/{program_id} below — same routing
@@ -1556,16 +1569,22 @@ def import_central_folder(request, folder_id: int):
         name=central_folder.name,
         defaults={'created_by': request.user},
     )
-    already_imported_ids = _imported_central_program_ids(request)
+    import_progress = _central_import_progress(request)
     imported_count = 0
     skipped_count = 0
     for central_program in central_folder.programs.filter(status=CentralProgram.Status.ACTIVE):
-        if central_program.id in already_imported_ids:
+        target_count = central_program.targets.count()
+        copied_count = import_progress.get(central_program.id, 0)
+        if target_count > 0 and copied_count >= target_count:
             skipped_count += 1
             continue
+        # Also covers a program only partially copied so far (e.g. via a
+        # prior single-target copy) — _clone_central_program tops it up
+        # with whatever targets it's still missing rather than duplicating it.
         dest = _clone_central_program(central_program.id, request.user)
-        dest.folder = org_folder
-        dest.save(update_fields=['folder'])
+        if dest.folder_id is None:  # don't move a program the caller already filed elsewhere
+            dest.folder = org_folder
+            dest.save(update_fields=['folder'])
         imported_count += 1
 
     return 201, {
@@ -1583,27 +1602,23 @@ def get_central_program(request, program_id: int):
         program = _central_qs().prefetch_related('targets').get(id=program_id)
     except CentralProgram.DoesNotExist:
         raise HttpError(404, 'Program not found')
-    return _serialize_central_program(program, request, include_targets=True, imported_ids=_imported_central_program_ids(request))
+    return _serialize_central_program(program, request, include_targets=True, import_progress=_central_import_progress(request))
 
 
-def _clone_central_program(program_id: int, user) -> Program:
-    """Deep-copies a Central Library program (+ targets) into the calling
-    user's own organization. A target's optional `prompting_levels` becomes
-    a new org-owned PromptingTemplate — PromptingTemplate is tenant-scoped,
-    so cloning (not referencing) is the only option, and it also means each
-    org gets its own editable copy rather than a shared read-only one.
-    """
-    try:
-        source = _central_qs().prefetch_related('targets').get(id=program_id)
-    except CentralProgram.DoesNotExist:
-        raise HttpError(404, 'Program not found')
+def _find_linked_org_program(source: CentralProgram, user) -> Program | None:
+    """The caller's own program already linked to this Central Library
+    program, if any — whether that link was made by a prior whole-program
+    import or by a prior single-target copy. Both funnel through this so a
+    central program never ends up duplicated across multiple org programs."""
+    return (
+        Program.objects
+        .filter(_same_practice_q(user, 'created_by__'), source_central_program_id=source.id, is_template=True)
+        .order_by('id')
+        .first()
+    )
 
-    if Program.objects.filter(
-        _same_practice_q(user, 'created_by__'),
-        source_central_program_id=program_id,
-    ).exists():
-        raise HttpError(409, f'"{source.name}" is already in your Program Library.')
 
+def _create_linked_org_program(source: CentralProgram, user) -> Program:
     dest = Program.objects.create(
         is_template=True,
         external_client_id=None,
@@ -1620,8 +1635,14 @@ def _clone_central_program(program_id: int, user) -> Program:
         created_by=user,
     )
     _copy_image(source.image, dest)
-    # Central programs have no modules/submodules, so no mapping needed here.
-    for t in source.targets.all():
+    return dest
+
+
+def _append_central_targets(dest: Program, targets, user) -> None:
+    """Copies each given CentralTarget into dest as a new Target, appended
+    after whatever targets dest already has."""
+    start_order = dest.targets.count()
+    for i, t in enumerate(targets):
         prompting_template = None
         if t.prompting_levels:
             prompting_template = PromptingTemplate.objects.create(name=f'{t.name} Prompting', levels=t.prompting_levels)
@@ -1632,13 +1653,45 @@ def _clone_central_program(program_id: int, user) -> Program:
             sub_items=t.sub_items,
             sd_text=t.sd_text,
             teaching_instructions=t.teaching_instructions,
-            display_order=t.display_order,
+            display_order=start_order + i,
             is_visible_to_staff=t.is_visible_to_staff,
             prompting_template=prompting_template,
             created_by=user,
         )
         if copied.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
             _sync_target_sub_items(copied, copied.sub_items, user)
+
+
+def _clone_central_program(program_id: int, user) -> Program:
+    """Deep-copies a Central Library program (+ targets) into the calling
+    user's own organization. A target's optional `prompting_levels` becomes
+    a new org-owned PromptingTemplate — PromptingTemplate is tenant-scoped,
+    so cloning (not referencing) is the only option, and it also means each
+    org gets its own editable copy rather than a shared read-only one.
+
+    If this central program is already linked to one of the caller's own
+    programs — e.g. because a target was copied individually before the
+    whole program was — this tops that program up with whatever targets it
+    is still missing, rather than creating a second, duplicate program.
+    """
+    try:
+        source = _central_qs().prefetch_related('targets').get(id=program_id)
+    except CentralProgram.DoesNotExist:
+        raise HttpError(404, 'Program not found')
+
+    dest = _find_linked_org_program(source, user)
+    if dest is not None:
+        existing_names = set(dest.targets.values_list('name', flat=True))
+        missing = [t for t in source.targets.all() if t.name not in existing_names]
+        if not missing:
+            raise HttpError(409, f'"{source.name}" is already in your Program Library.')
+        _append_central_targets(dest, missing, user)
+        dest.refresh_from_db()
+        return dest
+
+    dest = _create_linked_org_program(source, user)
+    # Central programs have no modules/submodules, so no mapping needed here.
+    _append_central_targets(dest, source.targets.all(), user)
     dest.refresh_from_db()
     return dest
 
@@ -1648,6 +1701,48 @@ def import_central_program(request, program_id: int):
     """Import a Central Library program into the caller's own org library."""
     require_permission(request, 'central_library_import')
     dest = _clone_central_program(program_id, request.user)
+    return 201, _serialize_org_program(dest, request, include_targets=True)
+
+
+def _clone_central_target_as_program(program_id: int, target_id: int, user) -> Program:
+    """Copy a single target out of a Central Library program into the
+    caller's Library. If this central program is already linked to one of
+    the caller's own programs — a prior whole-program import, or a prior
+    single-target copy — the target is pulled into that same program
+    instead of spinning up a duplicate. Only when no linked program exists
+    yet is a new one created, mirroring the source program's metadata
+    (name, category, image, etc.) so it starts out as a coherent program
+    rather than an orphaned single target."""
+    try:
+        source = _central_qs().get(id=program_id)
+    except CentralProgram.DoesNotExist:
+        raise HttpError(404, 'Program not found')
+    try:
+        t = source.targets.get(id=target_id)
+    except ObjectDoesNotExist:
+        raise HttpError(404, 'Target not found')
+
+    dest = _find_linked_org_program(source, user)
+    if dest is not None:
+        if dest.targets.filter(name=t.name).exists():
+            return dest  # already pulled in — nothing new to do
+        _append_central_targets(dest, [t], user)
+        dest.refresh_from_db()
+        return dest
+
+    dest = _create_linked_org_program(source, user)
+    _append_central_targets(dest, [t], user)
+    dest.refresh_from_db()
+    return dest
+
+
+@router.post('/central-programs/{program_id}/targets/{target_id}/import', response={201: OrgProgramSchema})
+def import_central_target(request, program_id: int, target_id: int):
+    """Copy a single target out of a Central Library program — lands as its
+    own new program in the caller's Library (see import_central_program to
+    copy the whole program with all its targets instead)."""
+    require_permission(request, 'central_library_import')
+    dest = _clone_central_target_as_program(program_id, target_id, request.user)
     return 201, _serialize_org_program(dest, request, include_targets=True)
 
 
