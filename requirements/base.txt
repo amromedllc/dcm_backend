@@ -15,5 +15,6 @@ reportlab>=4.2,<5.0
 gunicorn>=22.0
 whitenoise>=6.7
 python-slugify>=8.0
+python-docx>=1.1.2,<2.0
 bcrypt>=4.0
 requests>=2.31

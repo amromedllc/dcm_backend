@@ -220,8 +220,12 @@ class TargetSummarySchema(Schema):
     id: int
     name: str
     status: str
+    measurement_type: str = ''
     display_order: int
     is_visible_to_staff: bool
+    # Central Library targets only — whether this target is already copied
+    # into the caller's linked org program.
+    already_copied: bool = False
 
 
 class ProgramMaterialSchema(Schema):
@@ -520,6 +524,9 @@ class OrgProgramSchema(Schema):
     folder_id: int | None = None
     image_url: str | None = None
     already_imported: bool = False
+    # Central Library programs only — how many of target_count are already
+    # copied into the caller's linked org program (0 for org's own programs).
+    imported_target_count: int = 0
     display_order: int
     target_count: int = 0
     targets: list[TargetSummarySchema] = []
