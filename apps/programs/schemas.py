@@ -383,6 +383,13 @@ class TargetSchema(Schema):
     maintenance_episodes_completed: int
     sd_text: str
     teaching_instructions: str
+    instructions_html: str = ''
+    interval_seconds: int = 60
+    interval_sync_with_session: bool = False
+    interval_warn_before_end: bool = False
+    interval_pause_on_warning: bool = False
+    interval_warn_seconds_before: int = 10
+    interval_warning_sound: str = ''
     status: str
     mastery_mode: str
     fading_mode: str
@@ -418,6 +425,13 @@ class TargetCreateRequest(Schema):
     fading_template_id: int | None = None
     sd_text: str = ''
     teaching_instructions: str = ''
+    instructions_html: str = ''
+    interval_seconds: int = Field(default=60, ge=1)
+    interval_sync_with_session: bool = False
+    interval_warn_before_end: bool = False
+    interval_pause_on_warning: bool = False
+    interval_warn_seconds_before: int = Field(default=10, ge=0)
+    interval_warning_sound: str = ''
     status: str = ''  # empty = resolve server-side to the org's default TargetStatus
     mastery_mode: Target.MasteryMode = Target.MasteryMode.MANUAL
     fading_mode: Target.FadingMode = Target.FadingMode.MANUAL
@@ -444,6 +458,13 @@ class TargetUpdateRequest(Schema):
     fading_template_id: int | None = None
     sd_text: str | None = None
     teaching_instructions: str | None = None
+    instructions_html: str | None = None
+    interval_seconds: int | None = Field(default=None, ge=1)
+    interval_sync_with_session: bool | None = None
+    interval_warn_before_end: bool | None = None
+    interval_pause_on_warning: bool | None = None
+    interval_warn_seconds_before: int | None = Field(default=None, ge=0)
+    interval_warning_sound: str | None = None
     status: str | None = None
     mastery_mode: Target.MasteryMode | None = None
     fading_mode: Target.FadingMode | None = None

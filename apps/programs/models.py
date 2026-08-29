@@ -317,11 +317,31 @@ class Target(TenantAwareModel):
     )
     maintenance_episodes_completed = models.PositiveIntegerField(default=0)
     fading_mode = models.CharField(max_length=10, choices=FadingMode.choices, default=FadingMode.MANUAL)
-    # 0-based index into prompting_template.levels — most-intrusive-first
-    # (index 0 = e.g. Full Physical). Meaningless if prompting_template is null.
     current_prompt_level_index = models.PositiveSmallIntegerField(default=0)
     sd_text = models.TextField(blank=True, verbose_name='Discriminative Stimulus')
     teaching_instructions = models.TextField(blank=True)
+    instructions_html = models.TextField(blank=True, default='')
+
+    # Interval-timer configuration — only meaningful when measurement_type is
+    # 'interval'. The recording screen prompts the observer once per interval.
+    class IntervalWarningSound(models.TextChoices):
+        BUZZER      = 'buzzer',      'Buzzer'
+        BELL        = 'bell',        'Bell'
+        BELL_TRIPLE = 'bell_triple', 'Bell Triple Ring'
+        CRYSTAL     = 'crystal',     'Crystal'
+        CYMBAL      = 'cymbal',      'Cymbal'
+        TWINKLE     = 'twinkle',     'Twinkle'
+
+    interval_seconds = models.PositiveIntegerField(default=60)
+    # Reset the interval clock to run alongside the whole session rather than
+    # a fixed length.
+    interval_sync_with_session = models.BooleanField(default=False)
+    interval_warn_before_end = models.BooleanField(default=False)
+    interval_pause_on_warning = models.BooleanField(default=False)
+    interval_warn_seconds_before = models.PositiveIntegerField(default=10)
+    interval_warning_sound = models.CharField(
+        max_length=20, choices=IntervalWarningSound.choices, blank=True, default='',
+    )
     # No longer choice-constrained — status keys are org-configurable via TargetStatus.
     status = models.CharField(max_length=20, default='waiting', db_index=True)
     mastery_mode = models.CharField(max_length=10, choices=MasteryMode.choices, default=MasteryMode.MANUAL)

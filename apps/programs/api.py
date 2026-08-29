@@ -566,6 +566,15 @@ def _require_sub_items_if_needed(measurement_type: str, sub_items: list) -> None
 _LEGACY_MEASUREMENT_TYPES = {'trial_by_trial', 'frequency', 'whole_interval', 'partial_interval'}
 
 
+def _validate_interval_warning_sound(value: str | None) -> None:
+    if value and value not in Target.IntervalWarningSound.values:
+        raise HttpError(
+            400,
+            f'Invalid interval_warning_sound "{value}"; choose one of: '
+            f'{", ".join(Target.IntervalWarningSound.values)}',
+        )
+
+
 def _validate_measurement_type(value: str, *, allow_legacy: bool) -> None:
     if value in Target.MeasurementType.values:
         return
@@ -795,6 +804,7 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
         default_status = _settings_qs(TargetStatus, request, include_org_defaults=True).filter(is_default=True).first()
         target_data['status'] = default_status.key if default_status else 'waiting'
     _validate_measurement_type(target_data['measurement_type'], allow_legacy=False)
+    _validate_interval_warning_sound(target_data.get('interval_warning_sound'))
     _require_sub_items_if_needed(target_data['measurement_type'], target_data['sub_items'])
     target_data['measurement'], target_data['timer_type'] = _resolve_measurement_fields(
         target_data['measurement_type'],
@@ -830,6 +840,8 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
         target.current_prompt_level_index = 0
     if 'status' in updates:
         _validate_target_status(request, updates['status'])
+    if 'interval_warning_sound' in updates:
+        _validate_interval_warning_sound(updates['interval_warning_sound'])
     mt_changed = 'measurement_type' in updates
     if mt_changed:
         _validate_measurement_type(updates['measurement_type'], allow_legacy=True)
@@ -1595,6 +1607,13 @@ def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
             prompting_template=t.prompting_template,
             sd_text=t.sd_text,
             teaching_instructions=t.teaching_instructions,
+            instructions_html=t.instructions_html,
+            interval_seconds=t.interval_seconds,
+            interval_sync_with_session=t.interval_sync_with_session,
+            interval_warn_before_end=t.interval_warn_before_end,
+            interval_pause_on_warning=t.interval_pause_on_warning,
+            interval_warn_seconds_before=t.interval_warn_seconds_before,
+            interval_warning_sound=t.interval_warning_sound,
             status='waiting',
             display_order=t.display_order,
             is_visible_to_staff=t.is_visible_to_staff,

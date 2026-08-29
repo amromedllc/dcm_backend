@@ -156,6 +156,13 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
                 'sub_item_progression': target.sub_item_progression,
                 'sd_text': target.sd_text,
                 'teaching_instructions': target.teaching_instructions,
+                'instructions_html': target.instructions_html,
+                'interval_seconds': target.interval_seconds,
+                'interval_sync_with_session': target.interval_sync_with_session,
+                'interval_warn_before_end': target.interval_warn_before_end,
+                'interval_pause_on_warning': target.interval_pause_on_warning,
+                'interval_warn_seconds_before': target.interval_warn_seconds_before,
+                'interval_warning_sound': target.interval_warning_sound,
                 'prompting_template': {
                     'id': pt.id,
                     'name': pt.name,
