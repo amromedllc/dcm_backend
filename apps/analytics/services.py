@@ -1,4 +1,4 @@
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date, datetime
 from typing import TypedDict
 
@@ -38,6 +38,11 @@ class BehaviorDataPoint(TypedDict):
     submodule_name: str | None
     frequency: int
     total_duration_seconds: int
+    # Per-episode duration spread for the day, independent of the target's
+    # configured `measurement` — lets the graph offer a min/max/avg selector.
+    min_duration_seconds: float
+    max_duration_seconds: float
+    avg_duration_seconds: float
     # The target's configured `measurement` (blank for legacy rows) and the
     # single value that measurement rolls this day's events up to, plus a
     # ready-to-render label/unit. Charts should plot `measurement_value` when
@@ -354,6 +359,7 @@ def get_behavior_data_by_day(
         else:
             value = float(data['freq'])  # frequency / percent_correct / legacy
 
+        durations = data['durations']
         result.append({
             'date': day,
             'target_id': tid,
@@ -364,12 +370,67 @@ def get_behavior_data_by_day(
             'submodule_name': sub_names.get(sid) if sid else None,
             'frequency': data['freq'],
             'total_duration_seconds': data['dur'],
+            'min_duration_seconds': round(min(durations), 2) if durations else 0.0,
+            'max_duration_seconds': round(max(durations), 2) if durations else 0.0,
+            'avg_duration_seconds': round(sum(durations) / len(durations), 2) if durations else 0.0,
             'measurement': measurement,
             'measurement_value': round(value, 2),
             'measurement_label': MEASUREMENT_LABELS.get(measurement, 'Frequency'),
             'measurement_unit': MEASUREMENT_UNIT.get(measurement, 'count'),
         })
     return result
+
+
+# ---------------------------------------------------------------------------
+# Mastery-criteria threshold — powers the optional horizontal reference line
+# ("Mastery Criteria") on the program graph
+# ---------------------------------------------------------------------------
+
+def _mastered_threshold_pct(phases: list) -> int | None:
+    """The % correct a target must sustain to transition into 'mastered',
+    pulled from a WorkflowTemplate.phases list. Prefers the criterion on the
+    phase whose `on_success` is 'mastered'; otherwise falls back to the
+    strictest `threshold_pct` defined anywhere in the workflow.
+    """
+    explicit: int | None = None
+    fallback: int | None = None
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        raw = (phase.get('criteria') or {}).get('threshold_pct')
+        try:
+            pct = int(raw)
+        except (TypeError, ValueError):
+            continue
+        fallback = pct if fallback is None else max(fallback, pct)
+        if phase.get('on_success') == 'mastered':
+            explicit = pct
+    return explicit if explicit is not None else fallback
+
+
+def get_program_mastery_criteria(program_id: int) -> tuple[int | None, bool]:
+    """Returns (pct, varies) for a program's targets:
+    - pct: the most common per-target mastery threshold (% correct), or None
+      when no target carries a WorkflowTemplate with a threshold.
+    - varies: True when the program's targets disagree on the threshold, so
+      the graph can label the line as an approximation.
+    """
+    thresholds: list[int] = []
+    for phases in (
+        Target.objects
+        .filter(program_id=program_id, workflow_template__isnull=False)
+        .values_list('workflow_template__phases', flat=True)
+    ):
+        if not isinstance(phases, list):
+            continue
+        pct = _mastered_threshold_pct(phases)
+        if pct is not None:
+            thresholds.append(pct)
+
+    if not thresholds:
+        return None, False
+    counts = Counter(thresholds)
+    return counts.most_common(1)[0][0], len(counts) > 1
 
 
 # ---------------------------------------------------------------------------
