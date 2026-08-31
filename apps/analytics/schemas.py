@@ -14,6 +14,8 @@ class TrialDataPointSchema(Schema):
     correct_count: int
     pct_correct: float
     duration_seconds: float
+    prompt_level_sum: float = 0.0
+    prompt_level_count: int = 0
 
 
 class BehaviorDataPointSchema(Schema):

@@ -26,6 +26,8 @@ class TrialDataPoint(TypedDict):
     correct_count: int
     pct_correct: float
     duration_seconds: float
+    prompt_level_sum: float
+    prompt_level_count: int
 
 
 class BehaviorDataPoint(TypedDict):
@@ -38,15 +40,9 @@ class BehaviorDataPoint(TypedDict):
     submodule_name: str | None
     frequency: int
     total_duration_seconds: int
-    # Per-episode duration spread for the day, independent of the target's
-    # configured `measurement` — lets the graph offer a min/max/avg selector.
     min_duration_seconds: float
     max_duration_seconds: float
     avg_duration_seconds: float
-    # The target's configured `measurement` (blank for legacy rows) and the
-    # single value that measurement rolls this day's events up to, plus a
-    # ready-to-render label/unit. Charts should plot `measurement_value` when
-    # `measurement` is set rather than picking frequency vs duration themselves.
     measurement: str
     measurement_value: float
     measurement_label: str
@@ -116,9 +112,6 @@ class ProgramProgressStats(TypedDict):
 
 class ClientProgressOverview(TypedDict):
     client_id: int
-    # All-time — mastery is a point-in-time fact, not a report-window metric.
-    # date_from/date_to filtering (if wanted) happens client-side over
-    # mastery_events, same as the chart-type/group-by/cumulative controls.
     mastery_events: list[MasteryEvent]
     programs: list[ProgramProgressStats]
 
@@ -132,6 +125,27 @@ def _max_scores_for_targets(target_ids: list[int]) -> dict[int, int | None]:
     result: dict[int, int | None] = {}
     for target in Target.objects.filter(id__in=target_ids).select_related('prompting_template'):
         result[target.id] = target.prompting_template.success_score() if target.prompting_template else None
+    return result
+
+
+def _prompt_rank_maps(target_ids: list[int]) -> dict[int, dict[str, int]]:
+    """{target_id: {prompt_level_label: support_rank}}.
+
+    PromptingTemplate.levels is ordered most-intrusive first, so the rank is
+    reversed: 0 == the last (independent) level, higher == more prompting
+    support. Averaging this per day gives a "how much help did the learner
+    need" line that trends down as prompts fade.
+    """
+    result: dict[int, dict[str, int]] = {}
+    for target in Target.objects.filter(id__in=target_ids).select_related('prompting_template'):
+        levels = (target.prompting_template.levels if target.prompting_template else None) or []
+        n = len(levels)
+        ranks: dict[str, int] = {}
+        for idx, lvl in enumerate(levels):
+            label = (lvl or {}).get('label')
+            if label:
+                ranks[label] = n - 1 - idx
+        result[target.id] = ranks
     return result
 
 
@@ -201,32 +215,26 @@ def get_trial_data_by_day(
         return []
 
     max_scores = _max_scores_for_targets(target_ids)
+    prompt_ranks = _prompt_rank_maps(target_ids)
 
-    base_fields = ['recorded_at__date', 'target_id', 'target_name', 'response_score', 'sub_item_key', 'session_run_id']
+    base_fields = ['recorded_at__date', 'target_id', 'target_name', 'response_score',
+                   'sub_item_key', 'session_run_id', 'prompt_level_label']
     qs = TrialEvent.objects.filter(
         target_id__in=target_ids,
         recorded_at__date__gte=date_from,
         recorded_at__date__lte=date_to,
     )
-    if group_by == 'prompt_level':
-        raw = list(qs.values(*base_fields, 'prompt_level_label'))
-    elif group_by == 'user':
+    if group_by == 'user':
         raw = list(qs.values(*base_fields, 'session_run__staff_id', 'session_run__staff__first_name', 'session_run__staff__last_name'))
     else:
         raw = list(qs.values(*base_fields))
 
-    # Rate/Learning-Opps-rate metrics divide by session duration — each
-    # session's (ended_at - started_at) counted once, not once per trial,
-    # since one session can hold many trials across many targets. Sessions
-    # still open (no ended_at) contribute 0 rather than skewing the rate.
     session_ids = {e['session_run_id'] for e in raw}
     session_seconds: dict[int, float] = {
         s.id: (s.ended_at - s.started_at).total_seconds()
         for s in SessionRun.objects.filter(id__in=session_ids, ended_at__isnull=False).only('id', 'started_at', 'ended_at')
     }
 
-    # Build module/submodule lookup from live Target rows — only meaningful
-    # for the per-target grouping; other groupings collapse across targets.
     target_meta: dict[int, dict] = {
         t.id: {'module_id': t.module_id, 'submodule_id': t.submodule_id}
         for t in Target.objects.filter(id__in=target_ids).only('id', 'module_id', 'submodule_id')
@@ -237,7 +245,10 @@ def get_trial_data_by_day(
     sub_names = _submodule_name_map(sub_ids)
     child_series = _sub_item_series(target_ids) if group_by == 'target' else {}
 
-    grouped: dict[tuple, dict] = defaultdict(lambda: {'total': 0, 'correct': 0, 'name': '', 'parent_target_id': None, 'session_ids': set()})
+    grouped: dict[tuple, dict] = defaultdict(lambda: {
+        'total': 0, 'correct': 0, 'name': '', 'parent_target_id': None, 'session_ids': set(),
+        'prompt_rank_sum': 0.0, 'prompt_rank_count': 0,
+    })
     for event in raw:
         if group_by == 'prompt_level':
             series_id: int | str = event['prompt_level_label'] or 'Unscored'
@@ -263,6 +274,10 @@ def get_trial_data_by_day(
         )
         if is_correct:
             grouped[key]['correct'] += 1
+        rank = prompt_ranks.get(event['target_id'], {}).get(event.get('prompt_level_label'))
+        if rank is not None:
+            grouped[key]['prompt_rank_sum'] += rank
+            grouped[key]['prompt_rank_count'] += 1
 
     result: list[TrialDataPoint] = []
     for (day, sid), data in sorted(grouped.items()):
@@ -284,6 +299,8 @@ def get_trial_data_by_day(
             'correct_count': correct,
             'pct_correct': round(correct / total * 100, 1) if total else 0.0,
             'duration_seconds': duration_seconds,
+            'prompt_level_sum': round(data['prompt_rank_sum'], 2),
+            'prompt_level_count': data['prompt_rank_count'],
         })
     return result
 
@@ -911,9 +928,6 @@ def get_client_progress_overview(client_id: int) -> ClientProgressOverview:
     for t in all_targets:
         targets_by_program[t.program_id].append(t)
 
-    # Earliest transition into 'mastered' per target — 'mastered' is the
-    # built-in seed status key (see Target model comment); same convention
-    # already used by get_client_progress_report's mastered_targets count.
     mastery_ts: dict[int, 'date'] = {}
     for change in (
         TargetStatusChange.objects
