@@ -52,7 +52,7 @@ class _SuperuserOnlyAdminMixin:
 class CentralTargetInline(_SuperuserOnlyAdminMixin, TabularInline):
     model = CentralTarget
     extra = 0
-    fields = ['name', 'measurement_type', 'sd_text', 'display_order', 'is_visible_to_staff']
+    fields = ['name', 'measurement_type', 'measurement', 'timer_type', 'sd_text', 'display_order', 'is_visible_to_staff']
     ordering = ['display_order']
 
 
@@ -84,8 +84,8 @@ class CentralProgramFolderAdmin(_SuperuserOnlyAdminMixin, ModelAdmin):
 
 @admin.register(CentralTarget)
 class CentralTargetAdmin(_SuperuserOnlyAdminMixin, ModelAdmin):
-    list_display = ['name', 'program', 'measurement_type', 'display_order', 'is_visible_to_staff']
-    list_filter = ['measurement_type']
+    list_display = ['name', 'program', 'measurement_type', 'measurement', 'timer_type', 'display_order', 'is_visible_to_staff']
+    list_filter = ['measurement_type', 'measurement']
     search_fields = ['name', 'sd_text']
 
 

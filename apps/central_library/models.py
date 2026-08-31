@@ -115,6 +115,8 @@ class CentralTarget(models.Model):
     measurement_type = models.CharField(
         max_length=30, choices=MeasurementType.choices, default=MeasurementType.DISCRETE_TRIAL,
     )
+    measurement = models.CharField(max_length=32, blank=True, default='')
+    timer_type = models.CharField(max_length=20, blank=True, default='')
     sub_items = models.JSONField(default=list, blank=True)
     sd_text = models.TextField(blank=True, verbose_name='Discriminative Stimulus')
     teaching_instructions = models.TextField(blank=True)

@@ -152,6 +152,10 @@ class TrialEvent(OrganizationScopedMixin):
     # target's sub_items[].key for task_analysis/set_of_targets/shaping — multiple
     # rows then share one trial_number, together representing a single "pass".
     sub_item_key = models.CharField(max_length=100, blank=True, default='')
+    # Set only for a Duration step ("step to target" with measurement_type
+    # 'duration') within a task-analysis/set/shaping pass — the observed
+    # seconds for that step. Null for every plain pass/fail trial.
+    value_seconds = models.FloatField(null=True, blank=True)
     recorded_at = models.DateTimeField(db_index=True)
     staff_notes = models.TextField(blank=True)
 

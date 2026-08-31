@@ -26,6 +26,10 @@ class BehaviorDataPointSchema(Schema):
     submodule_name: str | None
     frequency: int
     total_duration_seconds: int
+    measurement: str = ''
+    measurement_value: float = 0.0
+    measurement_label: str = 'Frequency'
+    measurement_unit: str = 'count'
 
 
 class TargetSummarySchema(Schema):

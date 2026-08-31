@@ -7,6 +7,10 @@ from ninja.errors import HttpError
 
 from apps.accounts.auth import jwt_auth
 from apps.accounts.permissions import require_permission
+from apps.programs.measurements import (
+    aggregate_measurement, MEASUREMENT_LABELS,
+    DURATION_MEASUREMENTS, RATE_MEASUREMENTS, BEHAVIOR_STYLE_MEASUREMENTS,
+)
 from shared.uploads import validate_media_upload
 from .models import Appointment, SessionRun, TrialEvent, BehaviorEvent, ABCEvent, SessionMedia, SessionMediaComment
 from .schemas import (
@@ -109,6 +113,17 @@ def _build_trial_summary(session_run: SessionRun) -> list[TrialSummaryItem]:
             correct_count=correct,
             pct_correct=round((correct / total * 100), 1) if total else 0.0,
         ))
+
+    behavior_targets = _behavior_style_targets(session_run.program_snapshot)
+    if behavior_targets:
+        rows = list(
+            BehaviorEvent.objects
+            .filter(session_run=session_run, target_id__in=behavior_targets)
+            .values('target_id', 'target_name', 'frequency_count', 'duration_seconds')
+        )
+        result += _behavior_summary_items(
+            rows, behavior_targets, _session_window_seconds(session_run),
+        )
     return result
 
 
@@ -137,6 +152,21 @@ def _trial_summaries_for_sessions(sessions: list[SessionRun]) -> dict[int, list[
         t['total'] += row['count']
         t['score_counts'][row['response_score']] = t['score_counts'].get(row['response_score'], 0) + row['count']
 
+    # Behavior-style targets (duration / rate / frequency) across the same
+    # session set — one extra query rather than per-session.
+    behavior_by_session: dict[int, dict[int, str]] = {
+        s.id: _behavior_style_targets(s.program_snapshot) for s in sessions
+    }
+    all_behavior_target_ids = {tid for m in behavior_by_session.values() for tid in m}
+    behavior_rows_by_session: dict[int, list[dict]] = {}
+    if all_behavior_target_ids:
+        for row in (
+            BehaviorEvent.objects
+            .filter(session_run_id__in=session_ids, target_id__in=all_behavior_target_ids)
+            .values('session_run_id', 'target_id', 'target_name', 'frequency_count', 'duration_seconds')
+        ):
+            behavior_rows_by_session.setdefault(row['session_run_id'], []).append(row)
+
     result: dict[int, list[TrialSummaryItem]] = {}
     for session in sessions:
         by_target = by_session.get(session.id, {})
@@ -152,6 +182,13 @@ def _trial_summaries_for_sessions(sessions: list[SessionRun]) -> dict[int, list[
                 correct_count=correct,
                 pct_correct=round((correct / total * 100), 1) if total else 0.0,
             ))
+        behavior_targets = behavior_by_session.get(session.id) or {}
+        if behavior_targets:
+            items += _behavior_summary_items(
+                behavior_rows_by_session.get(session.id, []),
+                behavior_targets,
+                _session_window_seconds(session),
+            )
         result[session.id] = items
     return result
 
@@ -165,6 +202,76 @@ def _max_score_for_target(snapshot: dict, target_id: int) -> int | None:
                 if pt and pt.get('levels'):
                     return max(level['score'] for level in pt['levels'])
     return None
+
+
+_BEHAVIOR_TARGET_TYPES = {'duration', 'rate', 'frequency'}
+_DEFAULT_MEASUREMENT_FOR_TYPE = {
+    'duration': 'total_observed_duration',
+    'rate': 'rate_per_minute',
+    'frequency': 'frequency',
+}
+
+
+def _behavior_style_targets(snapshot: dict) -> dict[int, str]:
+    """{target_id: measurement} for snapshot targets whose data point is a
+    duration / rate / frequency value computed from BehaviorEvents rather than
+    trial accuracy."""
+    out: dict[int, str] = {}
+    for program in snapshot.get('programs', []):
+        for t in program.get('targets', []):
+            measurement = t.get('measurement') or ''
+            mtype = t.get('measurement_type') or ''
+            if measurement in BEHAVIOR_STYLE_MEASUREMENTS:
+                out[t['id']] = measurement
+            elif mtype in _BEHAVIOR_TARGET_TYPES and measurement != 'percent_correct':
+                out[t['id']] = measurement or _DEFAULT_MEASUREMENT_FOR_TYPE[mtype]
+    return out
+
+
+def _session_window_seconds(session_run: SessionRun) -> float | None:
+    start = session_run.started_at
+    end = session_run.ended_at or session_run.submitted_at or session_run.reviewed_at
+    if not start or not end or end <= start:
+        return None
+    return (end - start).total_seconds()
+
+
+def _behavior_summary_items(
+    rows: list[dict], target_measurement: dict[int, str], window_seconds: float | None,
+) -> list[TrialSummaryItem]:
+    """rows: BehaviorEvent .values('target_id','target_name','frequency_count','duration_seconds')
+    already scoped to one session and to target_measurement's keys."""
+    grouped: dict[int, dict] = {}
+    for r in rows:
+        g = grouped.setdefault(r['target_id'], {'name': r['target_name'], 'count': 0, 'durations': []})
+        g['count'] += r['frequency_count']
+        if r['duration_seconds'] is not None:
+            g['durations'].append(r['duration_seconds'])
+
+    items: list[TrialSummaryItem] = []
+    for target_id, measurement in target_measurement.items():
+        g = grouped.get(target_id)
+        if not g:
+            continue
+        if measurement in DURATION_MEASUREMENTS:
+            value = aggregate_measurement(measurement, durations=g['durations'])
+        elif measurement in RATE_MEASUREMENTS:
+            value = aggregate_measurement(
+                measurement, event_count=g['count'], seconds_elapsed=window_seconds,
+            )
+        else:
+            value = float(g['count'])
+        items.append(TrialSummaryItem(
+            target_id=target_id,
+            target_name=g['name'],
+            total_trials=g['count'],
+            correct_count=0,
+            pct_correct=0.0,
+            measurement=measurement,
+            measurement_value=round(value, 2),
+            measurement_label=MEASUREMENT_LABELS.get(measurement, 'Frequency'),
+        ))
+    return items
 
 
 def _get_tpms_appointment(external_appointment_id: int | None):
@@ -908,6 +1015,7 @@ def sync_session(request, session_id: int, data: SessionSyncPayload):
                 'target_name': t.target_name,
                 'response_score': t.response_score,
                 'prompt_level_label': t.prompt_level_label,
+                'value_seconds': t.value_seconds,
                 'recorded_at': t.recorded_at,
                 'staff_notes': t.staff_notes,
             },

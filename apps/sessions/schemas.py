@@ -77,6 +77,9 @@ class TrialSummaryItem(Schema):
     total_trials: int
     correct_count: int
     pct_correct: float
+    measurement: str = ''
+    measurement_value: float = 0.0
+    measurement_label: str = ''
 
 
 class SessionRunSchema(Schema):
@@ -154,6 +157,7 @@ class TrialEventSchema(Schema):
     response_score: int
     prompt_level_label: str
     sub_item_key: str = ''
+    value_seconds: float | None = None
     recorded_at: datetime
     staff_notes: str
 
@@ -165,6 +169,8 @@ class TrialEventCreateRequest(Schema):
     response_score: int
     prompt_level_label: str
     sub_item_key: str = ''
+    # Observed seconds for a Duration step within a chain pass; omit otherwise.
+    value_seconds: float | None = Field(default=None, ge=0)
     recorded_at: datetime
     staff_notes: str = ''
 

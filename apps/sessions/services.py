@@ -86,7 +86,13 @@ def _snapshot_sub_items(target) -> list[dict]:
     children = list(target.child_items.all().order_by('display_order', 'id'))
     if children:
         return [
-            {'key': item.key, 'label': item.label, 'status': item.status}
+            {
+                'key': item.key, 'label': item.label, 'status': item.status,
+                'measurement_type': item.measurement_type,
+                'measurement': item.measurement,
+                'prompting_template_id': item.prompting_template_id,
+                'workflow_template_id': item.workflow_template_id,
+            }
             for item in children
         ]
     return target.sub_items
@@ -144,10 +150,19 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
                 'name': target.name,
                 'status': target.status,
                 'measurement_type': target.measurement_type,
+                'measurement': target.measurement,
+                'timer_type': target.timer_type,
                 'sub_items': _snapshot_sub_items(target),
                 'sub_item_progression': target.sub_item_progression,
                 'sd_text': target.sd_text,
                 'teaching_instructions': target.teaching_instructions,
+                'instructions_html': target.instructions_html,
+                'interval_seconds': target.interval_seconds,
+                'interval_sync_with_session': target.interval_sync_with_session,
+                'interval_warn_before_end': target.interval_warn_before_end,
+                'interval_pause_on_warning': target.interval_pause_on_warning,
+                'interval_warn_seconds_before': target.interval_warn_seconds_before,
+                'interval_warning_sound': target.interval_warning_sound,
                 'prompting_template': {
                     'id': pt.id,
                     'name': pt.name,

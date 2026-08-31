@@ -3,12 +3,22 @@ from __future__ import annotations
 from django.db.models import Min, Max, Sum
 
 from apps.programs.models import Target, TargetPromptLevelChange, TargetStatusChange, TargetSubItem, TargetSubItemStatusChange
+from apps.programs.measurements import (
+    aggregate_measurement,
+    objective_key_for_measurement,
+    DURATION_MEASUREMENTS,
+    RATE_MEASUREMENTS,
+)
 
 
+# Target types whose data is recorded as BehaviorEvents rather than trials.
+# 'frequency' is a legacy MeasurementType value (no longer offered when
+# creating a target) that some existing rows still carry — kept as a plain
+# string so this set survives the enum no longer defining it.
 BEHAVIOR_MEASUREMENT_TYPES = {
     Target.MeasurementType.DURATION,
     Target.MeasurementType.RATE,
-    Target.MeasurementType.FREQUENCY,
+    'frequency',
 }
 
 
@@ -204,11 +214,23 @@ def _pass_stats(target: Target, trials_qs, *, require_independent: bool = False)
         return total, correct
 
     expected_keys = {item.get('key') for item in _scorable_sub_items(target.sub_items)}
+    # A Duration step has no prompt hierarchy — it "passes" a chain iteration
+    # whenever an observation (value_seconds) was recorded for it, regardless
+    # of the parent's success score.
+    duration_keys = {
+        item.get('key') for item in target.sub_items
+        if item.get('measurement_type') == 'duration'
+    }
     scored_keys: dict[int, set] = {}
     correct_keys: dict[int, set] = {}
-    for score, trial_number, key in trials_qs.values_list('response_score', 'trial_number', 'sub_item_key'):
+    for score, trial_number, key, value_seconds in trials_qs.values_list(
+        'response_score', 'trial_number', 'sub_item_key', 'value_seconds',
+    ):
         scored_keys.setdefault(trial_number, set()).add(key)
-        is_correct = score >= max_score if max_score is not None else score > 0
+        if key in duration_keys:
+            is_correct = value_seconds is not None
+        else:
+            is_correct = score >= max_score if max_score is not None else score > 0
         if is_correct:
             correct_keys.setdefault(trial_number, set()).add(key)
 
@@ -240,6 +262,20 @@ def _limit_trials_if_configured(trials_qs, criteria: dict):
     return trials_qs.filter(trial_number__in=trial_numbers)
 
 
+def _observation_seconds(session, events) -> float | None:
+    """Length of the window a rate is measured over: the session's own
+    start→end if known, else the span between the first and last recorded
+    event. None when neither is usable."""
+    start = session.started_at
+    end = session.ended_at or session.submitted_at or session.reviewed_at
+    if not start or not end or end <= start:
+        bounds = events.aggregate(start=Min('occurred_at'), end=Max('occurred_at'))
+        start, end = bounds['start'], bounds['end']
+    if not start or not end or end <= start:
+        return None
+    return (end - start).total_seconds()
+
+
 def _behavior_metric_value(target: Target, session, criteria: dict) -> tuple[int, float]:
     """Returns (sample_count, value) for behavior-style workflow objectives.
 
@@ -251,6 +287,20 @@ def _behavior_metric_value(target: Target, session, criteria: dict) -> tuple[int
     events = BehaviorEvent.objects.filter(session_run=session, target_id=target.id)
     total_events = events.aggregate(total=Sum('frequency_count'))['total'] or 0
     objective_key = str(criteria.get('objective_key') or '').lower()
+
+    # No explicit workflow objective_key — the target's own `measurement`
+    # fully decides which metric to roll up to (min/max/avg/total duration,
+    # rate per hour/minute, or raw frequency).
+    if not objective_key and target.measurement:
+        m = target.measurement
+        if m in DURATION_MEASUREMENTS:
+            durations = [d for d in events.values_list('duration_seconds', flat=True) if d is not None]
+            return len(durations), aggregate_measurement(m, durations=durations)
+        if m in RATE_MEASUREMENTS:
+            return total_events, aggregate_measurement(
+                m, event_count=total_events, seconds_elapsed=_observation_seconds(session, events),
+            )
+        return total_events, float(total_events)  # frequency / percent_correct
 
     if target.measurement_type == Target.MeasurementType.DURATION or 'duration' in objective_key:
         durations = [d for d in events.values_list('duration_seconds', flat=True) if d is not None]
@@ -286,7 +336,16 @@ def _session_meets_criteria(target: Target, session, phase_config: dict, criteri
     threshold = criteria.get('threshold_pct', 80)
     threshold_direction = str(criteria.get('threshold_direction') or 'min').lower()
 
-    objective_key = str(criteria.get('objective_key') or phase_config.get('objective_key') or '').lower()
+    # An explicit workflow objective_key wins; otherwise fall back to the one
+    # implied by the target's own `measurement` (so a Duration target set to
+    # "Min. Observed Duration" is evaluated on the minimum, not the total,
+    # without every WorkflowTemplate having to spell it out).
+    objective_key = str(
+        criteria.get('objective_key')
+        or phase_config.get('objective_key')
+        or objective_key_for_measurement(target.measurement)
+        or ''
+    ).lower()
     criteria = {**criteria, 'objective_key': objective_key}
 
     if target.measurement_type in BEHAVIOR_MEASUREMENT_TYPES or objective_key in {

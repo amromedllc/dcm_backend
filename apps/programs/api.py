@@ -22,7 +22,8 @@ from .models import (
     TreatmentArea, ProgramTag, ProgramDataField, TargetStatus,
     TargetStatusChange, TargetPromptLevelChange, ProgramFolder,
     ProgramModule, ProgramSubmodule, TargetSubItem, TargetSubItemStatusChange,
-    SavedTableView,
+    SavedTableView, SubTargetMeasurementType,
+    allowed_measurements, default_measurement, TIMER_TARGET_TYPES,
 )
 from .schemas import (
     ProgramSchema, ProgramListSchema, ProgramCreateRequest, ProgramUpdateRequest, ProgramMaterialSchema,
@@ -559,6 +560,66 @@ def _require_sub_items_if_needed(measurement_type: str, sub_items: list) -> None
         raise HttpError(400, f'{measurement_type} targets require at least one sub_item')
 
 
+# Values that older targets may still carry after the MeasurementType enum was
+# consolidated — tolerated on update so an unrelated edit to such a target
+# doesn't fail, but not offered for new targets.
+_LEGACY_MEASUREMENT_TYPES = {'trial_by_trial', 'frequency', 'whole_interval', 'partial_interval'}
+
+
+def _validate_interval_warning_sound(value: str | None) -> None:
+    if value and value not in Target.IntervalWarningSound.values:
+        raise HttpError(
+            400,
+            f'Invalid interval_warning_sound "{value}"; choose one of: '
+            f'{", ".join(Target.IntervalWarningSound.values)}',
+        )
+
+
+def _validate_measurement_type(value: str, *, allow_legacy: bool) -> None:
+    if value in Target.MeasurementType.values:
+        return
+    if allow_legacy and value in _LEGACY_MEASUREMENT_TYPES:
+        return
+    raise HttpError(
+        400,
+        f'Invalid measurement_type "{value}"; choose one of: '
+        f'{", ".join(Target.MeasurementType.values)}',
+    )
+
+
+def _resolve_measurement_fields(
+    measurement_type: str,
+    measurement: str | None,
+    timer_type: str | None,
+) -> tuple[str, str]:
+    """Normalize (measurement, timer_type) against the target type.
+
+    - blank/None measurement -> the default for this target type
+    - a measurement not valid for this target type -> 400
+    - timer_type is only kept for target types in TIMER_TARGET_TYPES (rate); an
+      explicit timer_type on any other target type is a 400. A rate target with
+      no timer_type falls back to count_up.
+    """
+    valid = allowed_measurements(measurement_type)
+    resolved_measurement = measurement or default_measurement(measurement_type)
+    if resolved_measurement not in valid:
+        raise HttpError(
+            400,
+            f'measurement "{resolved_measurement}" is not valid for a '
+            f'{measurement_type} target; choose one of: {", ".join(valid)}',
+        )
+
+    resolved_timer = (timer_type or '').strip()
+    if measurement_type in TIMER_TARGET_TYPES:
+        if resolved_timer and resolved_timer not in Target.TimerType.values:
+            raise HttpError(400, f'Invalid timer_type: {resolved_timer}')
+        resolved_timer = resolved_timer or Target.TimerType.COUNT_UP
+    elif resolved_timer:
+        raise HttpError(400, 'timer_type only applies to rate targets')
+
+    return resolved_measurement, resolved_timer
+
+
 def _default_sub_item_status(target: Target, index: int, total: int) -> str:
     if target.sub_item_progression == Target.SubItemProgression.TOTAL_TASK:
         return TargetSubItem.Status.ACQUISITION
@@ -567,7 +628,65 @@ def _default_sub_item_status(target: Target, index: int, total: int) -> str:
     return TargetSubItem.Status.ACQUISITION if index == 0 else TargetSubItem.Status.WAITING
 
 
-def _sync_target_sub_items(target: Target, items: list[dict], user=None) -> None:
+def _resolve_sub_item_config(request, target: Target, raw: dict) -> dict:
+    """Per-step ('step to target') config, inheriting the parent Target's
+    default_sub_* when a field is absent. Returns
+    {measurement_type, measurement, prompting_template_id, workflow_template_id}."""
+    mt = str(raw.get('measurement_type') or target.default_sub_measurement_type or SubTargetMeasurementType.DISCRETE_TRIAL)
+    if mt not in SubTargetMeasurementType.values:
+        raise HttpError(400, f'A step\'s measurement_type must be one of: {", ".join(SubTargetMeasurementType.values)}')
+
+    measurement = str(raw.get('measurement') or '') or target.default_sub_measurement or default_measurement(mt)
+    if measurement not in allowed_measurements(mt):
+        raise HttpError(
+            400,
+            f'measurement "{measurement}" is not valid for a {mt} step; '
+            f'choose one of: {", ".join(allowed_measurements(mt))}',
+        )
+
+    pt_id = raw.get('prompting_template_id')
+    pt_id = target.default_sub_prompting_template_id if pt_id is None else pt_id
+    wf_id = raw.get('workflow_template_id')
+    wf_id = target.default_sub_workflow_template_id if wf_id is None else wf_id
+    # request is None for server-side copy/import paths — the FK ids there
+    # already come from same-org rows, so skip the practice-scoped check.
+    if request is not None:
+        if pt_id is not None and not _settings_qs(PromptingTemplate, request).filter(id=pt_id).exists():
+            raise HttpError(400, f'Invalid prompting_template_id on step: {pt_id}')
+        if wf_id is not None and not _settings_qs(WorkflowTemplate, request).filter(id=wf_id).exists():
+            raise HttpError(400, f'Invalid workflow_template_id on step: {wf_id}')
+
+    return {
+        'measurement_type': mt,
+        'measurement': measurement,
+        'prompting_template_id': pt_id,
+        'workflow_template_id': wf_id,
+    }
+
+
+def _validate_default_sub_fields(request, data: dict) -> None:
+    """Validate/normalize a target's default_sub_* config in-place (the values a
+    newly added step inherits). Only relevant for sub_item target types."""
+    mt = data.get('default_sub_measurement_type') or SubTargetMeasurementType.DISCRETE_TRIAL
+    if mt not in SubTargetMeasurementType.values:
+        raise HttpError(400, f'default_sub_measurement_type must be one of: {", ".join(SubTargetMeasurementType.values)}')
+    data['default_sub_measurement_type'] = mt
+
+    measurement = data.get('default_sub_measurement') or ''
+    if measurement and measurement not in allowed_measurements(mt):
+        raise HttpError(400, f'default_sub_measurement "{measurement}" is not valid for a {mt} step')
+    data['default_sub_measurement'] = measurement or default_measurement(mt)
+
+    for field, model in (
+        ('default_sub_prompting_template_id', PromptingTemplate),
+        ('default_sub_workflow_template_id', WorkflowTemplate),
+    ):
+        fk_id = data.get(field)
+        if fk_id is not None and not _settings_qs(model, request).filter(id=fk_id).exists():
+            raise HttpError(400, f'Invalid {field}: {fk_id}')
+
+
+def _sync_target_sub_items(request, target: Target, items: list[dict], user=None) -> None:
     existing = {item.key: item for item in target.child_items.all()}
     seen: set[str] = set()
     normalized: list[dict] = []
@@ -582,6 +701,7 @@ def _sync_target_sub_items(target: Target, items: list[dict], user=None) -> None
         if status and not TargetSubItem.Status.values.__contains__(status):
             raise HttpError(400, f'Invalid sub item status: {status}')
         status = status or _default_sub_item_status(target, idx, total)
+        cfg = _resolve_sub_item_config(request, target, raw)
         seen.add(key)
 
         child = existing.get(key)
@@ -590,7 +710,14 @@ def _sync_target_sub_items(target: Target, items: list[dict], user=None) -> None
             child.label = label
             child.status = status
             child.display_order = idx
-            child.save(update_fields=['label', 'status', 'display_order', 'updated_at'])
+            child.measurement_type = cfg['measurement_type']
+            child.measurement = cfg['measurement']
+            child.prompting_template_id = cfg['prompting_template_id']
+            child.workflow_template_id = cfg['workflow_template_id']
+            child.save(update_fields=[
+                'label', 'status', 'display_order', 'measurement_type',
+                'measurement', 'prompting_template', 'workflow_template', 'updated_at',
+            ])
             if old_status != status:
                 TargetSubItemStatusChange.objects.create(
                     sub_item=child,
@@ -606,6 +733,10 @@ def _sync_target_sub_items(target: Target, items: list[dict], user=None) -> None
                 label=label,
                 status=status,
                 display_order=idx,
+                measurement_type=cfg['measurement_type'],
+                measurement=cfg['measurement'],
+                prompting_template_id=cfg['prompting_template_id'],
+                workflow_template_id=cfg['workflow_template_id'],
                 created_by=user,
             )
             TargetSubItemStatusChange.objects.create(
@@ -615,7 +746,7 @@ def _sync_target_sub_items(target: Target, items: list[dict], user=None) -> None
                 trigger=TargetSubItemStatusChange.Trigger.MANUAL,
                 created_by=user,
             )
-        normalized.append({'key': key, 'label': label, 'status': status})
+        normalized.append({'key': key, 'label': label, 'status': status, **cfg})
 
     target.child_items.exclude(key__in=seen).delete()
     if target.sub_items != normalized:
@@ -628,7 +759,13 @@ def _refresh_target_sub_items_json(target: Target) -> None:
     if not children:
         return
     serialized = [
-        {'key': item.key, 'label': item.label, 'status': item.status}
+        {
+            'key': item.key, 'label': item.label, 'status': item.status,
+            'measurement_type': item.measurement_type,
+            'measurement': item.measurement,
+            'prompting_template_id': item.prompting_template_id,
+            'workflow_template_id': item.workflow_template_id,
+        }
         for item in children
     ]
     if target.sub_items != serialized:
@@ -666,14 +803,22 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
     else:
         default_status = _settings_qs(TargetStatus, request, include_org_defaults=True).filter(is_default=True).first()
         target_data['status'] = default_status.key if default_status else 'waiting'
+    _validate_measurement_type(target_data['measurement_type'], allow_legacy=False)
+    _validate_interval_warning_sound(target_data.get('interval_warning_sound'))
     _require_sub_items_if_needed(target_data['measurement_type'], target_data['sub_items'])
+    target_data['measurement'], target_data['timer_type'] = _resolve_measurement_fields(
+        target_data['measurement_type'],
+        target_data.get('measurement'),
+        target_data.get('timer_type'),
+    )
+    _validate_default_sub_fields(request, target_data)
     target = Target.objects.create(
         program=program,
         created_by=request.user,
         **target_data,
     )
     if target.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
-        _sync_target_sub_items(target, target.sub_items, request.user)
+        _sync_target_sub_items(request, target, target.sub_items, request.user)
     return 201, target
 
 
@@ -695,12 +840,42 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
         target.current_prompt_level_index = 0
     if 'status' in updates:
         _validate_target_status(request, updates['status'])
+    if 'interval_warning_sound' in updates:
+        _validate_interval_warning_sound(updates['interval_warning_sound'])
+    mt_changed = 'measurement_type' in updates
+    if mt_changed:
+        _validate_measurement_type(updates['measurement_type'], allow_legacy=True)
+    if mt_changed or 'measurement' in updates or 'timer_type' in updates:
+        # When the target type changes without an explicit measurement/timer,
+        # reset those to the new type's default rather than carrying over a
+        # now-invalid value.
+        target.measurement, target.timer_type = _resolve_measurement_fields(
+            target.measurement_type,
+            updates['measurement'] if 'measurement' in updates else (None if mt_changed else target.measurement),
+            updates['timer_type'] if 'timer_type' in updates else (None if mt_changed else target.timer_type),
+        )
+    default_sub_changed = any(
+        k in updates for k in (
+            'default_sub_measurement_type', 'default_sub_measurement',
+            'default_sub_prompting_template_id', 'default_sub_workflow_template_id',
+        )
+    )
+    if default_sub_changed:
+        resolved = {
+            'default_sub_measurement_type': target.default_sub_measurement_type,
+            'default_sub_measurement': target.default_sub_measurement,
+            'default_sub_prompting_template_id': target.default_sub_prompting_template_id,
+            'default_sub_workflow_template_id': target.default_sub_workflow_template_id,
+        }
+        _validate_default_sub_fields(request, resolved)
+        for k, v in resolved.items():
+            setattr(target, k, v)
     _require_sub_items_if_needed(target.measurement_type, target.sub_items)
     target.save()
     if target.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES and (
-        'sub_items' in updates or 'sub_item_progression' in updates
+        'sub_items' in updates or 'sub_item_progression' in updates or default_sub_changed
     ):
-        _sync_target_sub_items(target, target.sub_items, request.user)
+        _sync_target_sub_items(request, target, target.sub_items, request.user)
     elif target.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
         _refresh_target_sub_items_json(target)
     return target
@@ -806,12 +981,30 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
     if updates.get('status'):
         _validate_target_status(request, updates['status'])
 
+    if 'measurement_type' in updates:
+        _validate_measurement_type(updates['measurement_type'], allow_legacy=True)
+
     if updates.get('measurement_type') in _SUB_ITEM_MEASUREMENT_TYPES:
         missing_sub_items = Target.objects.filter(
             id__in=data.target_ids, program_id=program_id, sub_items=[],
         ).exists()
         if missing_sub_items:
             raise HttpError(400, f'{updates["measurement_type"]} requires targets to already have sub_items')
+
+    if 'measurement' in updates or 'timer_type' in updates:
+        # The valid set depends on the target type — require it in the same
+        # request so the combination is unambiguous across the whole batch.
+        if 'measurement_type' not in updates:
+            raise HttpError(400, 'measurement_type is required when bulk-setting measurement or timer_type')
+        updates['measurement'], updates['timer_type'] = _resolve_measurement_fields(
+            updates['measurement_type'], updates.get('measurement'), updates.get('timer_type'),
+        )
+    elif 'measurement_type' in updates:
+        # Target type changed without an explicit measurement — reset both to
+        # the new type's default so no row is left on an invalid combination.
+        updates['measurement'], updates['timer_type'] = _resolve_measurement_fields(
+            updates['measurement_type'], None, None,
+        )
 
     if 'prompting_template_id' in updates:
         updates['current_prompt_level_index'] = 0
@@ -1403,11 +1596,24 @@ def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
             program=dest,
             name=t.name,
             measurement_type=t.measurement_type,
+            measurement=t.measurement,
+            timer_type=t.timer_type,
             sub_items=reset_sub_items,
             sub_item_progression=t.sub_item_progression,
+            default_sub_measurement_type=t.default_sub_measurement_type,
+            default_sub_measurement=t.default_sub_measurement,
+            default_sub_prompting_template=t.default_sub_prompting_template,
+            default_sub_workflow_template=t.default_sub_workflow_template,
             prompting_template=t.prompting_template,
             sd_text=t.sd_text,
             teaching_instructions=t.teaching_instructions,
+            instructions_html=t.instructions_html,
+            interval_seconds=t.interval_seconds,
+            interval_sync_with_session=t.interval_sync_with_session,
+            interval_warn_before_end=t.interval_warn_before_end,
+            interval_pause_on_warning=t.interval_pause_on_warning,
+            interval_warn_seconds_before=t.interval_warn_seconds_before,
+            interval_warning_sound=t.interval_warning_sound,
             status='waiting',
             display_order=t.display_order,
             is_visible_to_staff=t.is_visible_to_staff,
@@ -1416,7 +1622,7 @@ def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
             created_by=user,
         )
         if copied.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
-            _sync_target_sub_items(copied, copied.sub_items, user)
+            _sync_target_sub_items(None, copied, copied.sub_items, user)
     dest.refresh_from_db()
     return dest
 
@@ -1488,10 +1694,14 @@ def _serialize_central_program(
             {
                 'id': t['id'], 'name': t['name'], 'status': 'waiting',
                 'measurement_type': t['measurement_type'],
+                'measurement': t['measurement'], 'timer_type': t['timer_type'],
                 'display_order': t['display_order'], 'is_visible_to_staff': t['is_visible_to_staff'],
                 'already_copied': t['name'] in copied_names,
             }
-            for t in program.targets.all().values('id', 'name', 'measurement_type', 'display_order', 'is_visible_to_staff')
+            for t in program.targets.all().values(
+                'id', 'name', 'measurement_type', 'measurement', 'timer_type',
+                'display_order', 'is_visible_to_staff',
+            )
         ]
     target_count = program.targets.count()
     imported_target_count = min(import_progress.get(program.id, 0), target_count)
@@ -1646,10 +1856,15 @@ def _append_central_targets(dest: Program, targets, user) -> None:
         prompting_template = None
         if t.prompting_levels:
             prompting_template = PromptingTemplate.objects.create(name=f'{t.name} Prompting', levels=t.prompting_levels)
+        measurement, timer_type = _resolve_measurement_fields(
+            t.measurement_type, t.measurement or None, t.timer_type or None,
+        )
         copied = Target.objects.create(
             program=dest,
             name=t.name,
             measurement_type=t.measurement_type,
+            measurement=measurement,
+            timer_type=timer_type,
             sub_items=t.sub_items,
             sd_text=t.sd_text,
             teaching_instructions=t.teaching_instructions,
@@ -1659,7 +1874,7 @@ def _append_central_targets(dest: Program, targets, user) -> None:
             created_by=user,
         )
         if copied.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
-            _sync_target_sub_items(copied, copied.sub_items, user)
+            _sync_target_sub_items(None, copied, copied.sub_items, user)
 
 
 def _clone_central_program(program_id: int, user) -> Program:
