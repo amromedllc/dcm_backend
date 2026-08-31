@@ -16,7 +16,7 @@ from .schemas import (
     ReviewQueueItem,
     NoteAssignmentSchema, NoteAssignmentCreateRequest,
 )
-from .services import submit_note, approve_note, reject_note
+from .services import submit_note, approve_note, reject_note, resolve_template_tokens
 
 router = Router(auth=jwt_auth)
 
@@ -76,6 +76,7 @@ def _serialize_note(note: LessonNote) -> dict:
             }
             for sig in note.signatures.all()
         ],
+        'dynamic_fields': resolve_template_tokens(note),
         'created_at': note.created_at,
         'updated_at': note.updated_at,
     }
