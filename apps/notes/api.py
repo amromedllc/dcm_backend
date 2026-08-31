@@ -139,6 +139,7 @@ def list_notes(
     client_id: int | None = None,
     status: str | None = None,
     staff_id: int | None = None,
+    session_run_id: int | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
 ):
@@ -153,6 +154,8 @@ def list_notes(
         qs = qs.filter(external_client_id=client_id)
     if status:
         qs = qs.filter(status=status)
+    if session_run_id:
+        qs = qs.filter(session_run_id=session_run_id)
     if date_from:
         qs = qs.filter(note_date__gte=date_from)
     if date_to:
