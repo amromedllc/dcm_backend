@@ -15,8 +15,8 @@ from apps.integrations.tpms_auth_client import (
     TpmsAuthError,
     clear_tpms_access_token,
     get_tpms_access_token,
-    list_patients,
-    list_appointments,
+    list_providers,
+    list_provider_calendar,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ def _cached_list_patients(access_token: str, external_admin_id: int) -> list[dic
     except redis.RedisError:
         logger.warning('Redis unavailable for TPMS patient-list cache; falling back to live fetch', exc_info=True)
 
-    patients = list_patients(access_token, search=None)
+    patients = list_providers(access_token)
 
     try:
         _redis().set(cache_key, json.dumps(patients), ex=_PATIENT_LIST_CACHE_TTL_SECONDS)
@@ -118,174 +118,34 @@ def _list_native_clients(request, include_inactive: bool, search: str | None) ->
     return list(qs.order_by('last_name', 'first_name'))
 
 
-def _dig_patient(data: dict[str, Any], *keys: str) -> Any:
-    def norm(value: str) -> str:
-        return ''.join(ch for ch in value.lower() if ch.isalnum())
-
-    for key in keys:
-        if key in data and data[key] not in (None, ''):
-            return data[key]
-        normalized = norm(key)
-        for existing, value in data.items():
-            if norm(existing) == normalized and value not in (None, ''):
-                return value
-    for nested_key in ('client', 'patient', 'user', 'profile'):
-        nested = data.get(nested_key)
-        if isinstance(nested, dict):
-            value = _dig_patient(nested, *keys)
-            if value not in (None, ''):
-                return value
-    return None
-
-
-def _split_patient_name(value: Any) -> tuple[str, str]:
-    text = str(value or '').strip()
-    if not text:
-        return '', ''
-    if ',' in text:
-        last, first = [part.strip() for part in text.split(',', 1)]
-        return first, last
-    parts = text.split(' ', 1)
-    return parts[0], parts[1] if len(parts) > 1 else ''
-
-
-def _parse_patient_dob(value: Any) -> date | None:
-    if value is None or value == '':
-        return None
-    if isinstance(value, date) and not isinstance(value, datetime):
-        return value
-    if isinstance(value, datetime):
-        return value.date()
-    text = str(value).strip()
-    if not text:
-        return None
-    try:
-        return datetime.strptime(text[:10], '%Y-%m-%d').date()
-    except ValueError:
-        pass
-    for fmt in ('%m/%d/%Y', '%Y/%m/%d'):
-        try:
-            return datetime.strptime(text, fmt).date()
-        except ValueError:
-            continue
-    try:
-        return datetime.fromisoformat(text.replace('Z', '+00:00')).date()
-    except ValueError:
-        return None
-
-
-def _patient_is_active(patient: dict[str, Any]) -> bool:
-    raw = _dig_patient(
-        patient,
-        'patient_active_status',
-        'is_active_client',
-        'is_active',
-        'active',
-        'status',
-        'client_status',
-    )
-    if raw is None:
-        return True
-    if isinstance(raw, (int, float)):
-        return int(raw) != 0
-    text = str(raw).strip().lower()
-    # TherapyPMS iOS list uses labels like "Active", "On-Hold", "Wait-List".
-    if text in {'active', '1', 'true', 'yes'}:
-        return True
-    if text in {
-        '0', 'false', 'inactive', 'discharged', 'disabled', 'no',
-        'on-hold', 'on hold', 'wait-list', 'waitlist', 'pending approval',
-        'leaving soon', 'deleted',
-    }:
-        return False
-    return True
-
-
 def _map_patient_fields(patient: dict[str, Any], *, fallback_admin_id: int | None) -> dict[str, Any] | None:
-    ext_id = _dig_patient(patient, 'patient_id', 'id', 'client_id', 'patientid', 'clientid')
+    """
+    Maps GET /api/v1/ios/appointment/filter/providers rows — {"id", "name"}
+    only — onto Client fields. "name" is split on the first space into
+    first_name/last_name; with no space, the whole name goes to last_name.
+    No DOB/preferred-name/active-status data is available from this
+    endpoint, so those default (active, blank preferred name, no DOB).
+    """
+    ext_id = patient.get('id')
     if ext_id is None:
         return None
 
-    first = str(
-        _dig_patient(
-            patient,
-            'client_first_name',
-            'client_firstname',
-            'clientFirstName',
-            'patient_first_name',
-            'patientFirstName',
-            'first_name',
-            'firstname',
-            'fname',
-        ) or ''
-    ).strip()
-    last = str(
-        _dig_patient(
-            patient,
-            'client_last_name',
-            'client_lastname',
-            'clientLastName',
-            'patient_last_name',
-            'patientLastName',
-            'last_name',
-            'lastname',
-            'lname',
-        ) or ''
-    ).strip()
-    if not first and not last:
-        first, last = _split_patient_name(
-            _dig_patient(
-                patient,
-                'client_full_name',
-                'clientFullName',
-                'patient_full_name',
-                'patientFullName',
-                'patient_name',
-                'patientName',
-                'client_name',
-                'clientName',
-                'full_name',
-                'fullname',
-                'display_name',
-                'name',
-            )
-        )
-
-    admin_raw = _dig_patient(patient, 'admin_id', 'adminId', 'facility_id')
-    try:
-        admin_id = int(admin_raw) if admin_raw is not None else fallback_admin_id
-    except (TypeError, ValueError):
-        admin_id = fallback_admin_id
+    name = str(patient.get('name') or '').strip()
+    if ' ' in name:
+        first, last = name.split(' ', 1)
+        first, last = first.strip(), last.strip()
+    else:
+        first, last = '', name
 
     return {
         'external_id': str(ext_id),
         'first_name': first or 'Unknown',
         'last_name': last or 'Unknown',
-        'preferred_name': str(
-            _dig_patient(
-                patient,
-                'client_preferred',
-                'clientPreferred',
-                'preferred_name',
-                'preferredName',
-                'nickname',
-            ) or ''
-        ).strip(),
-        'date_of_birth': _parse_patient_dob(
-            _dig_patient(
-                patient,
-                'client_dob',
-                'clientDob',
-                'patient_dob',
-                'patientDob',
-                'date_of_birth',
-                'dateOfBirth',
-                'dob',
-            )
-        ),
-        'status': Client.Status.ACTIVE if _patient_is_active(patient) else Client.Status.INACTIVE,
-        'external_admin_id': admin_id,
-        'is_active': _patient_is_active(patient),
+        'preferred_name': '',
+        'date_of_birth': None,
+        'status': Client.Status.ACTIVE,
+        'external_admin_id': fallback_admin_id,
+        'is_active': True,
     }
 
 
@@ -369,16 +229,17 @@ def _sync_clients_from_tpms(
     include_inactive: bool,
     search: str | None,
 ) -> list[Client]:
-    """Fetch TPMS patients for this session and upsert into DCM Client rows."""
+    """Fetch TPMS providers for this session and upsert into DCM Client rows.
+
+    /api/v1/ios/appointment/filter/providers has no server-side search
+    param, so `search` is always applied client-side in
+    _upsert_clients_from_patients below."""
     token = get_tpms_access_token(request.user.id)
     if not token:
         raise HttpError(401, 'TherapyPMS session expired. Please log in again.')
 
     try:
-        if search:
-            patients = list_patients(token, search=search)
-        else:
-            patients = _cached_list_patients(token, request.user.external_admin_id)
+        patients = _cached_list_patients(token, request.user.external_admin_id)
     except TpmsAuthError as exc:
         if exc.status_code in {401, 403}:
             clear_tpms_access_token(request.user.id)
@@ -401,10 +262,13 @@ def list_clients(
     sync: bool = True,
 ):
     """
-    Returns patients scoped to the logged-in user's TherapyPMS session.
+    Returns providers scoped to the logged-in user's TherapyPMS session.
 
-    Uses GET /api/v1/ios/patient/list with the TPMS Bearer token captured at
-    login, then upserts DCM Client rows so programs/sessions keep a stable id.
+    Uses GET /api/v1/ios/appointment/filter/providers with the TPMS Bearer
+    token captured at login, then upserts DCM Client rows so
+    programs/sessions keep a stable id. Note: Client.external_id now holds a
+    TPMS *provider* id, not a patient id — the client-sessions endpoint below
+    still treats it as a patient id and has not been updated to match.
     """
     if request.user.external_admin_id is None or not sync:
         return _list_native_clients(request, include_inactive, search)
@@ -520,6 +384,13 @@ def _dig_appointment(data: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def _notes_text(value: Any) -> str:
+    """/ios/calendar's "comment" field uses the literal string "none" as its
+    empty placeholder rather than null/blank — treat that as no notes."""
+    text = str(value or '').strip()
+    return '' if text.lower() == 'none' else text
+
+
 def _parse_appointment_datetime(value: Any) -> datetime | None:
     if value is None or value == '':
         return None
@@ -585,6 +456,20 @@ def _strip_html(value: Any) -> str:
     return re.sub(r'\s+', ' ', text).strip()
 
 
+def _appointment_location(appt: dict[str, Any]) -> str | None:
+    return str(_dig_appointment(appt, 'location', 'pos', 'place_of_service', 'address') or '') or None
+
+
+def _appointment_telehealth_link(appt: dict[str, Any]) -> str | None:
+    """/ios/calendar's is_telehealth/telehealth_link fields on the
+    data_all row shape — a separate join link, kept out of `location` so
+    the frontend can render it as a distinct "Join" affordance."""
+    if not _dig_appointment(appt, 'is_telehealth'):
+        return None
+    link = _dig_appointment(appt, 'telehealth_link')
+    return str(link).strip() or None if link else None
+
+
 def _appointment_service_name(appt: dict[str, Any]) -> str:
     direct = _dig_appointment(
         appt,
@@ -593,6 +478,7 @@ def _appointment_service_name(appt: dict[str, Any]) -> str:
         'activity_name',
         'authorization_activity_name',
         'service_hour',
+        'service_name',  # /ios/calendar provider-filtered row shape (data_all)
     )
     if direct:
         return _strip_html(direct)
@@ -657,6 +543,7 @@ def _serialize_tpms_api_appointments(
                 'start_time',
                 'appointment_start_time',
                 'schedule_from',
+                'start',  # /ios/calendar provider-filtered row shape (data_all)
             )
         )
         if start is None:
@@ -685,7 +572,7 @@ def _serialize_tpms_api_appointments(
             continue
 
         end = _parse_appointment_datetime(
-            _dig_appointment(appt, 'to_time', 'end_time', 'appointment_end_time', 'schedule_to')
+            _dig_appointment(appt, 'to_time', 'end_time', 'appointment_end_time', 'schedule_to', 'end')
         )
         if end is None:
             _, to_hm = _parse_hours_range(_dig_appointment(appt, 'hours', 'time', 'scheduled_time'))
@@ -738,9 +625,10 @@ def _serialize_tpms_api_appointments(
             'start_time': _aware(start),
             'end_time': _aware(end),
             'service_type': service_name,
-            'location': str(_dig_appointment(appt, 'location', 'pos', 'place_of_service') or '') or None,
+            'location': _appointment_location(appt),
+            'telehealth_link': _appointment_telehealth_link(appt),
             'duration_minutes': duration_mins,
-            'notes': str(_dig_appointment(appt, 'notes', 'note') or ''),
+            'notes': _notes_text(_dig_appointment(appt, 'notes', 'note', 'comment')),
             'status': mapped_status,
             'synced_at': None,
             'created_at': _aware(
@@ -789,12 +677,17 @@ def list_client_sessions(
     """
     Return appointments for a client from TherapyPMS iOS API.
 
-    Uses POST /api/v1/ios/appointments/list with:
-    - client_ids: the selected client's TPMS patient id (`Client.external_id`)
-    - provider_ids: the logged-in user's TPMS provider id (`User.external_employee_id`),
-      except for admin/supervisor who see all providers' sessions for the client
-      (client_id-scoped only, irrespective of provider_id)
-    - report_range: from_date/to_date if given, else a wide default window
+    /clients rows are now TPMS providers (see list_providers in
+    tpms_auth_client.py), so `Client.external_id` here is a provider id, not
+    a patient id. Uses POST /api/v1/ios/calendar via list_provider_calendar
+    with:
+    - provider_ids: just this one client's TPMS provider id (`Client.external_id`)
+    - start_date/end_date: from_date/to_date if given, else a wide default
+      window, sent as YYYY-MM-DD
+
+    Non-admin/supervisor staff only get results if this provider id is their
+    own (`User.external_employee_id`) — otherwise they'd be looking at
+    another provider's schedule under this client_id, which they shouldn't see.
     """
     client = _get_client_or_404(request, client_id)
 
@@ -802,31 +695,27 @@ def list_client_sessions(
         return _list_native_client_sessions(request, client, status, from_date, to_date)
 
     try:
-        tpms_patient_id = int(client.external_id)
+        tpms_provider_id = int(client.external_id)
     except (TypeError, ValueError):
-        raise HttpError(400, 'Client is missing a valid TherapyPMS patient id')
+        raise HttpError(400, 'Client is missing a valid TherapyPMS provider id')
 
     token = get_tpms_access_token(request.user.id)
     if not token:
         raise HttpError(401, 'TherapyPMS session expired. Please log in again.')
 
-    provider_ids: list[int] = []
     if request.user.role not in ('admin', 'supervisor'):
-        if request.user.external_employee_id is not None:
-            provider_ids = [int(request.user.external_employee_id)]
-        else:
+        if request.user.external_employee_id is None or int(request.user.external_employee_id) != tpms_provider_id:
             return []
 
     range_start = from_date or (date.today() - timedelta(days=3 * 365))
     range_end = to_date or (date.today() + timedelta(days=3 * 365))
 
     try:
-        appointments = list_appointments(
+        appointments = list_provider_calendar(
             token,
-            client_ids=[tpms_patient_id],
-            provider_ids=provider_ids,
-            start_date=range_start.strftime('%m/%d/%Y'),
-            end_date=range_end.strftime('%m/%d/%Y'),
+            provider_ids=[tpms_provider_id],
+            start_date=range_start.isoformat(),
+            end_date=range_end.isoformat(),
         )
     except TpmsAuthError as exc:
         if exc.status_code in {401, 403}:

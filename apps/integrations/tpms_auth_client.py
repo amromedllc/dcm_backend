@@ -440,6 +440,66 @@ def list_patients(access_token: str, *, search: str | None = None) -> list[dict[
     return patients
 
 
+def list_providers(access_token: str) -> list[dict[str, Any]]:
+    """
+    GET /api/v1/ios/appointment/filter/providers — the practice's provider
+    list, each row shaped {"id": <provider_id>, "name": <provider_name>}.
+
+    Confirmed real response shape (2026-09-01):
+    {"status": "success", "message": "get Providers", "provider_data": [...]}
+    — kept the bare-array + other wrapper-key fallbacks below in case that
+    shape isn't consistent across accounts, but `_request` wouldn't have
+    tolerated this dict-wrapped-list shape either way, so this makes its own
+    request instead of going through `_request`/`_extract_rows` alone.
+    """
+    url = f'{_base_url()}/api/v1/ios/appointment/filter/providers'
+    headers = {'Accept': 'application/json'}
+    if access_token:
+        headers['Authorization'] = _authorization_header(access_token)
+
+    try:
+        session = requests.Session()
+        session.trust_env = False
+        response = session.request(
+            'GET',
+            url,
+            headers=headers,
+            timeout=getattr(settings, 'TPMS_API_TIMEOUT_SECONDS', DEFAULT_TIMEOUT_SECONDS),
+        )
+    except requests.RequestException as exc:
+        logger.warning('TPMS request failed (GET /api/v1/ios/appointment/filter/providers): %s', exc)
+        raise TpmsAuthError('TherapyPMS authentication service unavailable') from exc
+
+    raw_text = response.text
+    try:
+        payload = response.json() if raw_text else []
+    except ValueError:
+        raise TpmsAuthError(
+            'TherapyPMS authentication returned an invalid response',
+            status_code=response.status_code,
+        )
+
+    if response.status_code >= 400:
+        message = 'TherapyPMS request failed'
+        if isinstance(payload, dict):
+            message = str(payload.get('message') or message)
+        logger.warning(
+            'TPMS request failed (GET /api/v1/ios/appointment/filter/providers): status=%s message=%s body=%s',
+            response.status_code, message, raw_text[:2000],
+        )
+        raise TpmsAuthError(message, status_code=response.status_code, payload=payload)
+
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if isinstance(payload, dict):
+        status = str(payload.get('status', '')).lower()
+        if status in {'unauthorised', 'unauthorized', 'error', 'fail', 'failed'}:
+            message = payload.get('message') or 'Failed to load providers'
+            raise TpmsAuthError(str(message), payload=payload)
+        return _extract_rows(payload, 'provider_data', 'providers', 'data', 'result')
+    return []
+
+
 def list_appointments(
     access_token: str,
     *,
@@ -449,8 +509,9 @@ def list_appointments(
     end_date: str,
 ) -> list[dict[str, Any]]:
     """
-    POST /api/v1/ios/appointments/list — replaces the old
-    /api/v1/ios/appointment/recurring/list (which had no date range and used
+    POST /api/v1/ios/calendar — same request/response shape as the older
+    /api/v1/ios/appointments/list (which itself replaced
+    /api/v1/ios/appointment/recurring/list, which had no date range and used
     "patient_ids"). Dates as MM/DD/YYYY, same report_range convention as
     list_client_portal_appointments. Ids sent as strings.
 
@@ -482,7 +543,7 @@ def list_appointments(
 
     payload = _request(
         'POST',
-        '/api/v1/ios/appointments/list',
+        '/api/v1/ios/calendar',
         body=body,
         access_token=access_token,
         debug_label='appointments-list',
@@ -494,6 +555,56 @@ def list_appointments(
         raise TpmsAuthError(str(message), payload=payload)
 
     return _extract_rows(payload, 'appointments', 'data')
+
+
+def list_provider_calendar(
+    access_token: str,
+    *,
+    provider_ids: list[int],
+    start_date: str,
+    end_date: str,
+) -> list[dict[str, Any]]:
+    """
+    POST /api/v1/ios/calendar filtered by provider_ids only. Confirmed real
+    request shape (2026-09-01) for clients.api.list_client_sessions — since
+    /clients rows are now TPMS providers (see list_providers above), "one
+    client's sessions" means "one provider's sessions":
+    {"start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD", "provider_ids": [...]}
+    Flat body (no "report_range" wrapper) and ISO dates, unlike
+    list_appointments() above which uses report_range + MM/DD/YYYY — kept as
+    a separate function rather than changing list_appointments so the two
+    already-working my-schedule/provider-schedule call sites aren't touched.
+
+    Confirmed real response shape (2026-09-01) — rows nested under
+    "data_all", a different wrapper key and a different row shape than
+    list_appointments()'s rows: {"id", "recurring_id", "status" (title-case,
+    e.g. "Rendered"), "start"/"end" (ISO datetime with offset, not
+    from_time/to_time), "patient_id", "provider_id", "provider_name",
+    "service_name" (not activity_type/service_hour), "address" (not
+    location/pos), "duration" (often 0/unreliable — real duration is in
+    start/end). See _serialize_tpms_api_appointments's _dig_appointment key
+    lists, which were extended to also match these key names.
+    """
+    body: dict[str, Any] = {
+        'start_date': start_date,
+        'end_date': end_date,
+        'provider_ids': [str(p) for p in provider_ids],
+    }
+
+    payload = _request(
+        'POST',
+        '/api/v1/ios/calendar',
+        body=body,
+        access_token=access_token,
+        debug_label='provider-calendar',
+    )
+
+    status = str(payload.get('status', '')).lower()
+    if status in {'unauthorised', 'unauthorized', 'error', 'fail', 'failed'}:
+        message = payload.get('message') or 'Failed to load appointments'
+        raise TpmsAuthError(str(message), payload=payload)
+
+    return _extract_rows(payload, 'data_all', 'appointments', 'data', 'calendar_data')
 
 
 def list_client_portal_appointments(
