@@ -15,7 +15,7 @@ from django_tenants.utils import schema_context
 
 from apps.accounts.models import User
 from apps.clients.models import Client
-from apps.programs.models import Program, Target
+from apps.programs.models import Program
 from apps.sessions.models import SessionRun, TrialEvent
 from apps.sessions.services import build_program_snapshot
 

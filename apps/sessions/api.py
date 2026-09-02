@@ -1,4 +1,3 @@
-from datetime import date
 from django.db.models import Count
 from django.utils import timezone
 from ninja import Router, Form, File
@@ -355,13 +354,6 @@ def _get_tpms_appointment(external_appointment_id: int | None):
     )
 
 
-def _aware(dt):
-    if dt is None:
-        return None
-    from django.utils import timezone
-    return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
-
-
 def _serialize_session(
     session: SessionRun,
     dcm_appt=None,
@@ -407,18 +399,6 @@ def _serialize_session(
 # ---------------------------------------------------------------------------
 # TPMS appointments via iOS API (TherapyPMS DB removed)
 # ---------------------------------------------------------------------------
-
-def _tpms_status(raw: str | None) -> str:
-    """Map TPMS appointment status string to DCM status."""
-    s = (raw or '').lower()
-    if s in ('rendered', 'completed', 'kept'):
-        return 'completed'
-    if s in ('cancelled', 'canceled'):
-        return 'cancelled'
-    if s in ('no show', 'no-show', 'noshow'):
-        return 'no_show'
-    return 'scheduled'
-
 
 def _find_appointment(appt_id: int) -> Appointment | None:
     """Prefer external_id match (TPMS session id), then local PK."""
