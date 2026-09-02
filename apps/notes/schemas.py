@@ -99,6 +99,10 @@ class LessonNoteSchema(Schema):
     rejection_reason: str
     requires_caregiver_signature: bool
     signatures: list[NoteSignatureSchema] = []
+    # Resolved [data-dynamic-field] tokens for a 'forms' template's body_template
+    # (keyed like the web DYNAMIC_FIELDS_GROUPS). Empty for non-forms notes and
+    # for tokens that can't be resolved.
+    dynamic_fields: dict[str, str] = {}
     created_at: datetime
     updated_at: datetime
 

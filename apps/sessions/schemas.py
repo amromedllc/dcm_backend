@@ -25,6 +25,7 @@ class AppointmentSchema(Schema):
     end_time: datetime
     service_type: str
     location: str | None = None
+    telehealth_link: str | None = None
     duration_minutes: int = 0
     notes: str
     status: str

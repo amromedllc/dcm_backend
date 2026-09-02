@@ -16,7 +16,7 @@ from .schemas import (
     ReviewQueueItem,
     NoteAssignmentSchema, NoteAssignmentCreateRequest,
 )
-from .services import submit_note, approve_note, reject_note
+from .services import submit_note, approve_note, reject_note, resolve_template_tokens
 
 router = Router(auth=jwt_auth)
 
@@ -76,6 +76,7 @@ def _serialize_note(note: LessonNote) -> dict:
             }
             for sig in note.signatures.all()
         ],
+        'dynamic_fields': resolve_template_tokens(note),
         'created_at': note.created_at,
         'updated_at': note.updated_at,
     }
@@ -138,6 +139,7 @@ def list_notes(
     client_id: int | None = None,
     status: str | None = None,
     staff_id: int | None = None,
+    session_run_id: int | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
 ):
@@ -152,6 +154,8 @@ def list_notes(
         qs = qs.filter(external_client_id=client_id)
     if status:
         qs = qs.filter(status=status)
+    if session_run_id:
+        qs = qs.filter(session_run_id=session_run_id)
     if date_from:
         qs = qs.filter(note_date__gte=date_from)
     if date_to:

@@ -14,6 +14,8 @@ class TrialDataPointSchema(Schema):
     correct_count: int
     pct_correct: float
     duration_seconds: float
+    prompt_level_sum: float = 0.0
+    prompt_level_count: int = 0
 
 
 class BehaviorDataPointSchema(Schema):
@@ -26,6 +28,9 @@ class BehaviorDataPointSchema(Schema):
     submodule_name: str | None
     frequency: int
     total_duration_seconds: int
+    min_duration_seconds: float = 0.0
+    max_duration_seconds: float = 0.0
+    avg_duration_seconds: float = 0.0
     measurement: str = ''
     measurement_value: float = 0.0
     measurement_label: str = 'Frequency'
@@ -53,6 +58,12 @@ class ProgramSummarySchema(Schema):
     date_from: Date
     date_to: Date
     targets: list[TargetSummarySchema]
+    # % correct threshold a target must sustain to reach 'mastered', read from
+    # the targets' WorkflowTemplates. None when no target defines one.
+    # `mastery_criteria_varies` is True when targets disagree and `pct` is the
+    # most common value.
+    mastery_criteria_pct: int | None = None
+    mastery_criteria_varies: bool = False
 
 
 class ModuleSummarySchema(Schema):

@@ -606,7 +606,12 @@ def assign_appointment_programs(request, appt_id: int, data: AssignProgramsReque
             source=Appointment.Source.SYNCED,
             start_time=data.start_time,
             end_time=end,
-            service_type=data.service_type or '',
+            # Appointment.service_type is varchar(100) — TPMS's service_name
+            # can be a joined multi-service string longer than that (e.g.
+            # several billed services on one appointment), which raised a
+            # DB-level DataError here instead of a clean 400. .create()
+            # doesn't run full_clean(), so nothing else truncates this.
+            service_type=(data.service_type or '')[:100],
             status=Appointment.Status.SCHEDULED,
             created_by=request.user,
         )

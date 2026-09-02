@@ -14,7 +14,7 @@ from .schemas import (
 )
 from .services import (
     get_trial_data_by_day, get_behavior_data_by_day, get_program_summary, get_module_summary,
-    get_client_progress_report, get_client_progress_overview,
+    get_program_mastery_criteria, get_client_progress_report, get_client_progress_overview,
 )
 
 router = Router(auth=jwt_auth)
@@ -114,11 +114,14 @@ def program_summary(
     """
     frm, to = _resolve_dates(date_from, date_to)
     targets = get_program_summary(program_id, frm, to)
+    mastery_pct, mastery_varies = get_program_mastery_criteria(program_id)
     return {
         'program_id': program_id,
         'date_from': frm,
         'date_to': to,
         'targets': targets,
+        'mastery_criteria_pct': mastery_pct,
+        'mastery_criteria_varies': mastery_varies,
     }
 
 
