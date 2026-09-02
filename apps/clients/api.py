@@ -1,5 +1,6 @@
 import json
 import logging
+import zlib
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -57,7 +58,11 @@ from .schemas import (
     ClientUpdateRequest,
     StaffAssignmentSchema,
     AddStaffAssignmentRequest,
+    TelehealthConnectRequest,
+    TelehealthConnectionDetailsSchema,
+    TelehealthAdmitRequest,
 )
+from apps.integrations.telehealth_client import TelehealthError, get_connection_details, admit_participant
 
 router = Router(auth=jwt_auth)
 
@@ -500,6 +505,7 @@ def _serialize_tpms_api_appointments(
     status: str | None,
     from_date: date | None,
     to_date: date | None,
+    provider_id: int | None = None,
 ) -> list[dict[str, Any]]:
     from django.utils import timezone as tz
     from apps.sessions.models import Appointment as DcmAppointment
@@ -528,6 +534,21 @@ def _serialize_tpms_api_appointments(
 
     results: list[dict[str, Any]] = []
     for appt in appointments:
+        if provider_id is not None:
+            # Don't trust TPMS's own provider_ids filter — it's been
+            # observed folding in the caller's own schedule regardless of
+            # what was requested (same quirk documented on list_appointments
+            # for patients_ids), so a staff member viewing a colleague's
+            # sessions saw their own sessions mixed in too. Filter rows to
+            # exactly the requested provider ourselves rather than trust
+            # TPMS's filtering.
+            row_provider_id = _dig_appointment(appt, 'provider_id', 'providerId', 'employee_id')
+            try:
+                if row_provider_id is not None and int(row_provider_id) != provider_id:
+                    continue
+            except (TypeError, ValueError):
+                pass
+
         raw_status = str(_dig_appointment(appt, 'status', 'appointment_status') or '')
         if raw_status.lower() in _TPMS_EXCLUDED_STATUSES:
             continue
@@ -614,7 +635,11 @@ def _serialize_tpms_api_appointments(
         service_name = _appointment_service_name(appt)
         dcm = dcm_by_ext.get(ext_id)
         results.append({
-            'id': dcm.id if dcm else int(ext_id) if ext_id.isdigit() else 0,
+            # same key" and (worse) letting unrelated appointments alias
+            # each other in the UI. crc32 is unique per distinct ext_id
+            # string; negated so it can never collide with a real positive
+            # DCM pk or a real positive numeric external id.
+            'id': dcm.id if dcm else int(ext_id) if ext_id.isdigit() else -zlib.crc32(ext_id.encode()),
             'client_id': dcm_client_id,
             'staff_id': staff_id,
             'staff_name': str(_dig_appointment(appt, 'provider_name', 'staff_name', 'employee_name') or '') or None,
@@ -685,9 +710,17 @@ def list_client_sessions(
     - start_date/end_date: from_date/to_date if given, else a wide default
       window, sent as YYYY-MM-DD
 
-    Non-admin/supervisor staff only get results if this provider id is their
-    own (`User.external_employee_id`) — otherwise they'd be looking at
-    another provider's schedule under this client_id, which they shouldn't see.
+    Access is scoped the same way _get_client_or_404/_get_accessible_clients
+    scopes everything else in this app: any TPMS-linked staff can reach any
+    provider's schedule within their own practice (external_admin_id) — see
+    _get_accessible_clients's "TPMS-linked staff — practice-scoped" branch.
+    There is deliberately no extra "only your own provider id" restriction
+    here on top of that: staff routinely need to view/assign programs on a
+    colleague's sessions (e.g. covering another provider's client), and an
+    earlier version of this endpoint added that restriction, which silently
+    emptied the list for exactly that legitimate case instead of raising an
+    error — a program-assign call would succeed, but the very next refetch
+    of this endpoint (to show it) came back empty.
     """
     client = _get_client_or_404(request, client_id)
 
@@ -702,10 +735,6 @@ def list_client_sessions(
     token = get_tpms_access_token(request.user.id)
     if not token:
         raise HttpError(401, 'TherapyPMS session expired. Please log in again.')
-
-    if request.user.role not in ('admin', 'supervisor'):
-        if request.user.external_employee_id is None or int(request.user.external_employee_id) != tpms_provider_id:
-            return []
 
     range_start = from_date or (date.today() - timedelta(days=3 * 365))
     range_end = to_date or (date.today() + timedelta(days=3 * 365))
@@ -729,4 +758,76 @@ def list_client_sessions(
         status=status,
         from_date=from_date,
         to_date=to_date,
+        provider_id=tpms_provider_id,
     )
+
+
+@router.post('/{client_id}/sessions/telehealth-connect', response=TelehealthConnectionDetailsSchema)
+def telehealth_connect(request, client_id: int, data: TelehealthConnectRequest):
+    """
+    Bridge a telehealth session's join link (AppointmentSchema.telehealth_link,
+    from list_client_sessions above) into a LiveKit connection the frontend
+    can render in-page, next to the trial-recording panel — no separate
+    Zoom/browser tab. See apps.integrations.telehealth_client for the
+    zoom-backend SSO handshake this wraps.
+
+    Called by TelehealthVideoPanel. An iframe of zoom-frontend's own page
+    was tried first but ruled out (its production deployment sends
+    X-Frame-Options: SAMEORIGIN at the Cloudflare/hosting layer, blocking
+    embedding outright), and a window.open() popup can't be reliably forced
+    into a separate window vs. a tab — so this native LiveKit embed is the
+    only approach that can guarantee video and the recorder are visible
+    together.
+    """
+    _get_client_or_404(request, client_id)  # access check only — link itself carries the room
+
+    user_type = 'admin' if request.user.role == 'admin' else 'employee'
+    display_name = f'{request.user.first_name} {request.user.last_name}'.strip() or request.user.email
+    admin_id = request.user.external_employee_id or request.user.external_admin_id or request.user.id
+
+    try:
+        details = get_connection_details(
+            telehealth_link=data.telehealth_link,
+            email=request.user.email,
+            display_name=display_name,
+            admin_id=admin_id,
+            user_type=user_type,
+        )
+    except TelehealthError as exc:
+        status_code = exc.status_code if exc.status_code and exc.status_code < 500 else 502
+        raise HttpError(status_code, str(exc)) from exc
+
+    return details
+
+
+@router.post('/{client_id}/sessions/telehealth-admit', response={204: None})
+def telehealth_admit(request, client_id: int, data: TelehealthAdmitRequest):
+    """
+    Admit a waiting client/caregiver-role participant into the telehealth
+    room (see apps.integrations.telehealth_client.admit_participant) —
+    zoom-backend gives client-role joins no publish/subscribe rights until
+    an admin/employee explicitly does this. Called by the "Admit" button
+    TelehealthVideoPanel shows for any participant whose LiveKit metadata
+    marks them status="waiting".
+    """
+    require_permission(request, 'client_sessions')
+    _get_client_or_404(request, client_id)
+
+    user_type = 'admin' if request.user.role == 'admin' else 'employee'
+    display_name = f'{request.user.first_name} {request.user.last_name}'.strip() or request.user.email
+    admin_id = request.user.external_employee_id or request.user.external_admin_id or request.user.id
+
+    try:
+        admit_participant(
+            telehealth_link=data.telehealth_link,
+            identity=data.identity,
+            email=request.user.email,
+            display_name=display_name,
+            admin_id=admin_id,
+            user_type=user_type,
+        )
+    except TelehealthError as exc:
+        status_code = exc.status_code if exc.status_code and exc.status_code < 500 else 502
+        raise HttpError(status_code, str(exc)) from exc
+
+    return 204, None

@@ -42,6 +42,22 @@ class ClientUpdateRequest(Schema):
     internal_notes: str | None = None
 
 
+class TelehealthConnectRequest(Schema):
+    telehealth_link: NonEmptyStr
+
+
+class TelehealthConnectionDetailsSchema(Schema):
+    server_url: str
+    participant_token: str
+    room_name: str
+    participant_name: str
+
+
+class TelehealthAdmitRequest(Schema):
+    telehealth_link: NonEmptyStr
+    identity: NonEmptyStr
+
+
 class StaffAssignmentSchema(Schema):
     id: int
     client_id: int
