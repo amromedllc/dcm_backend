@@ -12,7 +12,10 @@ from apps.programs.measurements import (
     DURATION_MEASUREMENTS, RATE_MEASUREMENTS, BEHAVIOR_STYLE_MEASUREMENTS,
 )
 from shared.uploads import validate_media_upload
-from .models import Appointment, SessionRun, TrialEvent, BehaviorEvent, ABCEvent, SessionMedia, SessionMediaComment
+from .models import (
+    Appointment, SessionRun, TrialEvent, BehaviorEvent, ABCEvent,
+    ABCCategory, ABCItem, SessionMedia, SessionMediaComment,
+)
 from .schemas import (
     AppointmentSchema, AppointmentCreateRequest, AppointmentUpdateRequest,
     AssignProgramsRequest, AssignedProgramSchema,
@@ -22,6 +25,8 @@ from .schemas import (
     TrialEventSchema, TrialEventCreateRequest,
     BehaviorEventSchema, BehaviorEventCreateRequest,
     ABCEventSchema, ABCEventCreateRequest,
+    ABCCategorySchema, ABCCategoryCreateRequest, ABCCategoryUpdateRequest,
+    ABCItemCreateRequest, ABCItemUpdateRequest,
     SessionSyncPayload, SessionSyncResult,
     TrialSummaryItem,
     SessionMediaSchema, SessionMediaUpdateRequest,
@@ -30,6 +35,14 @@ from .schemas import (
 from .services import build_program_snapshot, submit_session, approve_session, reject_session
 
 router = Router(auth=jwt_auth)
+
+DEFAULT_ABC_CATEGORIES = [
+    {'key': 'antecedent', 'label': 'Antecedent', 'is_required': True, 'display_order': 10},
+    {'key': 'behavior', 'label': 'Behavior', 'is_required': True, 'display_order': 20},
+    {'key': 'consequence', 'label': 'Consequence', 'is_required': True, 'display_order': 30},
+    {'key': 'setting', 'label': 'Setting', 'is_required': False, 'display_order': 40},
+    {'key': 'reporter', 'label': 'Reporter', 'is_required': False, 'display_order': 50},
+]
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +94,63 @@ def _get_session_or_404(session_id: int, request) -> SessionRun:
         return qs.get(id=session_id)
     except SessionRun.DoesNotExist:
         raise HttpError(404, 'Session not found')
+
+
+def _assert_client_accessible(request, client_id: int) -> int:
+    if client_id not in _accessible_external_client_ids(request):
+        raise HttpError(404, 'Client not found')
+    return _canonical_external_client_id(client_id)
+
+
+def _serialize_abc(event: ABCEvent) -> dict:
+    return {
+        'id': event.id,
+        'session_run_id': event.session_run_id,
+        'client_id': event.external_client_id,
+        'occurred_at': event.occurred_at,
+        'ended_at': event.ended_at,
+        'duration_seconds': event.duration_seconds,
+        'antecedent': event.antecedent,
+        'behavior_description': event.behavior_description,
+        'consequence': event.consequence,
+        'setting': event.setting,
+        'staff_response': event.staff_response,
+        'notes': event.notes,
+        'structured_values': event.structured_values,
+        'client_event_id': event.client_event_id,
+    }
+
+
+def _ensure_default_abc_categories(request) -> None:
+    if ABCCategory.objects.exists():
+        return
+    for row in DEFAULT_ABC_CATEGORIES:
+        ABCCategory.objects.create(created_by=request.user, allow_free_text=True, is_active=True, **row)
+
+
+def _serialize_abc_category(category: ABCCategory) -> dict:
+    return {
+        'id': category.id,
+        'key': category.key,
+        'label': category.label,
+        'is_required': category.is_required,
+        'allow_free_text': category.allow_free_text,
+        'display_order': category.display_order,
+        'is_active': category.is_active,
+        'items': [
+            {
+                'id': item.id,
+                'label': item.label,
+                'display_order': item.display_order,
+                'is_active': item.is_active,
+                'created_at': item.created_at,
+                'updated_at': item.updated_at,
+            }
+            for item in category.items.all()
+        ],
+        'created_at': category.created_at,
+        'updated_at': category.updated_at,
+    }
 
 
 def _build_trial_summary(session_run: SessionRun) -> list[TrialSummaryItem]:
@@ -897,25 +967,139 @@ def delete_behavior(request, session_id: int, event_id: int):
 # ABC events
 # ---------------------------------------------------------------------------
 
-def _get_or_create_abc(session_id: int, data: ABCEventCreateRequest) -> tuple[ABCEvent, bool]:
+@router.get('/abc/categories', response=list[ABCCategorySchema])
+def list_abc_categories(request, include_inactive: bool = False):
+    _ensure_default_abc_categories(request)
+    qs = ABCCategory.objects.prefetch_related('items')
+    if not include_inactive:
+        qs = qs.filter(is_active=True).prefetch_related('items')
+    return [_serialize_abc_category(c) for c in qs]
+
+
+@router.post('/abc/categories', response={201: ABCCategorySchema})
+def create_abc_category(request, data: ABCCategoryCreateRequest):
+    require_permission(request, 'settings_abc_categories_create')
+    key = data.key.strip().lower().replace(' ', '-')
+    if not key:
+        raise HttpError(400, 'Category key is required')
+    if ABCCategory.objects.filter(key=key).exists():
+        raise HttpError(409, f'ABC category "{key}" already exists')
+    category = ABCCategory.objects.create(created_by=request.user, **{**data.dict(), 'key': key})
+    return 201, _serialize_abc_category(category)
+
+
+@router.patch('/abc/categories/{category_id}', response=ABCCategorySchema)
+def update_abc_category(request, category_id: int, data: ABCCategoryUpdateRequest):
+    require_permission(request, 'settings_abc_categories_edit')
+    try:
+        category = ABCCategory.objects.get(id=category_id)
+    except ABCCategory.DoesNotExist:
+        raise HttpError(404, 'ABC category not found')
+    for field, value in data.dict(exclude_none=True).items():
+        setattr(category, field, value)
+    category.save()
+    return _serialize_abc_category(category)
+
+
+@router.delete('/abc/categories/{category_id}', response={204: None})
+def delete_abc_category(request, category_id: int):
+    require_permission(request, 'settings_abc_categories_delete')
+    try:
+        ABCCategory.objects.get(id=category_id).delete()
+    except ABCCategory.DoesNotExist:
+        raise HttpError(404, 'ABC category not found')
+    return 204, None
+
+
+@router.post('/abc/categories/{category_id}/items', response={201: ABCCategorySchema})
+def create_abc_item(request, category_id: int, data: ABCItemCreateRequest):
+    require_permission(request, 'settings_abc_categories_edit')
+    try:
+        category = ABCCategory.objects.get(id=category_id)
+    except ABCCategory.DoesNotExist:
+        raise HttpError(404, 'ABC category not found')
+    ABCItem.objects.create(category=category, created_by=request.user, **data.dict())
+    category = ABCCategory.objects.prefetch_related('items').get(id=category_id)
+    return 201, _serialize_abc_category(category)
+
+
+@router.patch('/abc/items/{item_id}', response=ABCCategorySchema)
+def update_abc_item(request, item_id: int, data: ABCItemUpdateRequest):
+    require_permission(request, 'settings_abc_categories_edit')
+    try:
+        item = ABCItem.objects.select_related('category').get(id=item_id)
+    except ABCItem.DoesNotExist:
+        raise HttpError(404, 'ABC item not found')
+    for field, value in data.dict(exclude_none=True).items():
+        setattr(item, field, value)
+    item.save()
+    category = ABCCategory.objects.prefetch_related('items').get(id=item.category_id)
+    return _serialize_abc_category(category)
+
+
+@router.delete('/abc/items/{item_id}', response={204: None})
+def delete_abc_item(request, item_id: int):
+    require_permission(request, 'settings_abc_categories_edit')
+    try:
+        ABCItem.objects.get(id=item_id).delete()
+    except ABCItem.DoesNotExist:
+        raise HttpError(404, 'ABC item not found')
+    return 204, None
+
+
+def _get_or_create_abc(session_id: int | None, data: ABCEventCreateRequest, *, external_client_id: int | None = None) -> tuple[ABCEvent, bool]:
     """Same crash-window dedup purpose as _get_or_create_behavior — this is
     the endpoint that matters most for it, since ABC events sync through
     this individual endpoint rather than the batch /sync one."""
     payload = data.dict()
     client_event_id = payload.pop('client_event_id', None)
     if client_event_id:
+        if session_id:
+            return ABCEvent.objects.get_or_create(
+                session_run_id=session_id,
+                client_event_id=client_event_id,
+                defaults={**payload, 'external_client_id': external_client_id},
+            )
         return ABCEvent.objects.get_or_create(
-            session_run_id=session_id,
+            session_run_id=None,
+            external_client_id=external_client_id,
             client_event_id=client_event_id,
             defaults=payload,
         )
-    return ABCEvent.objects.create(session_run_id=session_id, **payload), True
+    return ABCEvent.objects.create(session_run_id=session_id, external_client_id=external_client_id, **payload), True
+
+
+@router.get('/clients/{client_id}/abc', response=list[ABCEventSchema])
+def list_client_abc(request, client_id: int, standalone_only: bool = False):
+    external_client_id = _assert_client_accessible(request, client_id)
+    qs = ABCEvent.objects.filter(external_client_id=external_client_id).order_by('-occurred_at')
+    if standalone_only:
+        qs = qs.filter(session_run__isnull=True)
+    return [_serialize_abc(e) for e in qs]
+
+
+@router.post('/clients/{client_id}/abc', response={201: ABCEventSchema})
+def add_client_abc(request, client_id: int, data: ABCEventCreateRequest):
+    external_client_id = _assert_client_accessible(request, client_id)
+    event, _ = _get_or_create_abc(None, data, external_client_id=external_client_id)
+    return 201, _serialize_abc(event)
+
+
+@router.delete('/clients/{client_id}/abc/{event_id}', response={204: None})
+def delete_client_abc(request, client_id: int, event_id: int):
+    external_client_id = _assert_client_accessible(request, client_id)
+    try:
+        event = ABCEvent.objects.get(id=event_id, external_client_id=external_client_id, session_run__isnull=True)
+    except ABCEvent.DoesNotExist:
+        raise HttpError(404, 'ABC event not found')
+    event.delete()
+    return 204, None
 
 
 @router.get('/sessions/{session_id}/abc', response=list[ABCEventSchema])
 def list_abc(request, session_id: int):
     _get_session_or_404(session_id, request)
-    return list(ABCEvent.objects.filter(session_run_id=session_id))
+    return [_serialize_abc(e) for e in ABCEvent.objects.filter(session_run_id=session_id)]
 
 
 @router.post('/sessions/{session_id}/abc', response={201: ABCEventSchema})
@@ -923,8 +1107,8 @@ def add_abc(request, session_id: int, data: ABCEventCreateRequest):
     session = _get_session_or_404(session_id, request)
     if not session.is_editable:
         raise HttpError(409, f'Session is {session.status} — cannot add ABC events')
-    event, _ = _get_or_create_abc(session_id, data)
-    return 201, event
+    event, _ = _get_or_create_abc(session_id, data, external_client_id=session.external_client_id)
+    return 201, _serialize_abc(event)
 
 
 @router.delete('/sessions/{session_id}/abc/{event_id}', response={204: None})
@@ -1036,7 +1220,7 @@ def sync_session(request, session_id: int, data: SessionSyncPayload):
 
     abc_created = 0
     for a in data.abc:
-        _, created = _get_or_create_abc(session_id, a)
+        _, created = _get_or_create_abc(session_id, a, external_client_id=session.external_client_id)
         if created:
             abc_created += 1
 

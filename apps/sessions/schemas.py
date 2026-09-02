@@ -210,26 +210,84 @@ class BehaviorEventCreateRequest(Schema):
 
 class ABCEventSchema(Schema):
     id: int
-    session_run_id: int
+    session_run_id: int | None = None
+    client_id: int | None = None
     occurred_at: datetime
+    ended_at: datetime | None = None
+    duration_seconds: int | None = None
     antecedent: str
     behavior_description: str
     consequence: str
     setting: str
     staff_response: str
     notes: str
+    structured_values: dict[str, Any] = {}
     client_event_id: str | None = None
 
 
 class ABCEventCreateRequest(Schema):
     occurred_at: datetime
+    ended_at: datetime | None = None
+    duration_seconds: int | None = Field(default=None, ge=0)
     antecedent: NonEmptyStr
     behavior_description: NonEmptyStr
     consequence: NonEmptyStr
     setting: str = ''
     staff_response: str = ''
     notes: str = ''
+    structured_values: dict[str, Any] = {}
     client_event_id: str | None = None
+
+
+class ABCCategoryItemSchema(Schema):
+    id: int
+    label: str
+    display_order: int
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ABCCategorySchema(Schema):
+    id: int
+    key: str
+    label: str
+    is_required: bool
+    allow_free_text: bool
+    display_order: int
+    is_active: bool
+    items: list[ABCCategoryItemSchema] = []
+    created_at: datetime
+    updated_at: datetime
+
+
+class ABCCategoryCreateRequest(Schema):
+    key: str
+    label: str
+    is_required: bool = False
+    allow_free_text: bool = True
+    display_order: int = 0
+    is_active: bool = True
+
+
+class ABCCategoryUpdateRequest(Schema):
+    label: str | None = None
+    is_required: bool | None = None
+    allow_free_text: bool | None = None
+    display_order: int | None = None
+    is_active: bool | None = None
+
+
+class ABCItemCreateRequest(Schema):
+    label: NonEmptyStr
+    display_order: int = 0
+    is_active: bool = True
+
+
+class ABCItemUpdateRequest(Schema):
+    label: str | None = None
+    display_order: int | None = None
+    is_active: bool | None = None
 
 
 # ---------------------------------------------------------------------------

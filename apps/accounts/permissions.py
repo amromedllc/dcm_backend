@@ -127,6 +127,10 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'settings_data_fields_create': True,
         'settings_data_fields_edit': True,
         'settings_data_fields_delete': True,
+        'settings_abc_categories_view': True,
+        'settings_abc_categories_create': True,
+        'settings_abc_categories_edit': True,
+        'settings_abc_categories_delete': True,
         # Admin
         'admin_users_view': True,
         'admin_users_edit': True,
@@ -226,6 +230,10 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'settings_data_fields_create': False,
         'settings_data_fields_edit': False,
         'settings_data_fields_delete': False,
+        'settings_abc_categories_view': False,
+        'settings_abc_categories_create': False,
+        'settings_abc_categories_edit': False,
+        'settings_abc_categories_delete': False,
         # Admin
         'admin_users_view': True,
         'admin_users_edit': True,
@@ -325,6 +333,10 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'settings_data_fields_create': False,
         'settings_data_fields_edit': False,
         'settings_data_fields_delete': False,
+        'settings_abc_categories_view': False,
+        'settings_abc_categories_create': False,
+        'settings_abc_categories_edit': False,
+        'settings_abc_categories_delete': False,
         # Admin
         'admin_users_view': False,
         'admin_users_edit': False,

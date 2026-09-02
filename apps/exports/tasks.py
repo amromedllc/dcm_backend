@@ -171,8 +171,11 @@ def generate_abc_csv(export_id: int) -> None:
         _mark_processing(export)
         params = export.params
 
-        session_qs = SessionRun.objects.filter(client_id=params['client_id'])
-        qs = ABCEvent.objects.filter(session_run__in=session_qs)
+        session_qs = SessionRun.objects.filter(external_client_id=params['client_id'])
+        qs = (
+            ABCEvent.objects.filter(external_client_id=params['client_id'])
+            | ABCEvent.objects.filter(session_run__in=session_qs)
+        ).distinct()
         if params.get('date_from'):
             qs = qs.filter(occurred_at__date__gte=params['date_from'])
         if params.get('date_to'):
@@ -268,7 +271,7 @@ def generate_raw_zip(export_id: int) -> None:
 
             # ABC
             if client_id:
-                abc_qs = ABCEvent.objects.filter(session_run__client_id=client_id)
+                abc_qs = ABCEvent.objects.filter(external_client_id=client_id)
                 if params.get('date_from'):
                     abc_qs = abc_qs.filter(occurred_at__date__gte=params['date_from'])
                 if params.get('date_to'):

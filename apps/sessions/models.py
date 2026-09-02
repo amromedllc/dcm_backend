@@ -220,19 +220,32 @@ class ABCEvent(OrganizationScopedMixin):
         SessionRun,
         on_delete=models.CASCADE,
         related_name='abc_events',
+        null=True,
+        blank=True,
     )
+    external_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     occurred_at = models.DateTimeField(db_index=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    duration_seconds = models.PositiveIntegerField(null=True, blank=True)
     antecedent = models.TextField()
     behavior_description = models.TextField()
     consequence = models.TextField()
     setting = models.CharField(max_length=200, blank=True)
     staff_response = models.TextField(blank=True)
     notes = models.TextField(blank=True)
+    structured_values = models.JSONField(default=dict, blank=True)
     # See BehaviorEvent.client_event_id — same crash-window dedup purpose.
     client_event_id = models.CharField(max_length=64, null=True, blank=True, db_index=True)
 
     def _derive_organization_id(self) -> int | None:
-        return self.session_run.organization_id
+        if self.session_run_id:
+            return self.session_run.organization_id
+        return None
+
+    def save(self, *args, **kwargs):
+        if self.session_run_id and self.external_client_id is None:
+            self.external_client_id = self.session_run.external_client_id
+        super().save(*args, **kwargs)
 
     class Meta:
         app_label = 'dcm_sessions'
@@ -243,10 +256,61 @@ class ABCEvent(OrganizationScopedMixin):
                 condition=models.Q(client_event_id__isnull=False),
                 name='unique_abcevent_session_client_event_id',
             ),
+            models.UniqueConstraint(
+                fields=['organization', 'external_client_id', 'client_event_id'],
+                condition=models.Q(session_run__isnull=True, client_event_id__isnull=False),
+                name='unique_standalone_abc_client_event_id',
+            ),
         ]
 
     def __str__(self) -> str:
         return f'ABC @ {self.occurred_at:%H:%M} — {self.behavior_description[:40]}'
+
+
+class ABCCategory(TenantAwareModel):
+    """
+    Configurable group for structured ABC collection.
+    Default examples are antecedent, behavior, consequence, setting, and reporter.
+    """
+    key = models.SlugField(max_length=80)
+    label = models.CharField(max_length=120)
+    is_required = models.BooleanField(default=False)
+    allow_free_text = models.BooleanField(default=True)
+    display_order = models.PositiveIntegerField(default=0, db_index=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        app_label = 'dcm_sessions'
+        ordering = ['display_order', 'label']
+        unique_together = [('organization', 'key')]
+
+    def __str__(self) -> str:
+        return self.label
+
+
+class ABCItem(TenantAwareModel):
+    """Selectable value within an ABC category."""
+    category = models.ForeignKey(
+        ABCCategory,
+        on_delete=models.CASCADE,
+        related_name='items',
+    )
+    label = models.CharField(max_length=160)
+    display_order = models.PositiveIntegerField(default=0, db_index=True)
+    is_active = models.BooleanField(default=True)
+
+    _org_scoped_fk_fields = ('category',)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.category.organization_id
+
+    class Meta:
+        app_label = 'dcm_sessions'
+        ordering = ['display_order', 'label']
+        unique_together = [('category', 'label')]
+
+    def __str__(self) -> str:
+        return f'{self.category.label}: {self.label}'
 
 
 class SessionMedia(TenantAwareModel):
