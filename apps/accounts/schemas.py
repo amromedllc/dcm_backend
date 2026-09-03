@@ -53,6 +53,18 @@ class CurrentUserSchema(UserSchema):
     caregiver_client: CaregiverClientSchema | None = None
 
 
+class AccountTimezoneOptionSchema(Schema):
+    value: str
+    label: str
+
+
+class AccountProfileSchema(Schema):
+    display_name: str
+    email: str
+    timezone: str | None = None
+    timezone_options: list[AccountTimezoneOptionSchema] = []
+
+
 class UserCreateRequest(Schema):
     email: EmailStr
     first_name: NonEmptyStr

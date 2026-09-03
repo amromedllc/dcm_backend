@@ -16,6 +16,7 @@ from .schemas import (
     TokenResponse,
     RefreshRequest,
     AccessTokenResponse,
+    AccountProfileSchema,
     UserSchema,
     CurrentUserSchema,
     UserCreateRequest,
@@ -34,6 +35,9 @@ from apps.integrations.tpms_auth_client import (
     normalize_login_payload,
     normalize_client_portal_payload,
     clear_tpms_access_token,
+    get_ios_personal_info,
+    get_ios_time_zone,
+    get_tpms_access_token,
     resolve_practice_admin_id,
     store_tpms_access_token,
 )
@@ -395,6 +399,131 @@ def me_debug(request):
             .values('id', 'first_name', 'last_name', 'external_id', 'external_admin_id')[:50]
         )
     return out
+
+
+def _tpms_unwrap(payload: dict) -> dict:
+    for key in ('data', 'user', 'result', 'personal_info', 'personalInfo', 'profile'):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            return {**payload, **nested}
+    return payload
+
+
+def _tpms_value(data: dict, *keys: str) -> str:
+    for key in keys:
+        if key in data and data[key] not in (None, ''):
+            if isinstance(data[key], (dict, list)):
+                continue
+            return str(data[key]).strip()
+        lower = key.lower()
+        for existing, value in data.items():
+            if existing.lower() == lower and value not in (None, ''):
+                if isinstance(value, (dict, list)):
+                    continue
+                return str(value).strip()
+    return ''
+
+
+def _timezone_options(payload: dict) -> list[dict[str, str]]:
+    rows = []
+    for key in ('timezones', 'timezone_list', 'timezoneList', 'data', 'result'):
+        value = payload.get(key)
+        if isinstance(value, list):
+            rows = value
+            break
+        if isinstance(value, dict):
+            return [
+                {'value': str(option_value), 'label': str(option_label)}
+                for option_value, option_label in value.items()
+                if option_value
+            ]
+
+    time_zone_map = payload.get('time_zone')
+    if isinstance(time_zone_map, dict):
+        return [
+            {'value': str(option_value), 'label': str(option_label)}
+            for option_value, option_label in time_zone_map.items()
+            if option_value
+        ]
+
+    options: list[dict[str, str]] = []
+    for row in rows:
+        if isinstance(row, str) and row:
+            options.append({'value': row, 'label': row})
+        elif isinstance(row, dict):
+            value = _tpms_value(row, 'value', 'timezone', 'time_zone', 'id', 'name')
+            label = _tpms_value(row, 'label', 'name', 'timezone', 'time_zone', 'display_name') or value
+            if value:
+                options.append({'value': value, 'label': label})
+    return options
+
+
+@router.get('/account/profile', response=AccountProfileSchema, auth=jwt_auth_any_role)
+def account_profile(request):
+    user = request.user
+    display_name = user.full_name
+    email = user.email
+    current_timezone = None
+    timezone_options = []
+    access_token = get_tpms_access_token(user.id)
+
+    if access_token:
+        try:
+            personal_info = _tpms_unwrap(get_ios_personal_info(access_token))
+            first_name = _tpms_value(personal_info, 'employee_first_name', 'first_name', 'firstName')
+            middle_name = _tpms_value(personal_info, 'employee_middle_name', 'middle_name', 'middleName')
+            last_name = _tpms_value(personal_info, 'employee_last_name', 'last_name', 'lastName')
+            display_name = (
+                _tpms_value(
+                    personal_info,
+                    'employee_nickname',
+                    'display_name',
+                    'displayName',
+                    'employee_full_name',
+                    'full_name',
+                    'fullName',
+                    'name',
+                )
+                or f'{first_name} {middle_name} {last_name}'.strip()
+                or display_name
+            )
+            email = _tpms_value(personal_info, 'employee_email', 'email', 'login_email', 'loginEmail') or email
+            current_timezone = _tpms_value(
+                personal_info,
+                'employee_timezone',
+                'timezone',
+                'time_zone',
+            ) or None
+        except TpmsAuthError as exc:
+            if exc.status_code in {401, 403}:
+                raise HttpError(401, 'TherapyPMS session expired. Please log in again.') from exc
+            raise HttpError(502, str(exc) or 'Failed to load personal info') from exc
+
+        try:
+            timezone_payload = get_ios_time_zone(access_token)
+            timezone_data = _tpms_unwrap(timezone_payload)
+            current_timezone = current_timezone or _tpms_value(
+                timezone_data,
+                'timezone',
+                'selected_timezone',
+                'selectedTimezone',
+                'value',
+            ) or None
+            timezone_options = _timezone_options(timezone_payload)
+        except TpmsAuthError as exc:
+            if exc.status_code in {401, 403}:
+                raise HttpError(401, 'TherapyPMS session expired. Please log in again.') from exc
+            raise HttpError(502, str(exc) or 'Failed to load timezone') from exc
+
+    if current_timezone and not any(option['value'] == current_timezone for option in timezone_options):
+        timezone_options.insert(0, {'value': current_timezone, 'label': current_timezone})
+
+    return {
+        'display_name': display_name,
+        'email': email,
+        'timezone': current_timezone,
+        'timezone_options': timezone_options,
+    }
 
 
 def _same_practice_q(user: User, prefix: str = '') -> Q:

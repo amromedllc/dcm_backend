@@ -29,3 +29,43 @@ class Notification(TenantAwareModel):
 
     def __str__(self) -> str:
         return f'{self.event_type} → {self.recipient_id}'
+
+
+class NotificationPreference(TenantAwareModel):
+    recipient = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='notification_preferences',
+        db_constraint=False,
+    )
+    event_type = models.CharField(max_length=80, db_index=True)
+    email_enabled = models.BooleanField(default=True)
+    web_enabled = models.BooleanField(default=True)
+
+    class Meta:
+        app_label = 'notifications'
+        unique_together = [('recipient', 'event_type')]
+        ordering = ['event_type']
+
+    def __str__(self) -> str:
+        return f'{self.event_type} preferences for {self.recipient_id}'
+
+
+class FirebaseMessagingToken(TenantAwareModel):
+    recipient = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='firebase_messaging_tokens',
+        db_constraint=False,
+    )
+    token = models.TextField(unique=True)
+    user_agent = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    last_sent_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        app_label = 'notifications'
+        ordering = ['-updated_at']
+
+    def __str__(self) -> str:
+        return f'firebase token for {self.recipient_id}'

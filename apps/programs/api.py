@@ -478,6 +478,11 @@ def update_program(request, program_id: int, data: ProgramUpdateRequest):
         )
     if 'fading_template_id' in updates:
         program.targets.update(fading_template_id=program.fading_template_id)
+
+    if updates:
+        from apps.notifications.service import notify_program_modified
+        notify_program_modified(program, request.user)
+
     return {**_serialize_program(program, request, include_targets=True)}
 
 
@@ -832,6 +837,7 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
     _require_supervisor(request)
     target = _get_target_or_404(request, target_id)
     updates = data.dict(exclude_none=True)
+    old_status = target.status
     for field, value in updates.items():
         setattr(target, field, value)
     if 'prompting_template_id' in updates:
@@ -878,6 +884,21 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
         _sync_target_sub_items(request, target, target.sub_items, request.user)
     elif target.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
         _refresh_target_sub_items_json(target)
+
+    if updates:
+        from apps.notifications.service import (
+            _TERMINAL_TARGET_STATUS_KEYS,
+            notify_program_modified,
+            notify_target_reopened,
+        )
+        notify_program_modified(target.program, request.user)
+        if (
+            'status' in updates
+            and old_status in _TERMINAL_TARGET_STATUS_KEYS
+            and target.status not in _TERMINAL_TARGET_STATUS_KEYS
+        ):
+            notify_target_reopened(target, old_status, target.status, request.user)
+
     return target
 
 

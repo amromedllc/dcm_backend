@@ -425,11 +425,13 @@ def _transition_target(target: Target, next_status: str, session_run_id: int) ->
     _maybe_create_phase_line(target, old_status, next_status, session_run_id)
     _maybe_auto_open_waiting_targets(target, session_run_id)
 
-    from apps.notifications.service import notify_target_advanced
+    from apps.notifications.service import notify_target_advanced, notify_target_mastered
     from apps.sessions.models import SessionRun
     try:
         sr = SessionRun.objects.get(id=session_run_id)
         notify_target_advanced(target, sr)
+        if next_status == 'mastered':
+            notify_target_mastered(target, sr)
     except Exception:
         pass
 

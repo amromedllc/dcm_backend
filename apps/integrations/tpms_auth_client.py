@@ -641,6 +641,36 @@ def list_client_portal_appointments(
     )
 
 
+def get_ios_personal_info(access_token: str) -> dict[str, Any]:
+    """GET /api/v1/ios/personal-info for the logged-in user."""
+    payload = _request(
+        'GET',
+        '/api/v1/ios/personal-info',
+        access_token=access_token,
+        debug_label='ios-personal-info',
+    )
+    status = str(payload.get('status', '')).lower()
+    if status in {'unauthorised', 'unauthorized', 'error', 'fail', 'failed'}:
+        message = payload.get('message') or 'Failed to load personal info'
+        raise TpmsAuthError(str(message), payload=payload)
+    return payload
+
+
+def get_ios_time_zone(access_token: str) -> dict[str, Any]:
+    """GET /api/v1/ios/time-zone for the logged-in user."""
+    payload = _request(
+        'GET',
+        '/api/v1/ios/time-zone',
+        access_token=access_token,
+        debug_label='ios-time-zone',
+    )
+    status = str(payload.get('status', '')).lower()
+    if status in {'unauthorised', 'unauthorized', 'error', 'fail', 'failed'}:
+        message = payload.get('message') or 'Failed to load timezone'
+        raise TpmsAuthError(str(message), payload=payload)
+    return payload
+
+
 def _looks_like_profile(value: Any) -> bool:
     if not isinstance(value, dict):
         return False

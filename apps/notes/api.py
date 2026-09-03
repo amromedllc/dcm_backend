@@ -253,6 +253,9 @@ def approve(request, note_id: int):
     note = _get_note_or_404(note_id)
     approve_note(note, request.user)
     note.refresh_from_db()
+    if note.requires_caregiver_signature:
+        from apps.notifications.service import notify_signature_request
+        notify_signature_request(note)
     return _serialize_note(note)
 
 

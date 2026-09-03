@@ -1274,16 +1274,25 @@ def upload_session_media(
         raise HttpError(400, f'media_type must be one of {SessionMedia.MediaType.values}')
     validate_media_upload(file, media_type)
 
-    media = SessionMedia.objects.create(
-        session_run=session,
-        target_id=target_id,
-        target_name=target_name,
-        media_type=media_type,
-        file=file,
-        duration_seconds=duration_seconds,
-        caption=caption,
-        created_by=request.user,
-    )
+    try:
+        media = SessionMedia.objects.create(
+            session_run=session,
+            target_id=target_id,
+            target_name=target_name,
+            media_type=media_type,
+            file=file,
+            duration_seconds=duration_seconds,
+            caption=caption,
+            created_by=request.user,
+        )
+    except Exception:
+        from apps.notifications.service import notify_file_upload_failed
+        notify_file_upload_failed(session, media_type, request.user)
+        raise
+
+    from apps.notifications.service import notify_session_attachment_added
+    notify_session_attachment_added(media)
+
     return 201, _serialize_media(media, request)
 
 
