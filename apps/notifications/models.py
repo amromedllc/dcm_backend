@@ -51,6 +51,30 @@ class NotificationPreference(TenantAwareModel):
         return f'{self.event_type} preferences for {self.recipient_id}'
 
 
+class RoleNotificationPolicy(TenantAwareModel):
+    """
+    Facility-scoped notification matrix for a role.
+
+    One row per (organization, role, event_type). ``locked`` means users in
+    this role cannot override this notification type from their own
+    Account -> Notifications page; the role policy value is enforced instead
+    (both in the UI and in the send pipeline).
+    """
+    role = models.CharField(max_length=20, db_index=True)
+    event_type = models.CharField(max_length=80, db_index=True)
+    email_enabled = models.BooleanField(default=True)
+    web_enabled = models.BooleanField(default=True)
+    locked = models.BooleanField(default=False)
+
+    class Meta:
+        app_label = 'notifications'
+        unique_together = [('organization', 'role', 'event_type')]
+        ordering = ['role', 'event_type']
+
+    def __str__(self) -> str:
+        return f'{self.role} / {self.event_type} policy'
+
+
 class FirebaseMessagingToken(TenantAwareModel):
     recipient = models.ForeignKey(
         settings.AUTH_USER_MODEL,

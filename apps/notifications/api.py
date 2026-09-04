@@ -1,15 +1,41 @@
 from django.conf import settings
 from django.utils import timezone
-from ninja import Router, Schema
+from ninja import Body, Router, Schema
 from ninja.errors import HttpError
 from pydantic import Field
 
 from apps.accounts.auth import jwt_auth
-from .models import FirebaseMessagingToken, Notification, NotificationPreference
+from apps.accounts.models import User
+from apps.accounts.permissions import require_permission
+from .models import (
+    FirebaseMessagingToken,
+    Notification,
+    NotificationPreference,
+    RoleNotificationPolicy,
+)
 from .preferences import PREFERENCE_TYPES
 from .service import _send_firebase_push
 
 router = Router(auth=jwt_auth)
+
+POLICY_ROLES = [User.Role.ADMIN, User.Role.SUPERVISOR, User.Role.STAFF]
+
+
+def _role_policy_map(role: str) -> dict[str, dict]:
+    """{event_type: {email_enabled, web_enabled, locked}} for a role, merged
+    over the all-on / unlocked default."""
+    result = {
+        event_type: {'email_enabled': True, 'web_enabled': True, 'locked': False}
+        for event_type, _label in PREFERENCE_TYPES
+    }
+    for row in RoleNotificationPolicy.objects.filter(role=role):
+        if row.event_type in result:
+            result[row.event_type] = {
+                'email_enabled': row.email_enabled,
+                'web_enabled': row.web_enabled,
+                'locked': row.locked,
+            }
+    return result
 
 
 class NotificationSchema(Schema):
@@ -35,6 +61,9 @@ class NotificationPreferenceSchema(Schema):
     label: str
     email_enabled: bool
     web_enabled: bool
+    # True when an admin has locked this notification type for the user's role;
+    # the toggles are read-only and the values below reflect the role policy.
+    locked: bool = False
 
 
 class NotificationPreferenceUpdate(Schema):
@@ -56,6 +85,8 @@ class FirebaseTokenRemove(Schema):
 
 
 def _default_preferences_for_user(user) -> list[NotificationPreference]:
+    """Seed missing rows from the user's role policy (all-on when no policy)."""
+    policy = _role_policy_map(getattr(user, 'role', ''))
     existing = {
         pref.event_type: pref
         for pref in NotificationPreference.objects.filter(recipient=user)
@@ -64,11 +95,12 @@ def _default_preferences_for_user(user) -> list[NotificationPreference]:
     for event_type, _label in PREFERENCE_TYPES:
         pref = existing.get(event_type)
         if pref is None:
+            seed = policy.get(event_type, {})
             pref = NotificationPreference.objects.create(
                 recipient=user,
                 event_type=event_type,
-                email_enabled=True,
-                web_enabled=True,
+                email_enabled=seed.get('email_enabled', True),
+                web_enabled=seed.get('web_enabled', True),
             )
         preferences.append(pref)
     return preferences
@@ -77,23 +109,33 @@ def _default_preferences_for_user(user) -> list[NotificationPreference]:
 @router.get('/notifications/preferences', response=list[NotificationPreferenceSchema])
 def list_notification_preferences(request):
     labels = dict(PREFERENCE_TYPES)
-    return [
-        {
+    policy = _role_policy_map(getattr(request.user, 'role', ''))
+    rows = []
+    for pref in _default_preferences_for_user(request.user):
+        entry = policy.get(pref.event_type, {})
+        locked = bool(entry.get('locked'))
+        rows.append({
             'event_type': pref.event_type,
             'label': labels[pref.event_type],
-            'email_enabled': pref.email_enabled,
-            'web_enabled': pref.web_enabled,
-        }
-        for pref in _default_preferences_for_user(request.user)
-    ]
+            # A locked type shows (and enforces) the role policy value.
+            'email_enabled': entry['email_enabled'] if locked else pref.email_enabled,
+            'web_enabled': entry['web_enabled'] if locked else pref.web_enabled,
+            'locked': locked,
+        })
+    return rows
 
 
 @router.put('/notifications/preferences', response=list[NotificationPreferenceSchema])
 def update_notification_preferences(request, payload: NotificationPreferenceUpdateRequest):
     allowed = {event_type for event_type, _label in PREFERENCE_TYPES}
+    policy = _role_policy_map(getattr(request.user, 'role', ''))
     for item in payload.preferences:
         if item.event_type not in allowed:
             raise HttpError(400, f'Unknown notification type: {item.event_type}')
+        entry = policy.get(item.event_type, {})
+        if entry.get('locked'):
+            # Ignore client-supplied values for locked types — the role policy wins.
+            continue
         NotificationPreference.objects.update_or_create(
             recipient=request.user,
             event_type=item.event_type,
@@ -103,6 +145,46 @@ def update_notification_preferences(request, payload: NotificationPreferenceUpda
             },
         )
     return list_notification_preferences(request)
+
+
+@router.get('/notifications/role-policies')
+def get_role_notification_policies(request):
+    """Full matrix as {role: {event_type: {email_enabled, web_enabled, locked}}}.
+
+    Facility-scoped (current tenant). Requires the privileges permission.
+    """
+    require_permission(request, 'admin_privileges')
+    return {role: _role_policy_map(role) for role in POLICY_ROLES}
+
+
+@router.put('/notifications/role-policies')
+def save_role_notification_policies(request, body: dict = Body(...)):
+    """Persist the matrix. Body: {role: {event_type: {email_enabled, web_enabled, locked}}}."""
+    require_permission(request, 'admin_privileges')
+    allowed_types = {event_type for event_type, _label in PREFERENCE_TYPES}
+    valid_roles = set(POLICY_ROLES)
+
+    for role, entries in body.items():
+        if role not in valid_roles:
+            raise HttpError(400, f'Invalid role: {role}')
+        if not isinstance(entries, dict):
+            raise HttpError(400, f'Entries must be an object for role {role}')
+        for event_type, vals in entries.items():
+            if event_type not in allowed_types:
+                raise HttpError(400, f'Unknown notification type: {event_type}')
+            if not isinstance(vals, dict):
+                raise HttpError(400, f'Entry must be an object for {role}/{event_type}')
+            RoleNotificationPolicy.objects.update_or_create(
+                role=role,
+                event_type=event_type,
+                defaults={
+                    'email_enabled': bool(vals.get('email_enabled', True)),
+                    'web_enabled': bool(vals.get('web_enabled', True)),
+                    'locked': bool(vals.get('locked', False)),
+                },
+            )
+
+    return {role: _role_policy_map(role) for role in POLICY_ROLES}
 
 
 @router.post('/notifications/firebase-tokens', response={200: dict})
