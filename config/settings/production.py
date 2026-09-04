@@ -231,6 +231,10 @@ EMAIL_BACKEND = env(
     ),
 )
 
+# Base URL of the web app, used to build absolute links in outbound emails
+# (e.g. the "View in Progressly" button on notification emails).
+FRONTEND_BASE_URL = env('FRONTEND_BASE_URL', default='http://localhost:3000')
+
 FIREBASE_PROJECT_ID = env('FIREBASE_PROJECT_ID', default='')
 FIREBASE_CLIENT_EMAIL = env('FIREBASE_CLIENT_EMAIL', default='')
 FIREBASE_PRIVATE_KEY = env('FIREBASE_PRIVATE_KEY', default='')
