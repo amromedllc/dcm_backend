@@ -20,6 +20,7 @@ class Migration(migrations.Migration):
             name='automatic_logout_minutes',
             field=models.PositiveIntegerField(
                 choices=[
+                    (2, '2 minutes'),
                     (540, '9 hours'),
                     (1440, '24 hours'),
                     (10080, '1 week'),

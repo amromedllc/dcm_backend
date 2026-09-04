@@ -44,7 +44,7 @@ def update_authentication_settings(request, data: OrganizationAuthenticationSett
     if data.automatic_logout_minutes is not None:
         valid_minutes = {choice.value for choice in Organization.AutomaticLogoutMinutes}
         if data.automatic_logout_minutes not in valid_minutes:
-            raise HttpError(400, 'Automatic logout timer must be 9 hours, 24 hours, or 1 week')
+            raise HttpError(400, 'Automatic logout timer must be 2 minutes, 9 hours, 24 hours, or 1 week')
         org.automatic_logout_minutes = data.automatic_logout_minutes
         update_fields.append('automatic_logout_minutes')
 

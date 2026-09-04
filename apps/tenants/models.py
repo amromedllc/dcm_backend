@@ -9,6 +9,7 @@ class Organization(TenantMixin):
         ENTERPRISE = 'enterprise', 'Enterprise'
 
     class AutomaticLogoutMinutes(models.IntegerChoices):
+        TWO_MINUTES = 2, '2 minutes'
         NINE_HOURS = 9 * 60, '9 hours'
         TWENTY_FOUR_HOURS = 24 * 60, '24 hours'
         ONE_WEEK = 7 * 24 * 60, '1 week'
