@@ -37,8 +37,8 @@ class TpmsAdminIdInline(TabularInline):
 
 @admin.register(Organization)
 class OrganizationAdmin(TenantAdminMixin, ModelAdmin):
-    list_display = ['name', 'slug', 'plan', 'is_active', 'created_at']
-    list_filter = ['plan', 'is_active']
+    list_display = ['name', 'slug', 'plan', 'is_active', 'automatic_logout_enabled', 'automatic_logout_minutes', 'created_at']
+    list_filter = ['plan', 'is_active', 'automatic_logout_enabled']
     search_fields = ['name', 'slug']
     inlines = [DomainInline, TpmsAdminIdInline]
 

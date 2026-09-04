@@ -8,10 +8,20 @@ class Organization(TenantMixin):
         PROFESSIONAL = 'professional', 'Professional'
         ENTERPRISE = 'enterprise', 'Enterprise'
 
+    class AutomaticLogoutMinutes(models.IntegerChoices):
+        NINE_HOURS = 9 * 60, '9 hours'
+        TWENTY_FOUR_HOURS = 24 * 60, '24 hours'
+        ONE_WEEK = 7 * 24 * 60, '1 week'
+
     name = models.CharField(max_length=200)
     slug = models.SlugField(unique=True)
     plan = models.CharField(max_length=20, choices=Plan.choices, default=Plan.STARTER)
     is_active = models.BooleanField(default=True)
+    automatic_logout_enabled = models.BooleanField(default=False)
+    automatic_logout_minutes = models.PositiveIntegerField(
+        choices=AutomaticLogoutMinutes.choices,
+        default=AutomaticLogoutMinutes.NINE_HOURS,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -15,6 +15,7 @@ from apps.exports.api import router as exports_router
 from apps.notifications.api import router as notifications_router
 from apps.integrations.api import router as integrations_router
 from apps.audit.api import router as audit_router
+from apps.tenants.api import router as tenants_router
 
 api = NinjaAPI(
     title='DCM Platform API',
@@ -69,6 +70,7 @@ api.add_router('/', exports_router, tags=['Exports'])
 api.add_router('/', notifications_router, tags=['Notifications'])
 api.add_router('/integrations', integrations_router, tags=['Integrations'])
 api.add_router('/', audit_router, tags=['Audit'])
+api.add_router('/organization', tenants_router, tags=['Organization'])
 
 
 @api.get('/dashboard', auth=jwt_auth, tags=['System'])

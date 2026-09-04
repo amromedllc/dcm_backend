@@ -50,6 +50,7 @@ class CaregiverClientSchema(Schema):
 
 class CurrentUserSchema(UserSchema):
     permissions: dict[str, bool]
+    automatic_logout_minutes: int | None = None
     caregiver_client: CaregiverClientSchema | None = None
 
 

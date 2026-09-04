@@ -362,6 +362,12 @@ def refresh_token(request, data: RefreshRequest):
 @router.get('/me', response=CurrentUserSchema, auth=jwt_auth_any_role)
 def me(request):
     user = request.user
+    tenant = getattr(request, 'tenant', None)
+    user.automatic_logout_minutes = (
+        tenant.automatic_logout_minutes
+        if tenant is not None and tenant.automatic_logout_enabled
+        else None
+    )
     if user.is_caregiver:
         # Caregiver access is identity-scoped, not permission-key-scoped —
         # no RolePermission lookup, just the linked client's display info.
