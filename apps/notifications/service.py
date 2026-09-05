@@ -155,6 +155,8 @@ def _send_firebase_push(recipient, title: str, body: str, data: dict):
 
 
 def _notification_url(data: dict) -> str:
+    if data.get('url'):
+        return str(data['url'])
     client_id = data.get('client_id')
     session_id = data.get('session_id')
     if client_id and session_id:

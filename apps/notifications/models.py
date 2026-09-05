@@ -10,6 +10,7 @@ class Notification(TenantAwareModel):
         SESSION_REJECTED    = 'session_rejected',     'Session rejected'
         TARGET_ADVANCED     = 'target_advanced',      'Target automatically advanced'
         TARGET_PROMPT_LEVEL_CHANGED = 'target_prompt_level_changed', 'Target prompt level automatically changed'
+        REPORT_REVIEW_REQUEST = 'report_review_request', 'Report review request'
 
     recipient = models.ForeignKey(
         settings.AUTH_USER_MODEL,

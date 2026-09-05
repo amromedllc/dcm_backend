@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.db.models import Q
 from django.utils import timezone
 from ninja import Body, Router, Schema
 from ninja.errors import HttpError
@@ -6,7 +7,9 @@ from pydantic import Field
 
 from apps.accounts.auth import jwt_auth
 from apps.accounts.models import User
-from apps.accounts.permissions import require_permission
+from apps.accounts.permissions import require_permission, resolve_permission_organization, user_has_permission
+from apps.clients.api import _get_accessible_clients
+from apps.clients.models import ClientStaffAssignment
 from .models import (
     FirebaseMessagingToken,
     Notification,
@@ -19,6 +22,15 @@ from .service import _send_firebase_push
 router = Router(auth=jwt_auth)
 
 POLICY_ROLES = [User.Role.ADMIN, User.Role.SUPERVISOR, User.Role.STAFF]
+
+
+def _require_report_edit_permission(request):
+    organization = resolve_permission_organization(request)
+    if not (
+        user_has_permission(request.user, organization, 'client_report')
+        or user_has_permission(request.user, organization, 'reports_add_edit')
+    ):
+        raise HttpError(403, 'Insufficient permissions')
 
 
 def _role_policy_map(role: str) -> dict[str, dict]:
@@ -82,6 +94,25 @@ class FirebaseTokenUpsert(Schema):
 
 class FirebaseTokenRemove(Schema):
     token: str
+
+
+class ReportReviewerSchema(Schema):
+    id: int
+    full_name: str
+    email: str
+    role: str
+
+
+class ReportReviewRequestCreate(Schema):
+    client_id: int
+    report_key: str
+    report_title: str
+    reviewer_id: int
+    url: str
+
+
+class ReportReviewRequestComplete(Schema):
+    report_key: str
 
 
 def _default_preferences_for_user(user) -> list[NotificationPreference]:
@@ -228,6 +259,98 @@ def list_notifications(request, unread_only: bool = False):
     if unread_only:
         qs = qs.filter(read_at__isnull=True)
     return list(qs[:60])
+
+
+@router.get('/notifications/report-reviewers', response=list[ReportReviewerSchema])
+def list_report_reviewers(request, client_id: int):
+    _require_report_edit_permission(request)
+    try:
+        client = _get_accessible_clients(request).get(id=client_id)
+    except Exception:
+        raise HttpError(404, 'Client not found')
+
+    user_ids = set()
+    org_id = getattr(client, 'organization_id', None)
+    if org_id:
+        user_ids.update(
+            User.objects.filter(
+                organization_id=org_id,
+                role__in=[User.Role.ADMIN, User.Role.SUPERVISOR],
+                is_active=True,
+            ).values_list('id', flat=True)
+        )
+
+    user_ids.update(
+        ClientStaffAssignment.objects
+        .filter(client=client, is_active=True, user__is_active=True)
+        .values_list('user_id', flat=True)
+    )
+
+    if client.external_admin_id is not None:
+        user_ids.update(
+            User.objects.filter(
+                external_admin_id=client.external_admin_id,
+                role__in=[User.Role.ADMIN, User.Role.SUPERVISOR, User.Role.STAFF],
+                is_active=True,
+            ).values_list('id', flat=True)
+        )
+
+    caregiver_filters = Q(role=User.Role.CAREGIVER, is_active=True)
+    caregiver_ids = [client.id]
+    if client.external_id:
+        try:
+            caregiver_ids.append(int(client.external_id))
+        except (TypeError, ValueError):
+            pass
+    user_ids.update(
+        User.objects.filter(caregiver_filters, external_client_id__in=caregiver_ids)
+        .values_list('id', flat=True)
+    )
+
+    rows = []
+    for user in User.objects.filter(id__in=user_ids, is_active=True).order_by('first_name', 'last_name', 'email'):
+        rows.append({
+            'id': user.id,
+            'full_name': user.full_name or user.email,
+            'email': user.email,
+            'role': user.role,
+        })
+    return rows
+
+
+@router.post('/notifications/report-review-requests', response=dict)
+def send_report_review_request(request, payload: ReportReviewRequestCreate):
+    _require_report_edit_permission(request)
+    reviewers = list_report_reviewers(request, payload.client_id)
+    if payload.reviewer_id not in {reviewer['id'] for reviewer in reviewers}:
+        raise HttpError(400, 'Reviewer does not have access to this client')
+
+    notification = Notification.objects.create(
+        recipient_id=payload.reviewer_id,
+        event_type=Notification.EventType.REPORT_REVIEW_REQUEST,
+        title='Review report',
+        body=f'{request.user.full_name or request.user.email} sent "{payload.report_title}" for review.',
+        data={
+            'client_id': payload.client_id,
+            'report_key': payload.report_key,
+            'report_title': payload.report_title,
+            'url': payload.url,
+            'status': 'action_required',
+        },
+    )
+    from .service import _send_firebase_push
+    _send_firebase_push(notification.recipient, notification.title, notification.body, notification.data)
+    return {'notification_id': notification.id}
+
+
+@router.post('/notifications/report-review-requests/complete', response=dict)
+def complete_report_review_request(request, payload: ReportReviewRequestComplete):
+    updated = Notification.objects.filter(
+        event_type=Notification.EventType.REPORT_REVIEW_REQUEST,
+        data__report_key=payload.report_key,
+        read_at__isnull=True,
+    ).update(read_at=timezone.now())
+    return {'updated': updated}
 
 
 @router.patch('/notifications/{notification_id}/read', response=NotificationSchema)
