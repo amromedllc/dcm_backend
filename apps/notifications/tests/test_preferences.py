@@ -5,7 +5,7 @@ from django_tenants.utils import schema_context
 from apps.accounts.models import User
 from apps.notifications.models import Notification, NotificationPreference
 from apps.notifications.service import _create
-from apps.tenants.models import Organization
+from apps.tenants.models import Organization, OrganizationTpmsAdminId
 from shared.tenancy import tenant_context
 
 
@@ -63,3 +63,57 @@ class NotificationPreferenceTests(TestCase):
             self.assertEqual(Notification.objects.count(), 1)
             self.assertEqual(len(mail.outbox), 1)
             self.assertEqual(mail.outbox[0].to, ['notify@example.com'])
+
+    def test_tpms_practice_gate_disables_email_delivery(self):
+        OrganizationTpmsAdminId.objects.create(
+            organization=self.org,
+            admin_id=501,
+            email_notifications_enabled=False,
+        )
+        self.user.external_admin_id = 501
+        self.user.save(update_fields=['external_admin_id'])
+
+        with schema_context(self.org.schema_name), tenant_context(self.org.id):
+            NotificationPreference.objects.create(
+                recipient=self.user,
+                event_type='target_mastered',
+                email_enabled=True,
+                web_enabled=True,
+            )
+
+            _create(
+                recipient_id=self.user.id,
+                event_type='target_advanced',
+                title='Target advanced',
+                body='A target advanced automatically.',
+            )
+
+            self.assertEqual(Notification.objects.count(), 1)
+            self.assertEqual(len(mail.outbox), 0)
+
+    def test_tpms_practice_gate_allows_email_delivery_when_enabled(self):
+        OrganizationTpmsAdminId.objects.create(
+            organization=self.org,
+            admin_id=501,
+            email_notifications_enabled=True,
+        )
+        self.user.external_admin_id = 501
+        self.user.save(update_fields=['external_admin_id'])
+
+        with schema_context(self.org.schema_name), tenant_context(self.org.id):
+            NotificationPreference.objects.create(
+                recipient=self.user,
+                event_type='target_mastered',
+                email_enabled=True,
+                web_enabled=True,
+            )
+
+            _create(
+                recipient_id=self.user.id,
+                event_type='target_advanced',
+                title='Target advanced',
+                body='A target advanced automatically.',
+            )
+
+            self.assertEqual(Notification.objects.count(), 1)
+            self.assertEqual(len(mail.outbox), 1)

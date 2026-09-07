@@ -33,6 +33,19 @@ class DomainInline(TabularInline):
 class TpmsAdminIdInline(TabularInline):
     model = OrganizationTpmsAdminId
     extra = 1
+    fields = ['admin_id', 'email_notifications_enabled']
+
+    def has_view_permission(self, request, obj=None):
+        return request.user.is_superuser
+
+    def has_add_permission(self, request, obj=None):
+        return request.user.is_superuser
+
+    def has_change_permission(self, request, obj=None):
+        return request.user.is_superuser
+
+    def has_delete_permission(self, request, obj=None):
+        return request.user.is_superuser
 
 
 @admin.register(Organization)
@@ -41,6 +54,14 @@ class OrganizationAdmin(TenantAdminMixin, ModelAdmin):
     list_filter = ['plan', 'is_active', 'automatic_logout_enabled']
     search_fields = ['name', 'slug']
     inlines = [DomainInline, TpmsAdminIdInline]
+
+
+@admin.register(OrganizationTpmsAdminId)
+class OrganizationTpmsAdminIdAdmin(_SuperuserOnlyAdminMixin, ModelAdmin):
+    list_display = ['admin_id', 'organization', 'email_notifications_enabled', 'created_at']
+    list_filter = ['email_notifications_enabled', 'organization']
+    list_editable = ['email_notifications_enabled']
+    search_fields = ['admin_id', 'organization__name', 'organization__slug']
 
 
 @admin.register(DefaultTargetStatus)
