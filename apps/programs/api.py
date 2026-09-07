@@ -406,11 +406,12 @@ def list_programs(request, client_id: int, category: str | None = None, status: 
     qs = Program.objects.filter(
         external_client_id=client_id,
         external_client_id__in=_accessible_external_client_ids(request),
-    ).exclude(status='archived')
+        archived_at__isnull=True,
+    )
     if category:
         qs = qs.filter(category=category)
     if status:
-        qs = qs.filter(status=status)
+        qs = qs.filter(phase=status)
     result = []
     for p in qs.prefetch_related('targets'):
         targets = list(p.targets.all())
@@ -1441,11 +1442,11 @@ def list_org_programs(
 ):
     # Readable by anyone authenticated — used by Program Library and the
     # client "From Library" picker. Mutations are gated separately.
-    qs = _org_qs(request).exclude(status='archived')
+    qs = _org_qs(request).filter(archived_at__isnull=True)
     if category:
         qs = qs.filter(category=category)
     if status:
-        qs = qs.filter(status=status)
+        qs = qs.filter(phase=status)
     if folder_id is not None:
         qs = qs.filter(folder_id=folder_id)
     elif unfiled:

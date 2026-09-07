@@ -248,7 +248,7 @@ class ProgramSchema(Schema):
     name: str
     category: str
     status: str
-    phase: str = 'teaching'
+    phase: str = 'active'
     treatment_area: str = ''
     tags: list[str] = []
     baseline_notes: str = ''
@@ -273,7 +273,7 @@ class ProgramListSchema(Schema):
     name: str
     category: str
     status: str
-    phase: str = 'teaching'
+    phase: str = 'active'
     treatment_area: str = ''
     tags: list[str] = []
     baseline_notes: str = ''
@@ -295,7 +295,7 @@ class ProgramCreateRequest(Schema):
     client_id: int
     name: NonEmptyStr
     category: Program.Category = Program.Category.SKILL_ACQUISITION
-    phase: Program.Phase = Program.Phase.TEACHING
+    phase: Program.Phase = Program.Phase.ACTIVE
     treatment_area: str = ''
     tags: list[str] = []
     baseline_notes: str = ''
@@ -587,7 +587,7 @@ class OrgProgramSchema(Schema):
 class OrgProgramCreateRequest(Schema):
     name: NonEmptyStr
     category: Program.Category = Program.Category.SKILL_ACQUISITION
-    phase: Program.Phase = Program.Phase.TEACHING
+    phase: Program.Phase = Program.Phase.ACTIVE
     treatment_area: str = ''
     tags: list[str] = []
     objective: str = ''

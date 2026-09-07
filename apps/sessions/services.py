@@ -5,6 +5,12 @@ from ninja.errors import HttpError
 
 from apps.programs.models import Program, Lesson
 
+RUNNABLE_PROGRAM_PHASES = {
+    Program.Phase.BASELINE,
+    Program.Phase.ACTIVE,
+    Program.Phase.MAINTENANCE,
+}
+
 
 def _workflow_phase_for_target(target, phase: str) -> dict | None:
     wf = target.workflow_template or target.program.workflow_template
@@ -127,13 +133,13 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
         program_ids = lesson.lesson_programs.values_list('program_id', flat=True)
         programs_qs = (
             Program.objects
-            .filter(id__in=program_ids, status=Program.Status.ACTIVE)
+            .filter(id__in=program_ids, archived_at__isnull=True, phase__in=RUNNABLE_PROGRAM_PHASES)
             .prefetch_related('targets__prompting_template', 'targets__child_items')
         )
     elif not restrict_to_lesson:
         programs_qs = (
             Program.objects
-            .filter(external_client_id=client_id, status=Program.Status.ACTIVE)
+            .filter(external_client_id=client_id, archived_at__isnull=True, phase__in=RUNNABLE_PROGRAM_PHASES)
             .prefetch_related('targets__prompting_template', 'targets__child_items')
         )
     else:
