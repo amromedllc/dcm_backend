@@ -43,6 +43,7 @@ from .schemas import (
     ProgramTagSchema, ProgramTagRequest,
     ProgramDataFieldSchema, ProgramDataFieldRequest,
     TargetStatusChangeSchema, TargetPromptLevelChangeSchema,
+    ClientTargetStatusChangeSchema, ClientProgramAuditSchema,
     TargetStatusSchema, TargetStatusRequest, TargetStatusUpdateRequest,
     ProgramModuleSchema, ProgramModuleRequest, ProgramSubmoduleSchema, ProgramSubmoduleRequest,
     SavedTableViewSchema, SavedTableViewCreateRequest,
@@ -405,11 +406,12 @@ def list_programs(request, client_id: int, category: str | None = None, status: 
     qs = Program.objects.filter(
         external_client_id=client_id,
         external_client_id__in=_accessible_external_client_ids(request),
-    ).exclude(status='archived')
+        archived_at__isnull=True,
+    )
     if category:
         qs = qs.filter(category=category)
     if status:
-        qs = qs.filter(status=status)
+        qs = qs.filter(phase=status)
     result = []
     for p in qs.prefetch_related('targets'):
         targets = list(p.targets.all())
@@ -478,6 +480,11 @@ def update_program(request, program_id: int, data: ProgramUpdateRequest):
         )
     if 'fading_template_id' in updates:
         program.targets.update(fading_template_id=program.fading_template_id)
+
+    if updates:
+        from apps.notifications.service import notify_program_modified
+        notify_program_modified(program, request.user)
+
     return {**_serialize_program(program, request, include_targets=True)}
 
 
@@ -832,6 +839,7 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
     _require_supervisor(request)
     target = _get_target_or_404(request, target_id)
     updates = data.dict(exclude_none=True)
+    old_status = target.status
     for field, value in updates.items():
         setattr(target, field, value)
     if 'prompting_template_id' in updates:
@@ -878,6 +886,21 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
         _sync_target_sub_items(request, target, target.sub_items, request.user)
     elif target.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
         _refresh_target_sub_items_json(target)
+
+    if updates:
+        from apps.notifications.service import (
+            _TERMINAL_TARGET_STATUS_KEYS,
+            notify_program_modified,
+            notify_target_reopened,
+        )
+        notify_program_modified(target.program, request.user)
+        if (
+            'status' in updates
+            and old_status in _TERMINAL_TARGET_STATUS_KEYS
+            and target.status not in _TERMINAL_TARGET_STATUS_KEYS
+        ):
+            notify_target_reopened(target, old_status, target.status, request.user)
+
     return target
 
 
@@ -919,6 +942,37 @@ def target_history(request, target_id: int):
     return result
 
 
+@router.get('/clients/{client_id}/target-history', response=list[ClientTargetStatusChangeSchema])
+def client_target_history(request, client_id: int):
+    _assert_client_accessible(request, client_id)
+    qs = (
+        TargetStatusChange.objects
+        .filter(target__program__external_client_id=client_id)
+        .select_related('target', 'target__program', 'created_by')
+        .order_by('-created_at')[:200]
+    )
+    result = []
+    for entry in qs:
+        changed_by = None
+        if entry.created_by_id:
+            u = entry.created_by
+            changed_by = f'{u.first_name} {u.last_name}'.strip() or u.email
+        result.append(ClientTargetStatusChangeSchema(
+            id=entry.id,
+            target_id=entry.target_id,
+            target_name=entry.target.name,
+            program_id=entry.target.program_id,
+            program_name=entry.target.program.name,
+            from_status=entry.from_status,
+            to_status=entry.to_status,
+            trigger=entry.trigger,
+            session_run_id=entry.session_run_id,
+            changed_by=changed_by,
+            created_at=entry.created_at,
+        ))
+    return result
+
+
 @router.get('/targets/{target_id}/prompt-level-history', response=list[TargetPromptLevelChangeSchema])
 def target_prompt_level_history(request, target_id: int):
     _get_target_or_404(request, target_id)
@@ -949,6 +1003,39 @@ def target_prompt_level_history(request, target_id: int):
             created_at=entry.created_at,
         ))
     return result
+
+
+@router.get('/clients/{client_id}/program-audit', response=list[ClientProgramAuditSchema])
+def client_program_audit(request, client_id: int):
+    _assert_client_accessible(request, client_id)
+    if request.user.role not in ('admin', 'supervisor'):
+        raise HttpError(403, 'Supervisor or admin access required')
+
+    from apps.audit.models import AuditLog
+
+    program_ids = list(Program.objects.filter(external_client_id=client_id).values_list('id', flat=True))
+    target_ids = list(Target.objects.filter(program_id__in=program_ids).values_list('id', flat=True))
+    qs = (
+        AuditLog.objects
+        .filter(
+            models.Q(model='Program', object_id__in=[str(i) for i in program_ids])
+            | models.Q(model='Target', object_id__in=[str(i) for i in target_ids])
+        )
+        .order_by('-timestamp')[:200]
+    )
+    return [
+        ClientProgramAuditSchema(
+            id=log.id,
+            model=log.model,
+            object_id=log.object_id,
+            object_repr=log.object_repr,
+            action=log.action,
+            actor_email=log.actor_email,
+            changes=log.changes,
+            timestamp=log.timestamp,
+        )
+        for log in qs
+    ]
 
 
 
@@ -1355,11 +1442,11 @@ def list_org_programs(
 ):
     # Readable by anyone authenticated — used by Program Library and the
     # client "From Library" picker. Mutations are gated separately.
-    qs = _org_qs(request).exclude(status='archived')
+    qs = _org_qs(request).filter(archived_at__isnull=True)
     if category:
         qs = qs.filter(category=category)
     if status:
-        qs = qs.filter(status=status)
+        qs = qs.filter(phase=status)
     if folder_id is not None:
         qs = qs.filter(folder_id=folder_id)
     elif unfiled:

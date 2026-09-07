@@ -103,7 +103,7 @@ class ProgramProgressStats(TypedDict):
     program_id: int
     program_name: str
     treatment_area: str
-    status: str  # Program.status (active | inactive | archived) — not a target status
+    status: str  # Clinical program phase/status shown in the UI.
     tags: list[str]
     status_counts: dict[str, int]
     avg_trials_to_mastery: float | None
@@ -966,7 +966,7 @@ def get_client_progress_overview(client_id: int) -> ClientProgressOverview:
             'program_id': program.id,
             'program_name': program.name,
             'treatment_area': program.treatment_area,
-            'program_status': program.status,
+            'program_status': program.phase,
             'program_tags': program.tags or [],
             'mastered_at': mastered_at,
         })
@@ -994,7 +994,7 @@ def get_client_progress_overview(client_id: int) -> ClientProgressOverview:
             'program_id': program.id,
             'program_name': program.name,
             'treatment_area': program.treatment_area,
-            'status': program.status,
+            'status': program.phase,
             'tags': program.tags or [],
             'status_counts': dict(status_counts),
             'avg_trials_to_mastery': avg_trials,

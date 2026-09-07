@@ -52,6 +52,12 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'client_history': True,
         'client_progress': True,
         'client_report': True,
+        'reports_add_edit': True,
+        'reports_delete': True,
+        'reports_view_draft': True,
+        'reports_view_review': True,
+        'reports_view_archived': True,
+        'reports_comment': True,
         'client_bip': True,
         # Appointments
         'appointments_create': True,
@@ -127,10 +133,15 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'settings_data_fields_create': True,
         'settings_data_fields_edit': True,
         'settings_data_fields_delete': True,
+        'settings_abc_categories_view': True,
+        'settings_abc_categories_create': True,
+        'settings_abc_categories_edit': True,
+        'settings_abc_categories_delete': True,
         # Admin
         'admin_users_view': True,
         'admin_users_edit': True,
         'admin_privileges': True,
+        'admin_authentication_settings': True,
     },
     User.Role.SUPERVISOR: {
         # Dashboard
@@ -151,6 +162,12 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'client_history': True,
         'client_progress': True,
         'client_report': True,
+        'reports_add_edit': True,
+        'reports_delete': True,
+        'reports_view_draft': True,
+        'reports_view_review': True,
+        'reports_view_archived': True,
+        'reports_comment': True,
         'client_bip': True,
         # Appointments
         'appointments_create': True,
@@ -226,10 +243,15 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'settings_data_fields_create': False,
         'settings_data_fields_edit': False,
         'settings_data_fields_delete': False,
+        'settings_abc_categories_view': False,
+        'settings_abc_categories_create': False,
+        'settings_abc_categories_edit': False,
+        'settings_abc_categories_delete': False,
         # Admin
         'admin_users_view': True,
         'admin_users_edit': True,
         'admin_privileges': True,
+        'admin_authentication_settings': True,
     },
     User.Role.STAFF: {
         # Dashboard
@@ -250,6 +272,12 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'client_history': True,
         'client_progress': True,
         'client_report': False,
+        'reports_add_edit': False,
+        'reports_delete': False,
+        'reports_view_draft': False,
+        'reports_view_review': False,
+        'reports_view_archived': False,
+        'reports_comment': False,
         'client_bip': True,
         # Appointments
         'appointments_create': False,
@@ -325,10 +353,15 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'settings_data_fields_create': False,
         'settings_data_fields_edit': False,
         'settings_data_fields_delete': False,
+        'settings_abc_categories_view': False,
+        'settings_abc_categories_create': False,
+        'settings_abc_categories_edit': False,
+        'settings_abc_categories_delete': False,
         # Admin
         'admin_users_view': False,
         'admin_users_edit': False,
         'admin_privileges': False,
+        'admin_authentication_settings': False,
     },
 }
 
@@ -338,6 +371,7 @@ _SUPERVISOR_ORG_MANAGEMENT_KEYS = (
     'admin_users_view',
     'admin_users_edit',
     'admin_privileges',
+    'admin_authentication_settings',
 )
 
 

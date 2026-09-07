@@ -214,8 +214,31 @@ CORS_ALLOWED_ORIGINS = env.list(
     ],
 )
 
-if DEBUG:
-    EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+EMAIL_HOST = env('EMAIL_HOST', default='')
+EMAIL_PORT = env.int('EMAIL_PORT', default=587)
+EMAIL_HOST_USER = env('EMAIL_HOST_USER', default='')
+EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD', default='')
+EMAIL_USE_TLS = env.bool('EMAIL_USE_TLS', default=True)
+EMAIL_USE_SSL = env.bool('EMAIL_USE_SSL', default=False)
+DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default=EMAIL_HOST_USER or 'notifications@progressly.io')
+SERVER_EMAIL = env('SERVER_EMAIL', default=DEFAULT_FROM_EMAIL)
+EMAIL_BACKEND = env(
+    'EMAIL_BACKEND',
+    default=(
+        'django.core.mail.backends.smtp.EmailBackend'
+        if EMAIL_HOST
+        else 'django.core.mail.backends.console.EmailBackend'
+    ),
+)
+
+# Base URL of the web app, used to build absolute links in outbound emails
+# (e.g. the "View in Progressly" button on notification emails).
+FRONTEND_BASE_URL = env('FRONTEND_BASE_URL', default='http://localhost:3000')
+
+FIREBASE_PROJECT_ID = env('FIREBASE_PROJECT_ID', default='')
+FIREBASE_CLIENT_EMAIL = env('FIREBASE_CLIENT_EMAIL', default='')
+FIREBASE_PRIVATE_KEY = env('FIREBASE_PRIVATE_KEY', default='')
+FIREBASE_CREDENTIALS_JSON = env('FIREBASE_CREDENTIALS_JSON', default='')
 
 # Sentry is a production-only dependency (requirements/production.txt);
 # the import is deferred inside this block so local dev, which doesn't

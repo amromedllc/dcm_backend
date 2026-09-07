@@ -87,7 +87,7 @@ class LoginDispatchTests(TestCase):
     def test_client_portal_login_never_yields_staff_role(self):
         """Core regression test for the pre-existing bug."""
         with schema_context(self.org.schema_name), tenant_context(self.org.pk):
-            client = Client.objects.create(
+            Client.objects.create(
                 first_name='Antony', last_name='R', external_id='13086',
                 external_admin_id=501, organization=self.org,
             )

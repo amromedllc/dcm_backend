@@ -82,12 +82,13 @@ class Program(TenantAwareModel):
         ARCHIVED = 'archived', 'Archived'
 
     class Phase(models.TextChoices):
+        WAITING = 'waiting', 'Waiting'
         BASELINE = 'baseline', 'Baseline'
-        TEACHING = 'teaching', 'Teaching'
-        GENERALIZING = 'generalizing', 'Generalizing'
+        ACTIVE = 'active', 'Active'
         MAINTENANCE = 'maintenance', 'Maintenance'
-        MASTERED = 'mastered', 'Mastered'
-        ON_HOLD = 'on_hold', 'On Hold'
+        HOLD = 'hold', 'Hold'
+        CLOSED = 'closed', 'Closed'
+        DISCONTINUED = 'discontinued', 'Discontinued'
 
     external_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     is_template = models.BooleanField(default=False, db_index=True)
@@ -125,7 +126,7 @@ class Program(TenantAwareModel):
     )
     category = models.CharField(max_length=30, choices=Category.choices, default=Category.SKILL_ACQUISITION)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
-    phase = models.CharField(max_length=20, choices=Phase.choices, default=Phase.TEACHING, blank=True)
+    phase = models.CharField(max_length=20, choices=Phase.choices, default=Phase.ACTIVE, blank=True)
     treatment_area = models.CharField(max_length=200, blank=True)
     tags = models.JSONField(default=list)
     baseline_notes = models.TextField(blank=True)

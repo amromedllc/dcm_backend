@@ -50,7 +50,20 @@ class CaregiverClientSchema(Schema):
 
 class CurrentUserSchema(UserSchema):
     permissions: dict[str, bool]
+    automatic_logout_minutes: int | None = None
     caregiver_client: CaregiverClientSchema | None = None
+
+
+class AccountTimezoneOptionSchema(Schema):
+    value: str
+    label: str
+
+
+class AccountProfileSchema(Schema):
+    display_name: str
+    email: str
+    timezone: str | None = None
+    timezone_options: list[AccountTimezoneOptionSchema] = []
 
 
 class UserCreateRequest(Schema):
