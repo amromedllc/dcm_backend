@@ -335,11 +335,8 @@ def logout_all(request):
     """
     import redis as redis_lib
     from django.conf import settings
-    try:
-        r = redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
-        r.set(f'dcm:token:revoke_before:{request.user.id}', timezone.now().timestamp(), ex=60 * 60 * 24 * 30)
-    except redis_lib.RedisError as exc:
-        logger.warning('Redis unavailable; could not revoke all tokens for user_id=%s: %s', request.user.id, exc)
+    r = redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
+    r.set(f'dcm:token:revoke_before:{request.user.id}', timezone.now().timestamp(), ex=60 * 60 * 24 * 30)
     clear_tpms_access_token(request.user.id)
     return 204, None
 

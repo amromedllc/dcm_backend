@@ -1,4 +1,3 @@
-import logging
 import secrets
 import jwt
 from datetime import timedelta
@@ -8,8 +7,6 @@ from django.utils import timezone
 from ninja.security import HttpBearer, APIKeyHeader
 
 from .models import User, APIKey
-
-logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Token blocklist (Redis-backed)
@@ -32,28 +29,22 @@ def blocklist_token(payload: dict) -> None:
         return
     ttl = int(exp - timezone.now().timestamp())
     if ttl > 0:
-        try:
-            _redis().setex(_blocklist_key(jti), ttl, '1')
-        except Exception as exc:
-            logger.warning('Redis unavailable; could not blocklist token jti=%s: %s', jti, exc)
+        _redis().setex(_blocklist_key(jti), ttl, '1')
 
 
 def is_token_blocked(payload: dict) -> bool:
     jti = payload.get('jti')
     user_id = payload.get('sub')
     iat = payload.get('iat')
-    try:
-        r = _redis()
-        # Check individual token blocklist
-        if jti and r.exists(_blocklist_key(jti)):
+    r = _redis()
+    # Check individual token blocklist
+    if jti and r.exists(_blocklist_key(jti)):
+        return True
+    # Check logout-all revocation timestamp
+    if user_id and iat:
+        revoke_before = r.get(f'dcm:token:revoke_before:{user_id}')
+        if revoke_before and float(iat) < float(revoke_before):
             return True
-        # Check logout-all revocation timestamp
-        if user_id and iat:
-            revoke_before = r.get(f'dcm:token:revoke_before:{user_id}')
-            if revoke_before and float(iat) < float(revoke_before):
-                return True
-    except Exception as exc:
-        logger.warning('Redis unavailable; skipping token blocklist check for user_id=%s: %s', user_id, exc)
     return False
 
 
