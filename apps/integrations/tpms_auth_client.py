@@ -118,16 +118,26 @@ def store_tpms_access_token(user_id: int, token: str) -> None:
     if not raw:
         return
     ttl = _ttl_from_token(raw)
-    _redis().setex(_tpms_token_key(user_id), ttl, raw)
+    try:
+        _redis().setex(_tpms_token_key(user_id), ttl, raw)
+    except Exception as exc:
+        logger.warning('Redis unavailable; could not store TPMS token for user_id=%s: %s', user_id, exc)
 
 
 def get_tpms_access_token(user_id: int) -> str | None:
-    value = _redis().get(_tpms_token_key(user_id))
+    try:
+        value = _redis().get(_tpms_token_key(user_id))
+    except Exception as exc:
+        logger.warning('Redis unavailable; could not read TPMS token for user_id=%s: %s', user_id, exc)
+        return None
     return value if isinstance(value, str) and value else None
 
 
 def clear_tpms_access_token(user_id: int) -> None:
-    _redis().delete(_tpms_token_key(user_id))
+    try:
+        _redis().delete(_tpms_token_key(user_id))
+    except Exception as exc:
+        logger.warning('Redis unavailable; could not clear TPMS token for user_id=%s: %s', user_id, exc)
 
 
 def _request(

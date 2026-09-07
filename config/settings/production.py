@@ -156,7 +156,7 @@ DOCUSEAL_WEBHOOK_SECRET = env('DOCUSEAL_WEBHOOK_SECRET', default='')
 ZOOM_BACKEND_URL = env('ZOOM_BACKEND_URL', default='https://zoom-api.therapypms.com')
 TELEHEALTH_SSO_SECRET_KEY = env('SSO_SECRET_KEY', default='')
 
-LOGS_ACCESS_TOKEN = env('LOGS_ACCESS_TOKEN', default='61de7bdc0f7043c730765bd376358d243cf8ac83279d67ffa5989ad43f0760dc')
+LOGS_ACCESS_TOKEN = env('LOGS_ACCESS_TOKEN', default='')
 
 REDIS_URL = env('REDIS_URL', default='redis://localhost:6379/0')
 
