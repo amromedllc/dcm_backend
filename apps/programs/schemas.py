@@ -805,6 +805,13 @@ class TargetStatusChangeSchema(Schema):
     created_at: datetime
 
 
+class ClientTargetStatusChangeSchema(TargetStatusChangeSchema):
+    target_id: int
+    target_name: str
+    program_id: int
+    program_name: str
+
+
 class TargetPromptLevelChangeSchema(Schema):
     id: int
     from_level_index: int
@@ -815,3 +822,14 @@ class TargetPromptLevelChangeSchema(Schema):
     session_run_id: int | None
     changed_by: str | None
     created_at: datetime
+
+
+class ClientProgramAuditSchema(Schema):
+    id: int
+    model: str
+    object_id: str
+    object_repr: str
+    action: str
+    actor_email: str
+    changes: dict
+    timestamp: datetime
