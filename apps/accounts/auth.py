@@ -53,6 +53,7 @@ def create_access_token(user: User, tenant_id: int) -> str:
         'sub': str(user.id),
         'email': user.email,
         'role': user.role,
+        'is_superuser': user.is_superuser,
         # The tenant resolved (by hostname) at the moment this token was
         # issued — NOT user.organization_id. TPMS-linked users have no
         # single Organization FK (organization_id is always None for them),

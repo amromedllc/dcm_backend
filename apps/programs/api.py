@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import models
@@ -13,7 +14,10 @@ from PIL import Image
 from apps.accounts.api import _same_practice_q
 from apps.accounts.auth import jwt_auth
 from apps.accounts.permissions import require_permission
-from apps.central_library.models import CentralProgram, CentralProgramFolder, KnowledgeBaseModule
+from apps.central_library.models import (
+    CentralProgram, CentralProgramFolder, CentralTarget,
+    KnowledgeBaseModule, KnowledgeBaseTopic,
+)
 from shared.uploads import validate_image_upload
 from .models import (
     Program, ProgramMaterial, Target, PromptingTemplate,
@@ -38,7 +42,9 @@ from .schemas import (
     LessonProgramSchema,
     OrgProgramSchema, OrgProgramCreateRequest, AssignOrgProgramRequest,
     ProgramFolderSchema, ProgramFolderRequest, SetProgramFolderRequest,
-    CentralProgramFolderSchema, ImportCentralFolderResult,
+    CentralProgramFolderSchema, CentralProgramFolderRequest, ImportCentralFolderResult,
+    CentralProgramRequest, CentralProgramUpdateRequest,
+    CentralTargetSchema, CentralTargetRequest, CentralTargetUpdateRequest,
     TreatmentAreaSchema, TreatmentAreaRequest,
     ProgramTagSchema, ProgramTagRequest,
     ProgramDataFieldSchema, ProgramDataFieldRequest,
@@ -47,7 +53,8 @@ from .schemas import (
     TargetStatusSchema, TargetStatusRequest, TargetStatusUpdateRequest,
     ProgramModuleSchema, ProgramModuleRequest, ProgramSubmoduleSchema, ProgramSubmoduleRequest,
     SavedTableViewSchema, SavedTableViewCreateRequest,
-    KnowledgeBaseModuleSchema,
+    KnowledgeBaseModuleSchema, KnowledgeBaseModuleRequest, KnowledgeBaseModuleUpdateRequest,
+    KnowledgeBaseTopicSchema, KnowledgeBaseTopicRequest, KnowledgeBaseTopicUpdateRequest,
 )
 
 router = Router(auth=jwt_auth)
@@ -258,6 +265,7 @@ def _serialize_knowledge_base_module(module: KnowledgeBaseModule) -> dict:
         'overview': module.overview,
         'audience': module.audience,
         'display_order': module.display_order,
+        'is_active': module.is_active,
         'updated_at': module.updated_at,
         'topics': [
             {
@@ -283,6 +291,129 @@ def list_knowledge_base_modules(request):
             .order_by('display_order', 'title')
         )
         return [_serialize_knowledge_base_module(module) for module in modules]
+
+
+def _require_superadmin(request) -> None:
+    if not request.user.is_superuser:
+        raise HttpError(403, 'Superadmin access required')
+
+
+def _validate_knowledge_base_icon(icon: str) -> None:
+    if icon not in KnowledgeBaseModule.Icon.values:
+        raise HttpError(400, f'Invalid icon "{icon}"')
+
+
+def _get_knowledge_base_module_or_404(module_id: int) -> KnowledgeBaseModule:
+    try:
+        return KnowledgeBaseModule.objects.prefetch_related('topics').get(id=module_id)
+    except KnowledgeBaseModule.DoesNotExist:
+        raise HttpError(404, 'Knowledge base article not found')
+
+
+def _get_knowledge_base_topic_or_404(topic_id: int) -> KnowledgeBaseTopic:
+    try:
+        return KnowledgeBaseTopic.objects.select_related('module').get(id=topic_id)
+    except KnowledgeBaseTopic.DoesNotExist:
+        raise HttpError(404, 'Knowledge base topic not found')
+
+
+def _serialize_knowledge_base_topic(topic: KnowledgeBaseTopic) -> dict:
+    return {
+        'id': topic.id,
+        'title': topic.title,
+        'summary': topic.summary,
+        'items': topic.items,
+        'display_order': topic.display_order,
+    }
+
+
+@router.get('/superadmin/knowledge-base/modules', response=list[KnowledgeBaseModuleSchema])
+def superadmin_list_knowledge_base_modules(request):
+    _require_superadmin(request)
+    modules = (
+        KnowledgeBaseModule.objects
+        .prefetch_related('topics')
+        .order_by('display_order', 'title')
+    )
+    return [_serialize_knowledge_base_module(module) for module in modules]
+
+
+@router.post('/superadmin/knowledge-base/modules', response={201: KnowledgeBaseModuleSchema})
+def superadmin_create_knowledge_base_module(request, data: KnowledgeBaseModuleRequest):
+    _require_superadmin(request)
+    _validate_knowledge_base_icon(data.icon)
+    module = KnowledgeBaseModule.objects.create(
+        slug=data.slug,
+        title=data.title,
+        path=data.path,
+        icon=data.icon,
+        overview=data.overview,
+        audience=data.audience,
+        display_order=data.display_order,
+        is_active=data.is_active,
+        created_by=request.user,
+    )
+    return 201, _serialize_knowledge_base_module(module)
+
+
+@router.get('/superadmin/knowledge-base/modules/{module_id}', response=KnowledgeBaseModuleSchema)
+def superadmin_get_knowledge_base_module(request, module_id: int):
+    _require_superadmin(request)
+    return _serialize_knowledge_base_module(_get_knowledge_base_module_or_404(module_id))
+
+
+@router.patch('/superadmin/knowledge-base/modules/{module_id}', response=KnowledgeBaseModuleSchema)
+def superadmin_update_knowledge_base_module(request, module_id: int, data: KnowledgeBaseModuleUpdateRequest):
+    _require_superadmin(request)
+    module = _get_knowledge_base_module_or_404(module_id)
+    updates = data.dict(exclude_unset=True)
+    if 'icon' in updates:
+        _validate_knowledge_base_icon(updates['icon'])
+    for field, value in updates.items():
+        setattr(module, field, value)
+    module.save()
+    return _serialize_knowledge_base_module(module)
+
+
+@router.delete('/superadmin/knowledge-base/modules/{module_id}', response={204: None})
+def superadmin_delete_knowledge_base_module(request, module_id: int):
+    _require_superadmin(request)
+    module = _get_knowledge_base_module_or_404(module_id)
+    module.delete()
+    return 204, None
+
+
+@router.post('/superadmin/knowledge-base/modules/{module_id}/topics', response={201: KnowledgeBaseTopicSchema})
+def superadmin_create_knowledge_base_topic(request, module_id: int, data: KnowledgeBaseTopicRequest):
+    _require_superadmin(request)
+    module = _get_knowledge_base_module_or_404(module_id)
+    topic = KnowledgeBaseTopic.objects.create(
+        module=module,
+        title=data.title,
+        summary=data.summary,
+        items=data.items,
+        display_order=data.display_order,
+        is_active=data.is_active,
+    )
+    return 201, _serialize_knowledge_base_topic(topic)
+
+
+@router.patch('/superadmin/knowledge-base/topics/{topic_id}', response=KnowledgeBaseTopicSchema)
+def superadmin_update_knowledge_base_topic(request, topic_id: int, data: KnowledgeBaseTopicUpdateRequest):
+    _require_superadmin(request)
+    topic = _get_knowledge_base_topic_or_404(topic_id)
+    for field, value in data.dict(exclude_unset=True).items():
+        setattr(topic, field, value)
+    topic.save()
+    return _serialize_knowledge_base_topic(topic)
+
+
+@router.delete('/superadmin/knowledge-base/topics/{topic_id}', response={204: None})
+def superadmin_delete_knowledge_base_topic(request, topic_id: int):
+    _require_superadmin(request)
+    topic = _get_knowledge_base_topic_or_404(topic_id)
+    topic.delete()
+    return 204, None
 
 
 PROGRAM_MATERIAL_IMAGE_TYPES = {'image/jpeg', 'image/png'}
@@ -1814,6 +1945,270 @@ def _serialize_central_program(
         'created_at': program.created_at,
         'updated_at': program.updated_at,
     }
+
+
+def _get_central_folder_or_404(folder_id: int) -> CentralProgramFolder:
+    try:
+        return CentralProgramFolder.objects.get(id=folder_id)
+    except CentralProgramFolder.DoesNotExist:
+        raise HttpError(404, 'Folder not found')
+
+
+def _get_superadmin_central_program_or_404(program_id: int) -> CentralProgram:
+    try:
+        return CentralProgram.objects.prefetch_related('targets').get(id=program_id)
+    except CentralProgram.DoesNotExist:
+        raise HttpError(404, 'Program not found')
+
+
+def _get_central_target_or_404(target_id: int) -> CentralTarget:
+    try:
+        return CentralTarget.objects.select_related('program').get(id=target_id)
+    except CentralTarget.DoesNotExist:
+        raise HttpError(404, 'Target not found')
+
+
+def _validate_central_program_fields(data) -> None:
+    category = getattr(data, 'category', None)
+    if category is not None and category not in CentralProgram.Category.values:
+        raise HttpError(400, f'Invalid category "{category}"')
+    phase = getattr(data, 'phase', None)
+    if phase is not None and phase not in CentralProgram.Phase.values:
+        raise HttpError(400, f'Invalid phase "{phase}"')
+    status = getattr(data, 'status', None)
+    if status is not None and status not in CentralProgram.Status.values:
+        raise HttpError(400, f'Invalid status "{status}"')
+    folder_id = getattr(data, 'folder_id', None)
+    if folder_id is not None and not CentralProgramFolder.objects.filter(id=folder_id).exists():
+        raise HttpError(404, 'Folder not found')
+
+
+def _serialize_superadmin_central_target(target: CentralTarget) -> dict:
+    return {
+        'id': target.id,
+        'program_id': target.program_id,
+        'name': target.name,
+        'measurement_type': target.measurement_type,
+        'measurement': target.measurement,
+        'timer_type': target.timer_type,
+        'sub_items': target.sub_items,
+        'sd_text': target.sd_text,
+        'teaching_instructions': target.teaching_instructions,
+        'prompting_levels': target.prompting_levels,
+        'display_order': target.display_order,
+        'is_visible_to_staff': target.is_visible_to_staff,
+    }
+
+
+def _serialize_superadmin_central_program(program: CentralProgram, request, include_targets: bool = False) -> dict:
+    target_count = program.targets.count()
+    return {
+        'id': program.id,
+        'is_template': True,
+        'name': program.name,
+        'category': program.category,
+        'status': program.status,
+        'phase': program.phase,
+        'treatment_area': program.treatment_area,
+        'tags': program.tags,
+        'objective': program.objective,
+        'instructions': program.instructions,
+        'prompting_template_id': None,
+        'folder_id': program.folder_id,
+        'image_url': _optimized_program_image_url(request, program.image),
+        'already_imported': False,
+        'imported_target_count': 0,
+        'display_order': program.display_order,
+        'target_count': target_count,
+        'targets': [
+            {
+                'id': target.id,
+                'name': target.name,
+                'status': 'waiting',
+                'measurement_type': target.measurement_type,
+                'measurement': target.measurement,
+                'timer_type': target.timer_type,
+                'display_order': target.display_order,
+                'is_visible_to_staff': target.is_visible_to_staff,
+            }
+            for target in program.targets.all()
+        ] if include_targets else [],
+        'created_at': program.created_at,
+        'updated_at': program.updated_at,
+    }
+
+
+def _normalize_central_target_payload(payload) -> tuple[str, str]:
+    measurement_type = payload.measurement_type
+    _validate_measurement_type(measurement_type, allow_legacy=False)
+    return _resolve_measurement_fields(
+        measurement_type,
+        payload.measurement,
+        payload.timer_type,
+    )
+
+
+@router.get('/superadmin/central-program-folders', response=list[CentralProgramFolderSchema])
+def superadmin_list_central_program_folders(request):
+    _require_superadmin(request)
+    return [
+        {
+            'id': folder.id,
+            'name': folder.name,
+            'display_order': folder.display_order,
+            'program_count': folder.programs.count(),
+        }
+        for folder in CentralProgramFolder.objects.all()
+    ]
+
+
+@router.post('/superadmin/central-program-folders', response={201: CentralProgramFolderSchema})
+def superadmin_create_central_program_folder(request, data: CentralProgramFolderRequest):
+    _require_superadmin(request)
+    folder = CentralProgramFolder.objects.create(
+        name=data.name,
+        display_order=data.display_order,
+        created_by=request.user,
+    )
+    return 201, {
+        'id': folder.id,
+        'name': folder.name,
+        'display_order': folder.display_order,
+        'program_count': 0,
+    }
+
+
+@router.patch('/superadmin/central-program-folders/{folder_id}', response=CentralProgramFolderSchema)
+def superadmin_update_central_program_folder(request, folder_id: int, data: CentralProgramFolderRequest):
+    _require_superadmin(request)
+    folder = _get_central_folder_or_404(folder_id)
+    folder.name = data.name
+    folder.display_order = data.display_order
+    folder.save(update_fields=['name', 'display_order', 'updated_at'])
+    return {
+        'id': folder.id,
+        'name': folder.name,
+        'display_order': folder.display_order,
+        'program_count': folder.programs.count(),
+    }
+
+
+@router.delete('/superadmin/central-program-folders/{folder_id}', response={204: None})
+def superadmin_delete_central_program_folder(request, folder_id: int):
+    _require_superadmin(request)
+    folder = _get_central_folder_or_404(folder_id)
+    folder.delete()
+    return 204, None
+
+
+@router.get('/superadmin/central-programs', response=list[OrgProgramSchema])
+def superadmin_list_central_programs(request):
+    _require_superadmin(request)
+    qs = CentralProgram.objects.prefetch_related('targets').all()
+    return [_serialize_superadmin_central_program(program, request) for program in qs]
+
+
+@router.post('/superadmin/central-programs', response={201: OrgProgramSchema})
+def superadmin_create_central_program(request, data: CentralProgramRequest):
+    _require_superadmin(request)
+    _validate_central_program_fields(data)
+    program = CentralProgram.objects.create(
+        name=data.name,
+        category=data.category,
+        phase=data.phase,
+        status=data.status,
+        treatment_area=data.treatment_area,
+        tags=data.tags,
+        objective=data.objective,
+        instructions=data.instructions,
+        folder_id=data.folder_id,
+        display_order=data.display_order,
+        created_by=request.user,
+    )
+    return 201, _serialize_superadmin_central_program(program, request, include_targets=True)
+
+
+@router.get('/superadmin/central-programs/{program_id}', response=OrgProgramSchema)
+def superadmin_get_central_program(request, program_id: int):
+    _require_superadmin(request)
+    program = _get_superadmin_central_program_or_404(program_id)
+    return _serialize_superadmin_central_program(program, request, include_targets=True)
+
+
+@router.patch('/superadmin/central-programs/{program_id}', response=OrgProgramSchema)
+def superadmin_update_central_program(request, program_id: int, data: CentralProgramUpdateRequest):
+    _require_superadmin(request)
+    _validate_central_program_fields(data)
+    program = _get_superadmin_central_program_or_404(program_id)
+    for field, value in data.dict(exclude_unset=True).items():
+        setattr(program, field, value)
+    program.save()
+    return _serialize_superadmin_central_program(program, request, include_targets=True)
+
+
+@router.delete('/superadmin/central-programs/{program_id}', response={204: None})
+def superadmin_delete_central_program(request, program_id: int):
+    _require_superadmin(request)
+    program = _get_superadmin_central_program_or_404(program_id)
+    program.delete()
+    return 204, None
+
+
+@router.get('/superadmin/central-programs/{program_id}/targets', response=list[CentralTargetSchema])
+def superadmin_list_central_targets(request, program_id: int):
+    _require_superadmin(request)
+    program = _get_superadmin_central_program_or_404(program_id)
+    return [_serialize_superadmin_central_target(target) for target in program.targets.all()]
+
+
+@router.post('/superadmin/central-programs/{program_id}/targets', response={201: CentralTargetSchema})
+def superadmin_create_central_target(request, program_id: int, data: CentralTargetRequest):
+    _require_superadmin(request)
+    program = _get_superadmin_central_program_or_404(program_id)
+    measurement, timer_type = _normalize_central_target_payload(data)
+    target = CentralTarget.objects.create(
+        program=program,
+        name=data.name,
+        measurement_type=data.measurement_type,
+        measurement=measurement,
+        timer_type=timer_type,
+        sub_items=data.sub_items,
+        sd_text=data.sd_text,
+        teaching_instructions=data.teaching_instructions,
+        prompting_levels=data.prompting_levels,
+        display_order=data.display_order,
+        is_visible_to_staff=data.is_visible_to_staff,
+    )
+    return 201, _serialize_superadmin_central_target(target)
+
+
+@router.patch('/superadmin/central-targets/{target_id}', response=CentralTargetSchema)
+def superadmin_update_central_target(request, target_id: int, data: CentralTargetUpdateRequest):
+    _require_superadmin(request)
+    target = _get_central_target_or_404(target_id)
+    updates = data.dict(exclude_unset=True)
+    next_measurement_type = updates.get('measurement_type', target.measurement_type)
+    measurement_payload = SimpleNamespace(
+        measurement_type=next_measurement_type,
+        measurement=updates.get('measurement', target.measurement),
+        timer_type=updates.get('timer_type', target.timer_type),
+    )
+    measurement, timer_type = _normalize_central_target_payload(measurement_payload)
+    for field, value in updates.items():
+        if field not in {'measurement', 'timer_type'}:
+            setattr(target, field, value)
+    target.measurement = measurement
+    target.timer_type = timer_type
+    target.save()
+    return _serialize_superadmin_central_target(target)
+
+
+@router.delete('/superadmin/central-targets/{target_id}', response={204: None})
+def superadmin_delete_central_target(request, target_id: int):
+    _require_superadmin(request)
+    target = _get_central_target_or_404(target_id)
+    target.delete()
+    return 204, None
 
 
 @router.get('/central-programs', response=list[OrgProgramSchema])

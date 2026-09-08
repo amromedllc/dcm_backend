@@ -38,6 +38,7 @@ class UserSchema(Schema):
     full_name: str
     role: str
     is_active: bool
+    is_superuser: bool
     external_admin_id: int | None
     external_employee_id: int | None
     created_at: datetime

@@ -670,6 +670,78 @@ class ImportCentralFolderResult(Schema):
     skipped_count: int
 
 
+class CentralProgramFolderRequest(Schema):
+    name: NonEmptyStr
+    display_order: int = Field(default=0, ge=0)
+
+
+class CentralProgramRequest(Schema):
+    name: NonEmptyStr
+    category: str = 'skill_acquisition'
+    phase: str = 'teaching'
+    status: str = 'active'
+    treatment_area: str = ''
+    tags: list[str] = []
+    objective: str = ''
+    instructions: str = ''
+    folder_id: int | None = None
+    display_order: int = Field(default=0, ge=0)
+
+
+class CentralProgramUpdateRequest(Schema):
+    name: NonEmptyStr | None = None
+    category: str | None = None
+    phase: str | None = None
+    status: str | None = None
+    treatment_area: str | None = None
+    tags: list[str] | None = None
+    objective: str | None = None
+    instructions: str | None = None
+    folder_id: int | None = None
+    display_order: int | None = Field(default=None, ge=0)
+
+
+class CentralTargetSchema(Schema):
+    id: int
+    program_id: int
+    name: str
+    measurement_type: str
+    measurement: str
+    timer_type: str
+    sub_items: list[dict]
+    sd_text: str
+    teaching_instructions: str
+    prompting_levels: list[dict]
+    display_order: int
+    is_visible_to_staff: bool
+
+
+class CentralTargetRequest(Schema):
+    name: NonEmptyStr
+    measurement_type: str = 'discrete_trial'
+    measurement: str = ''
+    timer_type: str = ''
+    sub_items: list[dict] = []
+    sd_text: str = ''
+    teaching_instructions: str = ''
+    prompting_levels: list[dict] = []
+    display_order: int = Field(default=0, ge=0)
+    is_visible_to_staff: bool = True
+
+
+class CentralTargetUpdateRequest(Schema):
+    name: NonEmptyStr | None = None
+    measurement_type: str | None = None
+    measurement: str | None = None
+    timer_type: str | None = None
+    sub_items: list[dict] | None = None
+    sd_text: str | None = None
+    teaching_instructions: str | None = None
+    prompting_levels: list[dict] | None = None
+    display_order: int | None = Field(default=None, ge=0)
+    is_visible_to_staff: bool | None = None
+
+
 class KnowledgeBaseTopicSchema(Schema):
     id: int
     title: str
@@ -687,8 +759,47 @@ class KnowledgeBaseModuleSchema(Schema):
     overview: str
     audience: list[str]
     display_order: int
+    is_active: bool = True
     updated_at: datetime
     topics: list[KnowledgeBaseTopicSchema]
+
+
+class KnowledgeBaseModuleRequest(Schema):
+    slug: SlugStr
+    title: NonEmptyStr
+    path: str = ''
+    icon: str = 'book'
+    overview: NonEmptyStr
+    audience: list[str] = []
+    display_order: int = Field(default=0, ge=0)
+    is_active: bool = True
+
+
+class KnowledgeBaseModuleUpdateRequest(Schema):
+    slug: SlugStr | None = None
+    title: NonEmptyStr | None = None
+    path: str | None = None
+    icon: str | None = None
+    overview: NonEmptyStr | None = None
+    audience: list[str] | None = None
+    display_order: int | None = Field(default=None, ge=0)
+    is_active: bool | None = None
+
+
+class KnowledgeBaseTopicRequest(Schema):
+    title: NonEmptyStr
+    summary: str = ''
+    items: list[str] = []
+    display_order: int = Field(default=0, ge=0)
+    is_active: bool = True
+
+
+class KnowledgeBaseTopicUpdateRequest(Schema):
+    title: NonEmptyStr | None = None
+    summary: str | None = None
+    items: list[str] | None = None
+    display_order: int | None = Field(default=None, ge=0)
+    is_active: bool | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 import logging
 import jwt
 from ninja import Router, Body
+from django.contrib.auth import authenticate
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,9 @@ def login(request, data: LoginRequest):
     try:
         payload = tpms_authenticate_raw(data.email, data.password)
     except TpmsAuthError as exc:
+        superuser_tokens = _superadmin_local_auth(request, tenant, data.email, data.password)
+        if superuser_tokens is not None:
+            return superuser_tokens
         message = str(exc) or 'Invalid email or password'
         if 'unavailable' in message.lower() or 'invalid response' in message.lower():
             raise HttpError(502, message) from exc
@@ -111,6 +115,25 @@ def login(request, data: LoginRequest):
     if account_type_of(payload) in _CLIENT_ACCOUNT_TYPES:
         return _tpms_caregiver_auth(request, tenant, data.email, payload)
     return _tpms_staff_auth(request, tenant, data.email, payload)
+
+
+def _superadmin_local_auth(request, tenant, email: str, password: str) -> TokenResponse | None:
+    """Allow platform superusers into the web app with their Django password.
+
+    Regular users must still authenticate through TherapyPMS; this fallback is
+    only for platform-owned superadmin tools that used to require /admin.
+    """
+    user = authenticate(request, username=email, password=password)
+    if user is None or not user.is_active or not user.is_superuser:
+        return None
+    if tenant is not None and user.organization_id is None:
+        user.organization = tenant
+        user.save(update_fields=['organization'])
+    tenant_id = tenant.pk if tenant is not None else user.organization_id
+    if tenant_id is None:
+        logger.error('Superadmin local login has no tenant context for email=%s', email)
+        raise HttpError(401, 'Invalid email or password')
+    return _issue_tokens(user, tenant_id)
 
 
 def _tpms_staff_auth(request, tenant, email: str, payload: dict) -> TokenResponse:
