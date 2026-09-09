@@ -140,8 +140,8 @@ def evaluate_session_fading(session_run) -> list[Target]:
     evaluate_session_mastery). For every target that had trial events in this
     session, checks whether the target's fading_mode is automatic, and if so
     whether recent performance at its *current* prompt level meets the
-    fading_template's rules — advancing (less intrusive) or regressing (more
-    intrusive) the target's current_prompt_level_index accordingly.
+    fading_template's rules, then moves the target toward a less intrusive
+    prompt or back toward a more intrusive prompt accordingly.
 
     Returns the list of targets whose prompt level was changed.
     """
@@ -156,7 +156,7 @@ def evaluate_session_fading(session_run) -> list[Target]:
 
     faded: list[Target] = []
     for target in Target.objects.filter(id__in=target_ids).select_related(
-        'prompting_template', 'fading_template', 'program__fading_template',
+        'prompting_template', 'fading_template', 'program__prompting_template', 'program__fading_template',
     ):
         if target.fading_mode != 'automatic':
             continue
@@ -331,7 +331,8 @@ def _behavior_metric_value(target: Target, session, criteria: dict) -> tuple[int
     return total_events, float(total_events)
 
 
-def _session_meets_criteria(target: Target, session, phase_config: dict, criteria: dict) -> bool:
+def _session_criteria_result(target: Target, session, phase_config: dict, criteria: dict) -> bool | None:
+    """Return True/False for eligible sessions, or None when minimum data was not collected."""
     min_trials = criteria.get('minimum_trials', 5)
     threshold = criteria.get('threshold_pct', 80)
     threshold_direction = str(criteria.get('threshold_direction') or 'min').lower()
@@ -359,7 +360,7 @@ def _session_meets_criteria(target: Target, session, phase_config: dict, criteri
     }:
         total, value = _behavior_metric_value(target, session, criteria)
         if total < min_trials:
-            return False
+            return None
         return value <= threshold if threshold_direction == 'max' else value >= threshold
 
     from apps.sessions.models import TrialEvent
@@ -368,9 +369,13 @@ def _session_meets_criteria(target: Target, session, phase_config: dict, criteri
     trials = _limit_trials_if_configured(trials, criteria)
     total, correct = _pass_stats(target, trials, require_independent=True)
     if total < min_trials:
-        return False
+        return None
     pct = correct / total * 100
     return pct <= threshold if threshold_direction == 'max' else pct >= threshold
+
+
+def _session_meets_criteria(target: Target, session, phase_config: dict, criteria: dict) -> bool:
+    return _session_criteria_result(target, session, phase_config, criteria) is True
 
 
 def _uses_behavior_events(target: Target, criteria: dict | None = None) -> bool:
@@ -538,10 +543,14 @@ def _evaluate_maintenance(target: Target, session_run_id: int, phase_config: dic
         return False
 
     revert_sessions = int(maintenance.get('revert_sessions') or 1)
-    recent_sessions = _recent_sessions_for_target(target, revert_sessions, criteria)
-    if len(recent_sessions) < revert_sessions:
+    recent_sessions = _recent_sessions_for_target(target, max(revert_sessions * 5, 25), criteria)
+    eligible_results = [
+        result for session in recent_sessions
+        if (result := _session_criteria_result(target, session, phase_config, criteria)) is not None
+    ]
+    if len(eligible_results) < revert_sessions:
         return False
-    if all(not _session_meets_criteria(target, s, phase_config, criteria) for s in recent_sessions):
+    if all(result is False for result in eligible_results[:revert_sessions]):
         return _transition_target(target, 'acquisition', session_run_id)
     return False
 
@@ -575,13 +584,18 @@ def _advance_if_criteria_met(target: Target, session_run_id: int) -> bool:
     criteria = {**phase_config['criteria'], 'objective_key': phase_config.get('objective_key')}
     n_consecutive = criteria.get('consecutive_sessions', 3)
 
-    # Most-recent-first so we look at the last N submitted/approved sessions for this target
-    recent_sessions = _recent_sessions_for_target(target, n_consecutive, criteria)
+    # Most-recent-first, excluding sessions that did not meet the minimum data
+    # requirement so under-run sessions do not count for or against mastery.
+    recent_sessions = _recent_sessions_for_target(target, max(n_consecutive * 5, 25), criteria)
+    eligible_results = [
+        result for session in recent_sessions
+        if (result := _session_criteria_result(target, session, phase_config, criteria)) is not None
+    ]
 
-    if len(recent_sessions) < n_consecutive:
+    if len(eligible_results) < n_consecutive:
         return False
 
-    mastered = all(_session_meets_criteria(target, session, phase_config, criteria) for session in recent_sessions)
+    mastered = all(result is True for result in eligible_results[:n_consecutive])
     if not mastered:
         failure_status = phase_config.get('on_failure_status') or phase_config.get('on_regression')
         return _transition_target(target, failure_status, session_run_id) if failure_status else False
@@ -599,20 +613,26 @@ def _fade_if_criteria_met(target: Target, session_run_id: int) -> bool:
     Resolves the target's FadingTemplate (target override or program default),
     looks at the last `consecutive_sessions` submitted/approved sessions'
     trials recorded at the target's *current* prompt level, and advances
-    (moves to the next less-intrusive level) if all of them meet threshold_pct,
-    or regresses (moves to the next more-intrusive level) if all of them are
+    (moves toward the top of the least-to-most hierarchy) if all of them meet threshold_pct,
+    or regresses (moves toward the bottom of the hierarchy) if all of them are
     at/below regression_threshold_pct. Mixed/plateaued performance is a no-op.
     """
-    ft = target.fading_template or target.program.fading_template
-    if not ft:
-        return False
-
-    levels = target.prompting_template.levels if target.prompting_template else []
+    prompting_template = target.prompting_template or target.program.prompting_template
+    all_levels = prompting_template.levels if prompting_template else []
+    levels = [level for level in all_levels if not level.get('exclude_from_fading')]
+    if len(levels) != len(all_levels):
+        current_full_idx = min(target.current_prompt_level_index, len(all_levels) - 1) if all_levels else 0
+        current_label = all_levels[current_full_idx].get('label') if all_levels else None
+        if current_label and any(level.get('label') == current_label for level in levels):
+            idx = next((i for i, level in enumerate(levels) if level.get('label') == current_label), 0)
+        else:
+            idx = 0
+    else:
+        idx = min(target.current_prompt_level_index, len(levels) - 1) if levels else 0
     if len(levels) < 2:
         return False
 
-    idx = min(target.current_prompt_level_index, len(levels) - 1)
-    if idx != target.current_prompt_level_index:
+    if len(levels) == len(all_levels) and idx != target.current_prompt_level_index:
         # Stale index (e.g. prompting_template's levels were edited down) —
         # correct silently, no audit row: this is a data-integrity fix, not a
         # fading decision.
@@ -620,13 +640,88 @@ def _fade_if_criteria_met(target: Target, session_run_id: int) -> bool:
 
     current_label = levels[idx].get('label')
 
-    rules = ft.rules
+    hint_mode = prompting_template.fading_hint_mode if prompting_template else None
+    ft = target.fading_template or target.program.fading_template
+    if ft:
+        rules = ft.rules
+    elif prompting_template and hint_mode in {'across_trials', 'across_sessions'}:
+        hint_settings = prompting_template.fading_hint_settings or {}
+        rules = {
+            'consecutive_sessions': hint_settings.get('decrease_across', 3),
+            'threshold_pct': hint_settings.get('decrease_match_pct', 100),
+            'minimum_trials': 1,
+            'regression_threshold_pct': hint_settings.get('increase_match_pct', 0),
+            'regression_consecutive_sessions': hint_settings.get(
+                'increase_across',
+                hint_settings.get('decrease_across', 3),
+            ),
+        }
+    else:
+        return False
     n_consecutive = rules.get('consecutive_sessions', 3)
+    n_regression_consecutive = rules.get('regression_consecutive_sessions', n_consecutive)
     threshold_pct = rules.get('threshold_pct', 90)
     min_trials = rules.get('minimum_trials', 5)
     regression_threshold_pct = rules.get('regression_threshold_pct', 50)
 
     from apps.sessions.models import SessionRun, TrialEvent
+
+    if not ft and hint_mode == 'across_trials':
+        trials = TrialEvent.objects.filter(
+            session_run_id=session_run_id, target_id=target.id, prompt_level_label=current_label,
+        )
+        total, correct = _pass_stats(target, trials)
+        if total < min(n_consecutive, n_regression_consecutive):
+            return False
+
+        pct = correct / total * 100 if total else 0
+        all_advance = total >= n_consecutive and pct >= threshold_pct
+        all_regress = total >= n_regression_consecutive and pct <= regression_threshold_pct
+
+        if all_advance:
+            new_idx = idx - 1
+            if new_idx < 0:
+                return False
+        elif all_regress:
+            new_idx = idx + 1
+            if new_idx >= len(levels):
+                return False
+        else:
+            return False
+
+        new_label = levels[new_idx].get('label')
+        current_full_idx = next(
+            (i for i, level in enumerate(all_levels) if level.get('label') == current_label),
+            idx,
+        )
+        new_full_idx = next(
+            (i for i, level in enumerate(all_levels) if level.get('label') == new_label),
+            new_idx,
+        )
+        target.current_prompt_level_index = new_full_idx
+        target.save(update_fields=['current_prompt_level_index', 'updated_at'])
+
+        target._pre_fade_from_label = current_label
+        target._pre_fade_to_label = new_label
+        TargetPromptLevelChange.objects.create(
+            target=target,
+            from_level_index=current_full_idx,
+            to_level_index=new_full_idx,
+            from_level_label=current_label,
+            to_level_label=new_label,
+            trigger=TargetPromptLevelChange.Trigger.AUTO_FADING,
+            session_run_id=session_run_id,
+        )
+
+        from apps.notifications.service import notify_target_prompt_level_changed
+        try:
+            sr = SessionRun.objects.get(id=session_run_id)
+            direction = 'advanced' if all_advance else 'regressed'
+            notify_target_prompt_level_changed(target, sr, direction, new_label)
+        except Exception:
+            pass
+
+        return True
 
     recent_sessions = list(
         SessionRun.objects
@@ -635,15 +730,17 @@ def _fade_if_criteria_met(target: Target, session_run_id: int) -> bool:
             trial_events__target_id=target.id,
         )
         .distinct()
-        .order_by('-submitted_at')[:n_consecutive]
+        .order_by('-submitted_at')[:max(n_consecutive, n_regression_consecutive)]
     )
 
-    if len(recent_sessions) < n_consecutive:
+    if len(recent_sessions) < min(n_consecutive, n_regression_consecutive):
         return False
 
     all_advance = True
     all_regress = True
-    for session in recent_sessions:
+    if len(recent_sessions) < n_consecutive:
+        all_advance = False
+    for session in recent_sessions[:n_consecutive]:
         trials = TrialEvent.objects.filter(
             session_run=session, target_id=target.id, prompt_level_label=current_label,
         )
@@ -655,30 +752,49 @@ def _fade_if_criteria_met(target: Target, session_run_id: int) -> bool:
         pct = correct / total * 100
         if pct < threshold_pct:
             all_advance = False
+
+    if len(recent_sessions) < n_regression_consecutive:
+        all_regress = False
+    for session in recent_sessions[:n_regression_consecutive]:
+        trials = TrialEvent.objects.filter(
+            session_run=session, target_id=target.id, prompt_level_label=current_label,
+        )
+        total, correct = _pass_stats(target, trials)
+        if total < min_trials:
+            return False
+        pct = correct / total * 100
         if pct > regression_threshold_pct:
             all_regress = False
 
     if all_advance:
-        new_idx = idx + 1
-        if new_idx >= len(levels):
-            return False  # already at the least-intrusive level
-    elif all_regress:
         new_idx = idx - 1
         if new_idx < 0:
+            return False  # already at the least-intrusive level
+    elif all_regress:
+        new_idx = idx + 1
+        if new_idx >= len(levels):
             return False  # already at the most-intrusive level
     else:
         return False
 
-    target.current_prompt_level_index = new_idx
+    new_label = levels[new_idx].get('label')
+    current_full_idx = next(
+        (i for i, level in enumerate(all_levels) if level.get('label') == current_label),
+        idx,
+    )
+    new_full_idx = next(
+        (i for i, level in enumerate(all_levels) if level.get('label') == new_label),
+        new_idx,
+    )
+    target.current_prompt_level_index = new_full_idx
     target.save(update_fields=['current_prompt_level_index', 'updated_at'])
 
-    new_label = levels[new_idx].get('label')
     target._pre_fade_from_label = current_label
     target._pre_fade_to_label = new_label
     TargetPromptLevelChange.objects.create(
         target=target,
-        from_level_index=idx,
-        to_level_index=new_idx,
+        from_level_index=current_full_idx,
+        to_level_index=new_full_idx,
         from_level_label=current_label,
         to_level_label=new_label,
         trigger=TargetPromptLevelChange.Trigger.AUTO_FADING,

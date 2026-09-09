@@ -15,6 +15,16 @@ def _program_material_upload_path(instance, filename):
 
 
 class PromptingTemplate(TenantAwareModel):
+    class OutcomeMeasurement(models.TextChoices):
+        BINARY = 'binary', 'Successful / Unsuccessful'
+        RATING_SCALE = 'rating_scale', 'Rating Scale'
+        WEIGHTED = 'weighted', 'Weighted'
+
+    class FadingHintMode(models.TextChoices):
+        NONE = 'none', 'None'
+        ACROSS_TRIALS = 'across_trials', 'Most-to-Least (across trials)'
+        ACROSS_SESSIONS = 'across_sessions', 'Most-to-Least (across sessions)'
+
     """
     Defines the scored response levels used during trial data entry.
     Example levels: [{"label": "Full Physical", "score": 0, "color": "#e74c3c",
@@ -23,7 +33,19 @@ class PromptingTemplate(TenantAwareModel):
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True)
     levels = models.JSONField(default=list)
+    outcome_measurement = models.CharField(
+        max_length=20,
+        choices=OutcomeMeasurement.choices,
+        default=OutcomeMeasurement.BINARY,
+    )
+    fading_hint_mode = models.CharField(
+        max_length=20,
+        choices=FadingHintMode.choices,
+        default=FadingHintMode.NONE,
+    )
+    fading_hint_settings = models.JSONField(default=dict, blank=True)
     is_org_default = models.BooleanField(default=False)
+    is_locked = models.BooleanField(default=False)
 
     class Meta:
         app_label = 'programs'
@@ -132,6 +154,7 @@ class Program(TenantAwareModel):
     baseline_notes = models.TextField(blank=True)
     objective = models.TextField(blank=True)
     instructions = models.TextField(blank=True)
+    hidden_prompt_level_labels = models.JSONField(default=list, blank=True)
     image = models.ImageField(upload_to=_program_upload_path, max_length=500, blank=True, null=True)
     display_order = models.PositiveIntegerField(default=0, db_index=True)
     archived_at = models.DateTimeField(null=True, blank=True)

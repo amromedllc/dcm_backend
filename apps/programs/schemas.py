@@ -4,7 +4,7 @@ from ninja import Schema
 from pydantic import Field, field_validator
 
 from shared.schema_types import NonEmptyStr, SlugStr
-from .models import Program, Target, MaintenanceSchedule, ProgramDataField, Lesson
+from .models import Program, Target, PromptingTemplate, MaintenanceSchedule, ProgramDataField, Lesson
 
 
 # ---------------------------------------------------------------------------
@@ -105,14 +105,14 @@ class MaintenanceScheduleUpdateRequest(Schema):
 
 class PromptingLevelSchema(Schema):
     label: NonEmptyStr
-    # No longer client-supplied — _normalize_levels() below derives it from
-    # is_success (1 for the success level, 0 for every other) on every save,
-    # regardless of what's sent. Kept as a field (rather than dropped) because
-    # existing stored levels and TrialEvent.response_score still key off it.
+    # Stored on TrialEvent.response_score. Defaults to 1/0 for old clients, but
+    # can now be configured as a prompt-level weight.
     score: int = 0
+    weight: int | None = Field(default=None, ge=0)
     color: str
     abbreviation: str
     is_success: bool = False
+    exclude_from_fading: bool = False
 
 
 class PromptingTemplateSchema(Schema):
@@ -120,24 +120,28 @@ class PromptingTemplateSchema(Schema):
     name: str
     description: str
     levels: list[dict[str, Any]]
+    outcome_measurement: str = 'binary'
+    fading_hint_mode: str = 'none'
+    fading_hint_settings: dict[str, Any] = {}
     is_org_default: bool
+    is_locked: bool = False
     created_at: datetime
 
 
 def _normalize_levels(levels: list[PromptingLevelSchema] | None) -> list[PromptingLevelSchema] | None:
     """Exactly one level must be marked is_success (there's no separate score
     field anymore for admins to fall back on to signal "this one is correct").
-    Normalizes score to the binary value everything downstream already
-    effectively treats it as: 1 for the success level, 0 for every other."""
+    Normalizes score to the configured weight. Old clients that do not send a
+    weight keep the previous 1/0 behavior."""
     if levels is None:
         return None
     success_count = sum(1 for lvl in levels if lvl.is_success)
-    if success_count == 0:
-        raise ValueError('Mark one prompt level as the successful outcome')
     if success_count > 1:
         raise ValueError('Only one prompt level can be marked as the successful outcome')
     for lvl in levels:
-        lvl.score = 1 if lvl.is_success else 0
+        if lvl.weight is None:
+            lvl.weight = 1 if lvl.is_success else 0
+        lvl.score = lvl.weight
     return levels
 
 
@@ -145,7 +149,11 @@ class PromptingTemplateCreateRequest(Schema):
     name: NonEmptyStr
     description: str = ''
     levels: list[PromptingLevelSchema] = Field(min_length=1)
+    outcome_measurement: PromptingTemplate.OutcomeMeasurement = PromptingTemplate.OutcomeMeasurement.BINARY
+    fading_hint_mode: PromptingTemplate.FadingHintMode = PromptingTemplate.FadingHintMode.NONE
+    fading_hint_settings: dict[str, Any] = {}
     is_org_default: bool = False
+    is_locked: bool = False
 
     @field_validator('levels')
     @classmethod
@@ -157,7 +165,11 @@ class PromptingTemplateUpdateRequest(Schema):
     name: NonEmptyStr | None = None
     description: str | None = None
     levels: list[PromptingLevelSchema] | None = Field(default=None, min_length=1)
+    outcome_measurement: PromptingTemplate.OutcomeMeasurement | None = None
+    fading_hint_mode: PromptingTemplate.FadingHintMode | None = None
+    fading_hint_settings: dict[str, Any] | None = None
     is_org_default: bool | None = None
+    is_locked: bool | None = None
 
     @field_validator('levels')
     @classmethod
@@ -255,6 +267,7 @@ class ProgramSchema(Schema):
     objective: str = ''
     instructions: str = ''
     prompting_template_id: int | None = None
+    hidden_prompt_level_labels: list[str] = []
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
@@ -280,6 +293,7 @@ class ProgramListSchema(Schema):
     objective: str = ''
     instructions: str = ''
     prompting_template_id: int | None = None
+    hidden_prompt_level_labels: list[str] = []
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
@@ -302,6 +316,7 @@ class ProgramCreateRequest(Schema):
     objective: str = ''
     instructions: str = ''
     prompting_template_id: int | None = None
+    hidden_prompt_level_labels: list[str] = []
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
@@ -319,6 +334,7 @@ class ProgramUpdateRequest(Schema):
     objective: str | None = None
     instructions: str | None = None
     prompting_template_id: int | None = None
+    hidden_prompt_level_labels: list[str] | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None

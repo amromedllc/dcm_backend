@@ -192,6 +192,142 @@ def _check_unique_name(model, request, name: str, *, exclude_id: int | None = No
         raise HttpError(409, f'{model.__name__} named "{name}" already exists')
 
 
+def _set_single_org_default(model, request, instance) -> None:
+    if getattr(instance, 'is_org_default', False):
+        _settings_qs(model, request).exclude(id=instance.id).update(is_org_default=False)
+
+
+def _default_prompting_template_id(request) -> int | None:
+    template = _settings_qs(PromptingTemplate, request).filter(is_org_default=True).first()
+    return template.id if template else None
+
+
+def _normalize_hidden_prompt_labels(labels: list[str] | None) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for label in labels or []:
+        clean = str(label).strip()
+        if clean and clean not in seen:
+            seen.add(clean)
+            result.append(clean)
+    return result
+
+
+def _requires_prompting_template(measurement_type: str, program: Program | None = None) -> bool:
+    if program and program.category == Program.Category.ABC_RECORDING:
+        return False
+    return measurement_type not in {
+        Target.MeasurementType.INSTRUCTIONS,
+    }
+
+
+def _validate_prompting_required(measurement_type: str, prompting_template_id: int | None, program: Program) -> None:
+    if _requires_prompting_template(measurement_type, program) and not prompting_template_id:
+        raise HttpError(400, 'Prompt level template is required to collect data for this target')
+
+
+def _is_probe_session_for_target(session, target_id: int) -> bool:
+    snapshot = session.program_snapshot or {}
+    for program in snapshot.get('programs') or []:
+        for target in program.get('targets') or []:
+            if target.get('id') == target_id and target.get('status') == 'probe':
+                return True
+    return False
+
+
+def _fadeable_level_indexes(template: PromptingTemplate) -> list[int]:
+    return [
+        idx
+        for idx, level in enumerate(template.levels)
+        if not level.get('exclude_from_fading')
+    ]
+
+
+def _errorless_prompt_level_index(template: PromptingTemplate) -> int:
+    fadeable_indexes = _fadeable_level_indexes(template)
+    return fadeable_indexes[-1] if fadeable_indexes else len(template.levels) - 1
+
+
+def _latest_probe_session(target: Target):
+    from apps.sessions.models import SessionRun
+
+    sessions = (
+        SessionRun.objects
+        .filter(
+            status__in=[SessionRun.Status.SUBMITTED, SessionRun.Status.APPROVED],
+            trial_events__target_id=target.id,
+        )
+        .distinct()
+        .order_by('-submitted_at', '-started_at', '-id')
+    )
+    return next((session for session in sessions if _is_probe_session_for_target(session, target.id)), None)
+
+
+def _last_probe_trial_prompt_level_index(template: PromptingTemplate, target: Target) -> int | None:
+    session = _latest_probe_session(target)
+    if not session:
+        return None
+
+    from apps.sessions.models import TrialEvent
+
+    trial = (
+        TrialEvent.objects
+        .filter(session_run=session, target_id=target.id)
+        .order_by('-recorded_at', '-trial_number', '-id')
+        .first()
+    )
+    if not trial:
+        return None
+    return next(
+        (idx for idx, level in enumerate(template.levels) if level.get('label') == trial.prompt_level_label),
+        None,
+    )
+
+
+def _mass_trial_probe_prompt_level_index(template: PromptingTemplate, target: Target, threshold: int) -> int | None:
+    session = _latest_probe_session(target)
+    if not session:
+        return None
+
+    from apps.sessions.models import TrialEvent
+
+    labels = list(
+        TrialEvent.objects
+        .filter(session_run=session, target_id=target.id)
+        .values_list('prompt_level_label', flat=True)
+    )
+    if not labels:
+        return None
+    threshold = max(1, threshold)
+    for idx in _fadeable_level_indexes(template):
+        label = template.levels[idx].get('label')
+        if label and labels.count(label) >= threshold:
+            return idx
+    return None
+
+
+def _initial_prompt_level_index(template: PromptingTemplate | None, target: Target | None = None) -> int:
+    if not template or not template.levels:
+        return 0
+    settings = template.fading_hint_settings or {}
+    strategy = settings.get('initial_prompt_strategy')
+    if strategy == 'last_probe_trial' and target:
+        idx = _last_probe_trial_prompt_level_index(template, target)
+        return idx if idx is not None else _errorless_prompt_level_index(template)
+    if strategy == 'mass_trial_probe' and target:
+        idx = _mass_trial_probe_prompt_level_index(template, target, int(settings.get('probe_threshold') or 1))
+        return idx if idx is not None else _errorless_prompt_level_index(template)
+    if strategy == 'errorless':
+        return _errorless_prompt_level_index(template)
+
+    label = settings.get('initial_prompt_level')
+    if not label and template.fading_hint_mode != PromptingTemplate.FadingHintMode.NONE:
+        return _errorless_prompt_level_index(template)
+    if not label:
+        return 0
+    return next((idx for idx, level in enumerate(template.levels) if level.get('label') == label), 0)
+
+
 def _serialize_saved_view(view: SavedTableView, request) -> dict:
     return {
         'id': view.id,
@@ -477,6 +613,7 @@ def _serialize_program(program: Program, request=None, include_targets: bool = F
         'objective': program.objective,
         'instructions': program.instructions,
         'prompting_template_id': program.prompting_template_id,
+        'hidden_prompt_level_labels': program.hidden_prompt_level_labels,
         'workflow_template_id': program.workflow_template_id,
         'maintenance_schedule_id': program.maintenance_schedule_id,
         'fading_template_id': program.fading_template_id,
@@ -562,6 +699,7 @@ def create_program(request, data: ProgramCreateRequest):
     _require_supervisor(request)
     _assert_client_accessible(request, data.client_id)
     _validate_treatment_area_and_tags(request, data.treatment_area, data.tags)
+    prompting_template_id = data.prompting_template_id or _default_prompting_template_id(request)
     program = Program.objects.create(
         external_client_id=data.client_id,
         name=data.name,
@@ -572,7 +710,8 @@ def create_program(request, data: ProgramCreateRequest):
         baseline_notes=data.baseline_notes,
         objective=data.objective,
         instructions=data.instructions,
-        prompting_template_id=data.prompting_template_id,
+        prompting_template_id=prompting_template_id,
+        hidden_prompt_level_labels=_normalize_hidden_prompt_labels(data.hidden_prompt_level_labels),
         workflow_template_id=data.workflow_template_id,
         maintenance_schedule_id=data.maintenance_schedule_id,
         fading_template_id=data.fading_template_id,
@@ -600,15 +739,18 @@ def update_program(request, program_id: int, data: ProgramUpdateRequest):
             updates.get('tags', program.tags),
         )
     for field, value in updates.items():
+        if field == 'hidden_prompt_level_labels':
+            value = _normalize_hidden_prompt_labels(value)
         setattr(program, field, value)
     program.save()
     if 'workflow_template_id' in updates:
-        program.targets.update(workflow_template_id=program.workflow_template_id)
+        _apply_program_workflow_to_compatible_targets(request, program)
     if 'prompting_template_id' in updates:
-        program.targets.update(
-            prompting_template_id=program.prompting_template_id,
-            current_prompt_level_index=0,
-        )
+        template = _settings_qs(PromptingTemplate, request).filter(id=program.prompting_template_id).first()
+        program.targets.update(prompting_template_id=program.prompting_template_id)
+        for target in program.targets.all():
+            target.current_prompt_level_index = _initial_prompt_level_index(template, target)
+            target.save(update_fields=['current_prompt_level_index', 'updated_at'])
     if 'fading_template_id' in updates:
         program.targets.update(fading_template_id=program.fading_template_id)
 
@@ -758,6 +900,61 @@ def _resolve_measurement_fields(
     return resolved_measurement, resolved_timer
 
 
+def _workflow_objective_key(template: WorkflowTemplate) -> str:
+    for phase in template.phases or []:
+        objective_key = str(phase.get('objective_key') or '')
+        if objective_key:
+            return objective_key
+    return ''
+
+
+def _workflow_matches_measurement(template: WorkflowTemplate, measurement: str) -> bool:
+    expected = {
+        Target.Measurement.PERCENT_CORRECT: 'percent_correct',
+        Target.Measurement.FREQUENCY: 'frequency',
+        Target.Measurement.RATE_PER_HOUR: 'rate_per_hour',
+        Target.Measurement.RATE_PER_MINUTE: 'rate_per_minute',
+        Target.Measurement.TOTAL_OBSERVED_DURATION: 'total_duration',
+        Target.Measurement.MIN_OBSERVED_DURATION: 'min_duration',
+        Target.Measurement.MAX_OBSERVED_DURATION: 'max_duration',
+        Target.Measurement.AVG_OBSERVED_DURATION: 'avg_duration',
+    }.get(measurement, 'percent_correct')
+    key = _workflow_objective_key(template)
+    if expected == 'percent_correct':
+        return key in {'', 'increase_percent_correct', 'reduce_percentage'} or 'percent' in key
+    return expected in key
+
+
+def _validate_workflow_matches_measurement(
+    request,
+    workflow_template_id: int | None,
+    measurement: str,
+    field_name: str = 'workflow_template_id',
+) -> None:
+    if workflow_template_id is None:
+        return
+    template = _settings_qs(WorkflowTemplate, request).filter(id=workflow_template_id).first()
+    if not template:
+        raise HttpError(400, f'Invalid {field_name}: {workflow_template_id}')
+    if not _workflow_matches_measurement(template, measurement):
+        raise HttpError(400, f'{field_name} does not match the selected measurement')
+
+
+def _apply_program_workflow_to_compatible_targets(request, program: Program) -> None:
+    if not program.workflow_template_id:
+        program.targets.update(workflow_template_id=None)
+        return
+
+    template = _settings_qs(WorkflowTemplate, request).filter(id=program.workflow_template_id).first()
+    if not template:
+        return
+    for target in program.targets.all():
+        next_workflow_id = program.workflow_template_id if _workflow_matches_measurement(template, target.measurement) else None
+        if target.workflow_template_id != next_workflow_id:
+            target.workflow_template_id = next_workflow_id
+            target.save(update_fields=['workflow_template_id', 'updated_at'])
+
+
 def _default_sub_item_status(target: Target, index: int, total: int) -> str:
     if target.sub_item_progression == Target.SubItemProgression.TOTAL_TASK:
         return TargetSubItem.Status.ACQUISITION
@@ -791,8 +988,7 @@ def _resolve_sub_item_config(request, target: Target, raw: dict) -> dict:
     if request is not None:
         if pt_id is not None and not _settings_qs(PromptingTemplate, request).filter(id=pt_id).exists():
             raise HttpError(400, f'Invalid prompting_template_id on step: {pt_id}')
-        if wf_id is not None and not _settings_qs(WorkflowTemplate, request).filter(id=wf_id).exists():
-            raise HttpError(400, f'Invalid workflow_template_id on step: {wf_id}')
+        _validate_workflow_matches_measurement(request, wf_id, measurement, 'workflow_template_id on step')
 
     return {
         'measurement_type': mt,
@@ -817,11 +1013,16 @@ def _validate_default_sub_fields(request, data: dict) -> None:
 
     for field, model in (
         ('default_sub_prompting_template_id', PromptingTemplate),
-        ('default_sub_workflow_template_id', WorkflowTemplate),
     ):
         fk_id = data.get(field)
         if fk_id is not None and not _settings_qs(model, request).filter(id=fk_id).exists():
             raise HttpError(400, f'Invalid {field}: {fk_id}')
+    _validate_workflow_matches_measurement(
+        request,
+        data.get('default_sub_workflow_template_id'),
+        data['default_sub_measurement'],
+        'default_sub_workflow_template_id',
+    )
 
 
 def _sync_target_sub_items(request, target: Target, items: list[dict], user=None) -> None:
@@ -932,8 +1133,6 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
     target_data = data.dict()
     if program.prompting_template_id and not target_data.get('prompting_template_id'):
         target_data['prompting_template_id'] = program.prompting_template_id
-    if program.workflow_template_id and not target_data.get('workflow_template_id'):
-        target_data['workflow_template_id'] = program.workflow_template_id
     if program.fading_template_id and not target_data.get('fading_template_id'):
         target_data['fading_template_id'] = program.fading_template_id
     if target_data.get('status'):
@@ -942,6 +1141,10 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
         default_status = _settings_qs(TargetStatus, request, include_org_defaults=True).filter(is_default=True).first()
         target_data['status'] = default_status.key if default_status else 'waiting'
     _validate_measurement_type(target_data['measurement_type'], allow_legacy=False)
+    _validate_prompting_required(target_data['measurement_type'], target_data.get('prompting_template_id'), program)
+    if target_data.get('prompting_template_id'):
+        template = _settings_qs(PromptingTemplate, request).filter(id=target_data['prompting_template_id']).first()
+        target_data['current_prompt_level_index'] = _initial_prompt_level_index(template)
     _validate_interval_warning_sound(target_data.get('interval_warning_sound'))
     _require_sub_items_if_needed(target_data['measurement_type'], target_data['sub_items'])
     target_data['measurement'], target_data['timer_type'] = _resolve_measurement_fields(
@@ -949,6 +1152,12 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
         target_data.get('measurement'),
         target_data.get('timer_type'),
     )
+    if target_data.get('workflow_template_id'):
+        _validate_workflow_matches_measurement(request, target_data.get('workflow_template_id'), target_data['measurement'])
+    elif program.workflow_template_id:
+        program_workflow = _settings_qs(WorkflowTemplate, request).filter(id=program.workflow_template_id).first()
+        if program_workflow and _workflow_matches_measurement(program_workflow, target_data['measurement']):
+            target_data['workflow_template_id'] = program.workflow_template_id
     _validate_default_sub_fields(request, target_data)
     target = Target.objects.create(
         program=program,
@@ -975,8 +1184,10 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
         setattr(target, field, value)
     if 'prompting_template_id' in updates:
         # Swapping the level hierarchy invalidates whatever level index the
-        # target was previously faded to — reset to the most-intrusive level.
-        target.current_prompt_level_index = 0
+        # target was previously faded to. Use the template's configured
+        # initial prompt level when present.
+        template = _settings_qs(PromptingTemplate, request).filter(id=target.prompting_template_id).first()
+        target.current_prompt_level_index = _initial_prompt_level_index(template, target)
     if 'status' in updates:
         _validate_target_status(request, updates['status'])
     if 'interval_warning_sound' in updates:
@@ -984,6 +1195,11 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
     mt_changed = 'measurement_type' in updates
     if mt_changed:
         _validate_measurement_type(updates['measurement_type'], allow_legacy=True)
+    _validate_prompting_required(
+        updates.get('measurement_type', target.measurement_type),
+        updates.get('prompting_template_id', target.prompting_template_id),
+        target.program,
+    )
     if mt_changed or 'measurement' in updates or 'timer_type' in updates:
         # When the target type changes without an explicit measurement/timer,
         # reset those to the new type's default rather than carrying over a
@@ -993,6 +1209,13 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
             updates['measurement'] if 'measurement' in updates else (None if mt_changed else target.measurement),
             updates['timer_type'] if 'timer_type' in updates else (None if mt_changed else target.timer_type),
         )
+    if target.workflow_template_id:
+        if 'workflow_template_id' in updates:
+            _validate_workflow_matches_measurement(request, target.workflow_template_id, target.measurement)
+        else:
+            template = _settings_qs(WorkflowTemplate, request).filter(id=target.workflow_template_id).first()
+            if template and not _workflow_matches_measurement(template, target.measurement):
+                target.workflow_template_id = None
     default_sub_changed = any(
         k in updates for k in (
             'default_sub_measurement_type', 'default_sub_measurement',
@@ -1186,7 +1409,7 @@ _BULK_UPDATE_FK_MODELS = {
 def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest):
     """Update specific fields across multiple targets without touching unspecified fields."""
     _require_supervisor(request)
-    _get_program_or_404(request, program_id)
+    program = _get_program_or_404(request, program_id)
     updates = data.dict(exclude={'target_ids'}, exclude_none=True)
     if not updates:
         raise HttpError(400, 'No fields to update were provided')
@@ -1201,6 +1424,18 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
 
     if 'measurement_type' in updates:
         _validate_measurement_type(updates['measurement_type'], allow_legacy=True)
+
+    if ('measurement_type' in updates or 'prompting_template_id' in updates) and _requires_prompting_template(
+        updates.get('measurement_type') or Target.MeasurementType.DISCRETE_TRIAL,
+        program,
+    ) and updates.get('prompting_template_id') is None:
+        missing_prompt_templates = Target.objects.filter(
+            id__in=data.target_ids,
+            program_id=program_id,
+            prompting_template_id__isnull=True,
+        ).exists()
+        if missing_prompt_templates:
+            raise HttpError(400, 'Prompt level template is required to collect data for these targets')
 
     if updates.get('measurement_type') in _SUB_ITEM_MEASUREMENT_TYPES:
         missing_sub_items = Target.objects.filter(
@@ -1224,8 +1459,10 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
             updates['measurement_type'], None, None,
         )
 
+    template_for_prompt_index = None
     if 'prompting_template_id' in updates:
-        updates['current_prompt_level_index'] = 0
+        template = _settings_qs(PromptingTemplate, request).filter(id=updates['prompting_template_id']).first()
+        template_for_prompt_index = template
     updates['updated_at'] = timezone.now()
     updated = Target.objects.filter(
         id__in=data.target_ids,
@@ -1233,6 +1470,10 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
     ).update(**updates)
     if updated == 0:
         raise HttpError(400, 'No matching targets found for this program')
+    if template_for_prompt_index:
+        for target in Target.objects.filter(id__in=data.target_ids, program_id=program_id):
+            target.current_prompt_level_index = _initial_prompt_level_index(template_for_prompt_index, target)
+            target.save(update_fields=['current_prompt_level_index', 'updated_at'])
     return BulkUpdateResult(updated_count=updated, target_ids=data.target_ids)
 
 
@@ -1255,11 +1496,23 @@ def list_prompting_templates(request):
     return list(_settings_qs(PromptingTemplate, request))
 
 
+def _normalize_prompting_template_settings(payload: dict, template: PromptingTemplate | None = None) -> dict:
+    outcome = payload.get('outcome_measurement') or (
+        template.outcome_measurement if template else PromptingTemplate.OutcomeMeasurement.BINARY
+    )
+    if outcome == PromptingTemplate.OutcomeMeasurement.RATING_SCALE:
+        payload['fading_hint_mode'] = PromptingTemplate.FadingHintMode.NONE
+        payload['fading_hint_settings'] = {}
+    return payload
+
+
 @router.post('/programs/templates/prompting', response={201: PromptingTemplateSchema})
 def create_prompting_template(request, data: PromptingTemplateCreateRequest):
     _require_settings_permission(request, 'settings_prompting_templates_create')
     _check_unique_name(PromptingTemplate, request, data.name)
-    template = PromptingTemplate.objects.create(created_by=request.user, **data.dict())
+    payload = _normalize_prompting_template_settings(data.dict())
+    template = PromptingTemplate.objects.create(created_by=request.user, **payload)
+    _set_single_org_default(PromptingTemplate, request, template)
     return 201, template
 
 
@@ -1270,11 +1523,18 @@ def update_prompting_template(request, template_id: int, data: PromptingTemplate
         template = _settings_qs(PromptingTemplate, request).get(id=template_id)
     except PromptingTemplate.DoesNotExist:
         raise HttpError(404, 'Template not found')
+    payload = data.dict(exclude_none=True)
+    if template.is_locked:
+        unlocked_fields = set(payload) - {'is_locked'}
+        if unlocked_fields:
+            raise HttpError(423, 'Prompting template is locked')
     if data.name:
         _check_unique_name(PromptingTemplate, request, data.name, exclude_id=template_id)
-    for field, value in data.dict(exclude_none=True).items():
+    payload = _normalize_prompting_template_settings(payload, template)
+    for field, value in payload.items():
         setattr(template, field, value)
     template.save()
+    _set_single_org_default(PromptingTemplate, request, template)
     return template
 
 
@@ -1282,9 +1542,12 @@ def update_prompting_template(request, template_id: int, data: PromptingTemplate
 def delete_prompting_template(request, template_id: int):
     _require_settings_permission(request, 'settings_prompting_templates_delete')
     try:
-        _settings_qs(PromptingTemplate, request).get(id=template_id).delete()
+        template = _settings_qs(PromptingTemplate, request).get(id=template_id)
     except PromptingTemplate.DoesNotExist:
         raise HttpError(404, 'Template not found')
+    if template.is_locked:
+        raise HttpError(423, 'Prompting template is locked')
+    template.delete()
     return 204, None
 
 
@@ -1714,7 +1977,7 @@ def update_org_program(request, program_id: int, data: ProgramUpdateRequest):
             current_prompt_level_index=0,
         )
     if 'workflow_template_id' in updates:
-        program.targets.update(workflow_template_id=program.workflow_template_id)
+        _apply_program_workflow_to_compatible_targets(request, program)
     if 'fading_template_id' in updates:
         program.targets.update(fading_template_id=program.fading_template_id)
     return _serialize_org_program(program, request, include_targets=True)
