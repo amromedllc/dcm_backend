@@ -112,12 +112,6 @@ class Program(TenantAwareModel):
         null=True, blank=True,
         related_name='programs',
     )
-    maintenance_schedule = models.ForeignKey(
-        'MaintenanceSchedule',
-        on_delete=models.SET_NULL,
-        null=True, blank=True,
-        related_name='programs',
-    )
     category = models.CharField(max_length=30, choices=Category.choices, default=Category.SKILL_ACQUISITION)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
     phase = models.CharField(max_length=20, choices=Phase.choices, default=Phase.ACTIVE, blank=True)
@@ -137,7 +131,7 @@ class Program(TenantAwareModel):
         related_name='programs',
     )
 
-    _org_scoped_fk_fields = ('prompting_template', 'workflow_template', 'maintenance_schedule', 'folder')
+    _org_scoped_fk_fields = ('prompting_template', 'workflow_template', 'folder')
 
     class Meta:
         app_label = 'programs'
@@ -295,12 +289,6 @@ class Target(TenantAwareModel):
         null=True, blank=True,
         related_name='targets',
     )
-    maintenance_schedule = models.ForeignKey(
-        'MaintenanceSchedule',
-        on_delete=models.SET_NULL,
-        null=True, blank=True,
-        related_name='targets',
-    )
     maintenance_episodes_completed = models.PositiveIntegerField(default=0)
     current_prompt_level_index = models.PositiveSmallIntegerField(default=0)
     sd_text = models.TextField(blank=True, verbose_name='Discriminative Stimulus')
@@ -351,7 +339,6 @@ class Target(TenantAwareModel):
     # wrong if this is ever created from a background job).
     _org_scoped_fk_fields = (
         'prompting_template', 'workflow_template',
-        'maintenance_schedule',
         'default_sub_prompting_template', 'default_sub_workflow_template',
     )
 
@@ -523,49 +510,6 @@ class WorkflowTemplate(TenantAwareModel):
     phases = models.JSONField(default=list)
     is_org_default = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
-
-    class Meta:
-        app_label = 'programs'
-        ordering = ['name']
-        unique_together = [('organization', 'name')]
-
-    def __str__(self) -> str:
-        return self.name
-
-
-class MaintenanceSchedule(TenantAwareModel):
-    """
-    Controls how a mastered target reappears during maintenance before final closure.
-    """
-    class IntervalType(models.TextChoices):
-        EVERY_N_SESSIONS = 'every_n_sessions', 'Every N Sessions'
-        WEEKLY = 'weekly', 'Weekly'
-        MONTHLY = 'monthly', 'Monthly'
-
-    class OnFailure(models.TextChoices):
-        BACK_TO_ACQUISITION = 'back_to_acquisition', 'Back to Acquisition'
-        STAY_IN_MAINTENANCE = 'stay_in_maintenance', 'Stay in Maintenance'
-
-    name = models.CharField(max_length=200)
-    interval_type = models.CharField(
-        max_length=20, choices=IntervalType.choices, default=IntervalType.EVERY_N_SESSIONS
-    )
-    interval_value = models.PositiveIntegerField(
-        default=5,
-        help_text='Number of sessions between maintenance appearances (used with every_n_sessions)',
-    )
-    episodes = models.PositiveIntegerField(
-        default=4,
-        help_text='Number of successful maintenance episodes before auto-close',
-    )
-    success_threshold_pct = models.PositiveIntegerField(
-        default=80,
-        help_text='Minimum % correct to count a maintenance episode as successful',
-    )
-    on_failure = models.CharField(
-        max_length=25, choices=OnFailure.choices, default=OnFailure.BACK_TO_ACQUISITION
-    )
-    is_org_default = models.BooleanField(default=False)
 
     class Meta:
         app_label = 'programs'

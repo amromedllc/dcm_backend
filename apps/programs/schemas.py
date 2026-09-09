@@ -4,7 +4,7 @@ from ninja import Schema
 from pydantic import Field, field_validator
 
 from shared.schema_types import NonEmptyStr, SlugStr
-from .models import Program, Target, PromptingTemplate, MaintenanceSchedule, ProgramDataField, Lesson
+from .models import Program, Target, PromptingTemplate, ProgramDataField, Lesson
 
 
 # ---------------------------------------------------------------------------
@@ -61,42 +61,6 @@ class WorkflowTemplateUpdateRequest(Schema):
     @classmethod
     def _check_phases(cls, v):
         return _require_phase_keys(v)
-
-
-# ---------------------------------------------------------------------------
-# Maintenance schedules
-# ---------------------------------------------------------------------------
-
-class MaintenanceScheduleSchema(Schema):
-    id: int
-    name: str
-    interval_type: str
-    interval_value: int
-    episodes: int
-    success_threshold_pct: int
-    on_failure: str
-    is_org_default: bool
-    created_at: datetime
-
-
-class MaintenanceScheduleCreateRequest(Schema):
-    name: NonEmptyStr
-    interval_type: MaintenanceSchedule.IntervalType = MaintenanceSchedule.IntervalType.EVERY_N_SESSIONS
-    interval_value: int = Field(default=5, ge=1)
-    episodes: int = Field(default=4, ge=1)
-    success_threshold_pct: int = Field(default=80, ge=0, le=100)
-    on_failure: MaintenanceSchedule.OnFailure = MaintenanceSchedule.OnFailure.BACK_TO_ACQUISITION
-    is_org_default: bool = False
-
-
-class MaintenanceScheduleUpdateRequest(Schema):
-    name: NonEmptyStr | None = None
-    interval_type: MaintenanceSchedule.IntervalType | None = None
-    interval_value: int | None = Field(default=None, ge=1)
-    episodes: int | None = Field(default=None, ge=1)
-    success_threshold_pct: int | None = Field(default=None, ge=0, le=100)
-    on_failure: MaintenanceSchedule.OnFailure | None = None
-    is_org_default: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +191,6 @@ class ProgramSchema(Schema):
     prompting_template_id: int | None = None
     hidden_prompt_level_labels: list[str] = []
     workflow_template_id: int | None = None
-    maintenance_schedule_id: int | None = None
     image_url: str | None = None
     display_order: int
     archived_at: datetime | None
@@ -252,7 +215,6 @@ class ProgramListSchema(Schema):
     prompting_template_id: int | None = None
     hidden_prompt_level_labels: list[str] = []
     workflow_template_id: int | None = None
-    maintenance_schedule_id: int | None = None
     image_url: str | None = None
     display_order: int
     target_count: int = 0
@@ -274,7 +236,6 @@ class ProgramCreateRequest(Schema):
     prompting_template_id: int | None = None
     hidden_prompt_level_labels: list[str] = []
     workflow_template_id: int | None = None
-    maintenance_schedule_id: int | None = None
     display_order: int = Field(default=0, ge=0)
 
 
@@ -291,7 +252,6 @@ class ProgramUpdateRequest(Schema):
     prompting_template_id: int | None = None
     hidden_prompt_level_labels: list[str] | None = None
     workflow_template_id: int | None = None
-    maintenance_schedule_id: int | None = None
     display_order: int | None = Field(default=None, ge=0)
 
 
@@ -348,7 +308,6 @@ class TargetSchema(Schema):
     default_sub_workflow_template_id: int | None = None
     prompting_template_id: int | None
     workflow_template_id: int | None
-    maintenance_schedule_id: int | None
     maintenance_episodes_completed: int
     sd_text: str
     teaching_instructions: str
@@ -389,7 +348,6 @@ class TargetCreateRequest(Schema):
     default_sub_workflow_template_id: int | None = None
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
-    maintenance_schedule_id: int | None = None
     sd_text: str = ''
     teaching_instructions: str = ''
     instructions_html: str = ''
@@ -420,7 +378,6 @@ class TargetUpdateRequest(Schema):
     default_sub_workflow_template_id: int | None = None
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
-    maintenance_schedule_id: int | None = None
     sd_text: str | None = None
     teaching_instructions: str | None = None
     instructions_html: str | None = None
@@ -453,7 +410,6 @@ class BulkUpdateTargetsRequest(Schema):
     teaching_instructions: str | None = None
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
-    maintenance_schedule_id: int | None = None
     is_visible_to_staff: bool | None = None
 
 
@@ -531,7 +487,6 @@ class OrgProgramSchema(Schema):
     instructions: str
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
-    maintenance_schedule_id: int | None = None
     folder_id: int | None = None
     image_url: str | None = None
     already_imported: bool = False
@@ -555,7 +510,6 @@ class OrgProgramCreateRequest(Schema):
     instructions: str = ''
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
-    maintenance_schedule_id: int | None = None
     display_order: int = Field(default=0, ge=0)
 
 

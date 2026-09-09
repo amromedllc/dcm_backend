@@ -21,7 +21,7 @@ from apps.central_library.models import (
 from shared.uploads import validate_image_upload
 from .models import (
     Program, ProgramMaterial, Target, PromptingTemplate,
-    WorkflowTemplate, MaintenanceSchedule,
+    WorkflowTemplate,
     Lesson, LessonProgram,
     TreatmentArea, ProgramTag, ProgramDataField, TargetStatus,
     TargetStatusChange, TargetPromptLevelChange, ProgramFolder,
@@ -36,7 +36,6 @@ from .schemas import (
     ReorderModulesRequest, ReorderSubmodulesRequest,
     PromptingTemplateSchema, PromptingTemplateCreateRequest, PromptingTemplateUpdateRequest,
     WorkflowTemplateSchema, WorkflowTemplateCreateRequest, WorkflowTemplateUpdateRequest,
-    MaintenanceScheduleSchema, MaintenanceScheduleCreateRequest, MaintenanceScheduleUpdateRequest,
     LessonSchema, LessonCreateRequest, LessonUpdateRequest, AddProgramToLessonRequest,
     LessonProgramSchema,
     OrgProgramSchema, OrgProgramCreateRequest, AssignOrgProgramRequest,
@@ -139,7 +138,7 @@ def _require_settings_permission(request, permission: str):
 
 def _settings_qs(model, request, *, include_org_defaults: bool = False):
     """Practice-scoped queryset for shared facility settings (treatment areas,
-    tags, statuses, prompting/fading/workflow templates, maintenance schedules,
+    tags, statuses, prompting/fading/workflow templates,
     data fields). These carry `created_by` but were previously read/written
     with no practice filter at all — Model.objects.all() — so a TPMS practice
     sharing this org's schema with another practice (see
@@ -614,7 +613,6 @@ def _serialize_program(program: Program, request=None, include_targets: bool = F
         'prompting_template_id': program.prompting_template_id,
         'hidden_prompt_level_labels': program.hidden_prompt_level_labels,
         'workflow_template_id': program.workflow_template_id,
-        'maintenance_schedule_id': program.maintenance_schedule_id,
         'image_url': _optimized_program_image_url(request, program.image) if request is not None else None,
         'display_order': program.display_order,
         'archived_at': program.archived_at,
@@ -711,7 +709,6 @@ def create_program(request, data: ProgramCreateRequest):
         prompting_template_id=prompting_template_id,
         hidden_prompt_level_labels=_normalize_hidden_prompt_labels(data.hidden_prompt_level_labels),
         workflow_template_id=data.workflow_template_id,
-        maintenance_schedule_id=data.maintenance_schedule_id,
         display_order=data.display_order,
         created_by=request.user,
     )
@@ -1393,7 +1390,6 @@ def client_program_audit(request, client_id: int):
 _BULK_UPDATE_FK_MODELS = {
     'prompting_template_id': PromptingTemplate,
     'workflow_template_id': WorkflowTemplate,
-    'maintenance_schedule_id': MaintenanceSchedule,
 }
 
 
@@ -1597,56 +1593,6 @@ def delete_workflow_template(request, template_id: int):
 
 
 # ---------------------------------------------------------------------------
-# Maintenance schedules
-# ---------------------------------------------------------------------------
-
-@router.get('/programs/templates/maintenance', response=list[MaintenanceScheduleSchema])
-def list_maintenance_schedules(request):
-    return list(_settings_qs(MaintenanceSchedule, request))
-
-
-@router.post('/programs/templates/maintenance', response={201: MaintenanceScheduleSchema})
-def create_maintenance_schedule(request, data: MaintenanceScheduleCreateRequest):
-    _require_settings_permission(request, 'settings_maintenance_schedules_create')
-    _check_unique_name(MaintenanceSchedule, request, data.name)
-    schedule = MaintenanceSchedule.objects.create(created_by=request.user, **data.dict())
-    return 201, schedule
-
-
-@router.get('/programs/templates/maintenance/{schedule_id}', response=MaintenanceScheduleSchema)
-def get_maintenance_schedule(request, schedule_id: int):
-    try:
-        return _settings_qs(MaintenanceSchedule, request).get(id=schedule_id)
-    except MaintenanceSchedule.DoesNotExist:
-        raise HttpError(404, 'Maintenance schedule not found')
-
-
-@router.patch('/programs/templates/maintenance/{schedule_id}', response=MaintenanceScheduleSchema)
-def update_maintenance_schedule(request, schedule_id: int, data: MaintenanceScheduleUpdateRequest):
-    _require_settings_permission(request, 'settings_maintenance_schedules_edit')
-    try:
-        schedule = _settings_qs(MaintenanceSchedule, request).get(id=schedule_id)
-    except MaintenanceSchedule.DoesNotExist:
-        raise HttpError(404, 'Maintenance schedule not found')
-    if data.name:
-        _check_unique_name(MaintenanceSchedule, request, data.name, exclude_id=schedule_id)
-    for field, value in data.dict(exclude_none=True).items():
-        setattr(schedule, field, value)
-    schedule.save()
-    return schedule
-
-
-@router.delete('/programs/templates/maintenance/{schedule_id}', response={204: None})
-def delete_maintenance_schedule(request, schedule_id: int):
-    _require_settings_permission(request, 'settings_maintenance_schedules_delete')
-    try:
-        _settings_qs(MaintenanceSchedule, request).get(id=schedule_id).delete()
-    except MaintenanceSchedule.DoesNotExist:
-        raise HttpError(404, 'Maintenance schedule not found')
-    return 204, None
-
-
-# ---------------------------------------------------------------------------
 # Lessons
 # ---------------------------------------------------------------------------
 
@@ -1758,7 +1704,6 @@ def _serialize_org_program(program: Program, request, include_targets: bool = Fa
         'instructions': program.instructions,
         'prompting_template_id': program.prompting_template_id,
         'workflow_template_id': program.workflow_template_id,
-        'maintenance_schedule_id': program.maintenance_schedule_id,
         'folder_id': program.folder_id,
         'image_url': _optimized_program_image_url(request, program.image),
         'display_order': program.display_order,
@@ -1994,7 +1939,6 @@ def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
         instructions=source.instructions,
         prompting_template=source.prompting_template,
         workflow_template=source.workflow_template,
-        maintenance_schedule=source.maintenance_schedule,
         display_order=source.display_order,
         created_by=user,
     )
