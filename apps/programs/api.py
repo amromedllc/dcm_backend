@@ -726,6 +726,8 @@ def update_program(request, program_id: int, data: ProgramUpdateRequest):
     _require_supervisor(request)
     program = _get_program_or_404(request, program_id)
     updates = data.dict(exclude_none=True)
+    if updates.get('category') == Program.Category.INSTRUCTIONS_ONLY and program.targets.exists():
+        raise HttpError(400, 'Cannot switch to Instructions Only while this program still has targets — remove them first')
     if 'treatment_area' in updates or 'tags' in updates:
         _validate_treatment_area_and_tags(
             request,
@@ -1122,6 +1124,8 @@ def list_targets(request, program_id: int, staff_view: bool = False):
 def create_target(request, program_id: int, data: TargetCreateRequest):
     _require_supervisor(request)
     program = _get_program_or_404(request, program_id)
+    if program.category == Program.Category.INSTRUCTIONS_ONLY:
+        raise HttpError(400, 'Instructions Only programs cannot have targets — they store reference information only')
     target_data = data.dict()
     if program.prompting_template_id and not target_data.get('prompting_template_id'):
         target_data['prompting_template_id'] = program.prompting_template_id

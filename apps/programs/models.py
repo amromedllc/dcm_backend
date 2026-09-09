@@ -75,6 +75,11 @@ class Program(TenantAwareModel):
         BEHAVIOR_REDUCTION = 'behavior_reduction', 'Behavior Reduction'
         ABC_RECORDING = 'abc_recording', 'ABC Recording'
         TELEHEALTH = 'telehealth', 'Telehealth'
+        # Info-only — background/behavior-plan/emergency notes, videos, materials
+        # for staff reference. Structurally cannot hold targets (see
+        # create_target/update_program in api.py) — there is nothing to collect
+        # data on, so it never appears in data reports or progress metrics.
+        INSTRUCTIONS_ONLY = 'instructions_only', 'Instructions Only'
 
     class Status(models.TextChoices):
         ACTIVE = 'active', 'Active'
