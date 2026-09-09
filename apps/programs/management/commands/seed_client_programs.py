@@ -2,7 +2,7 @@
 Seed a starter curriculum pack — real skill-acquisition programs/targets across the
 core early-learner teaching domains (attending, receptive/expressive language, motor
 imitation, matching, mand training, social play, self-care) plus behavior-reduction
-and ABC programs — for a client, with workflow/fading/maintenance automation wired in.
+and ABC programs — for a client, with workflow/maintenance automation wired in.
 
 Content here is authored in-house using standard, publicly-known DTT and task-analysis
 teaching methodology (the kind covered in any RBT curriculum) — it does not reproduce
@@ -23,7 +23,7 @@ from django_tenants.utils import schema_context
 
 from apps.programs.models import (
     Program, Target, WorkflowTemplate, PromptingTemplate,
-    FadingTemplate, MaintenanceSchedule,
+    MaintenanceSchedule,
 )
 from apps.tenants.models import Organization
 from shared.tenancy import tenant_context
@@ -71,22 +71,6 @@ WORKFLOWS = [
                 'on_regression': 'baseline',
             },
         ],
-    },
-]
-
-# Prompt-fading advancement/regression rules — applied to a target's current
-# prompt-level index once fading_mode='automatic'. See FadingTemplate model.
-FADING_TEMPLATES = [
-    {
-        'name': 'Standard Prompt Fading',
-        'description': 'Advance one prompt level after 3 consecutive sessions ≥90%; regress on a sharp drop.',
-        'rules': {
-            'consecutive_sessions': 3,
-            'threshold_pct': 90,
-            'minimum_trials': 5,
-            'regression_threshold_pct': 50,
-        },
-        'is_org_default': True,
     },
 ]
 
@@ -386,18 +370,10 @@ class Command(BaseCommand):
             },
         )
 
-        # ── Fading template + maintenance schedule ──────────────────────────
+        # ── Maintenance schedule ────────────────────────────────────────────
         # Curriculum-pack targets that use the prompt hierarchy get fading/maintenance
         # automation wired in, so evaluate_session_fading()/mastery run for real instead
         # of sitting unused behind manual toggles.
-        fading_tpl, _ = FadingTemplate.objects.get_or_create(
-            name=FADING_TEMPLATES[0]['name'],
-            defaults={
-                'description': FADING_TEMPLATES[0]['description'],
-                'rules': FADING_TEMPLATES[0]['rules'],
-                'is_org_default': FADING_TEMPLATES[0]['is_org_default'],
-            },
-        )
         maintenance_sched, _ = MaintenanceSchedule.objects.get_or_create(
             name=MAINTENANCE_SCHEDULES[0]['name'],
             defaults={
@@ -434,7 +410,6 @@ class Command(BaseCommand):
                 instructions=prog_data['instructions'],
                 tags=prog_data['tags'],
                 workflow_template=wf,
-                fading_template=fading_tpl if is_skill_acquisition else None,
                 maintenance_schedule=maintenance_sched if is_skill_acquisition else None,
                 status='active',
                 display_order=i * 10,
@@ -453,10 +428,8 @@ class Command(BaseCommand):
                     teaching_instructions='',
                     prompting_template=prompt_tpl if uses_prompt_hierarchy else None,
                     workflow_template=wf,
-                    fading_template=fading_tpl if uses_prompt_hierarchy else None,
                     maintenance_schedule=maintenance_sched if is_skill_acquisition else None,
                     mastery_mode='automatic' if is_skill_acquisition else 'manual',
-                    fading_mode='automatic' if uses_prompt_hierarchy else 'manual',
                     is_visible_to_staff=t_data['status'] in ('probe', 'acquisition', 'mastered'),
                     display_order=j * 10,
                 )

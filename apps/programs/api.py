@@ -21,7 +21,7 @@ from apps.central_library.models import (
 from shared.uploads import validate_image_upload
 from .models import (
     Program, ProgramMaterial, Target, PromptingTemplate,
-    WorkflowTemplate, MaintenanceSchedule, FadingTemplate,
+    WorkflowTemplate, MaintenanceSchedule,
     Lesson, LessonProgram,
     TreatmentArea, ProgramTag, ProgramDataField, TargetStatus,
     TargetStatusChange, TargetPromptLevelChange, ProgramFolder,
@@ -37,7 +37,6 @@ from .schemas import (
     PromptingTemplateSchema, PromptingTemplateCreateRequest, PromptingTemplateUpdateRequest,
     WorkflowTemplateSchema, WorkflowTemplateCreateRequest, WorkflowTemplateUpdateRequest,
     MaintenanceScheduleSchema, MaintenanceScheduleCreateRequest, MaintenanceScheduleUpdateRequest,
-    FadingTemplateSchema, FadingTemplateCreateRequest, FadingTemplateUpdateRequest,
     LessonSchema, LessonCreateRequest, LessonUpdateRequest, AddProgramToLessonRequest,
     LessonProgramSchema,
     OrgProgramSchema, OrgProgramCreateRequest, AssignOrgProgramRequest,
@@ -616,7 +615,6 @@ def _serialize_program(program: Program, request=None, include_targets: bool = F
         'hidden_prompt_level_labels': program.hidden_prompt_level_labels,
         'workflow_template_id': program.workflow_template_id,
         'maintenance_schedule_id': program.maintenance_schedule_id,
-        'fading_template_id': program.fading_template_id,
         'image_url': _optimized_program_image_url(request, program.image) if request is not None else None,
         'display_order': program.display_order,
         'archived_at': program.archived_at,
@@ -714,7 +712,6 @@ def create_program(request, data: ProgramCreateRequest):
         hidden_prompt_level_labels=_normalize_hidden_prompt_labels(data.hidden_prompt_level_labels),
         workflow_template_id=data.workflow_template_id,
         maintenance_schedule_id=data.maintenance_schedule_id,
-        fading_template_id=data.fading_template_id,
         display_order=data.display_order,
         created_by=request.user,
     )
@@ -751,8 +748,6 @@ def update_program(request, program_id: int, data: ProgramUpdateRequest):
         for target in program.targets.all():
             target.current_prompt_level_index = _initial_prompt_level_index(template, target)
             target.save(update_fields=['current_prompt_level_index', 'updated_at'])
-    if 'fading_template_id' in updates:
-        program.targets.update(fading_template_id=program.fading_template_id)
 
     if updates:
         from apps.notifications.service import notify_program_modified
@@ -1133,8 +1128,6 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
     target_data = data.dict()
     if program.prompting_template_id and not target_data.get('prompting_template_id'):
         target_data['prompting_template_id'] = program.prompting_template_id
-    if program.fading_template_id and not target_data.get('fading_template_id'):
-        target_data['fading_template_id'] = program.fading_template_id
     if target_data.get('status'):
         _validate_target_status(request, target_data['status'])
     else:
@@ -1401,7 +1394,6 @@ _BULK_UPDATE_FK_MODELS = {
     'prompting_template_id': PromptingTemplate,
     'workflow_template_id': WorkflowTemplate,
     'maintenance_schedule_id': MaintenanceSchedule,
-    'fading_template_id': FadingTemplate,
 }
 
 
@@ -1548,48 +1540,6 @@ def delete_prompting_template(request, template_id: int):
     if template.is_locked:
         raise HttpError(423, 'Prompting template is locked')
     template.delete()
-    return 204, None
-
-
-# ---------------------------------------------------------------------------
-# Fading templates
-# ---------------------------------------------------------------------------
-
-@router.get('/programs/templates/fading', response=list[FadingTemplateSchema])
-def list_fading_templates(request):
-    return list(_settings_qs(FadingTemplate, request))
-
-
-@router.post('/programs/templates/fading', response={201: FadingTemplateSchema})
-def create_fading_template(request, data: FadingTemplateCreateRequest):
-    _require_settings_permission(request, 'settings_fading_templates_create')
-    _check_unique_name(FadingTemplate, request, data.name)
-    template = FadingTemplate.objects.create(created_by=request.user, **data.dict())
-    return 201, template
-
-
-@router.patch('/programs/templates/fading/{template_id}', response=FadingTemplateSchema)
-def update_fading_template(request, template_id: int, data: FadingTemplateUpdateRequest):
-    _require_settings_permission(request, 'settings_fading_templates_edit')
-    try:
-        template = _settings_qs(FadingTemplate, request).get(id=template_id)
-    except FadingTemplate.DoesNotExist:
-        raise HttpError(404, 'Template not found')
-    if data.name:
-        _check_unique_name(FadingTemplate, request, data.name, exclude_id=template_id)
-    for field, value in data.dict(exclude_none=True).items():
-        setattr(template, field, value)
-    template.save()
-    return template
-
-
-@router.delete('/programs/templates/fading/{template_id}', response={204: None})
-def delete_fading_template(request, template_id: int):
-    _require_settings_permission(request, 'settings_fading_templates_delete')
-    try:
-        _settings_qs(FadingTemplate, request).get(id=template_id).delete()
-    except FadingTemplate.DoesNotExist:
-        raise HttpError(404, 'Template not found')
     return 204, None
 
 
@@ -1809,7 +1759,6 @@ def _serialize_org_program(program: Program, request, include_targets: bool = Fa
         'prompting_template_id': program.prompting_template_id,
         'workflow_template_id': program.workflow_template_id,
         'maintenance_schedule_id': program.maintenance_schedule_id,
-        'fading_template_id': program.fading_template_id,
         'folder_id': program.folder_id,
         'image_url': _optimized_program_image_url(request, program.image),
         'display_order': program.display_order,
@@ -1864,7 +1813,6 @@ def create_org_program(request, data: OrgProgramCreateRequest):
         instructions=data.instructions,
         prompting_template_id=data.prompting_template_id,
         workflow_template_id=data.workflow_template_id,
-        fading_template_id=data.fading_template_id,
         display_order=data.display_order,
         created_by=request.user,
     )
@@ -1978,8 +1926,6 @@ def update_org_program(request, program_id: int, data: ProgramUpdateRequest):
         )
     if 'workflow_template_id' in updates:
         _apply_program_workflow_to_compatible_targets(request, program)
-    if 'fading_template_id' in updates:
-        program.targets.update(fading_template_id=program.fading_template_id)
     return _serialize_org_program(program, request, include_targets=True)
 
 
@@ -2049,7 +1995,6 @@ def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
         prompting_template=source.prompting_template,
         workflow_template=source.workflow_template,
         maintenance_schedule=source.maintenance_schedule,
-        fading_template=source.fading_template,
         display_order=source.display_order,
         created_by=user,
     )

@@ -3,7 +3,7 @@ from unfold.admin import ModelAdmin, TabularInline
 from shared.admin import OrganizationScopedAdminMixin
 from .models import (
     Program, ProgramMaterial, Target, PromptingTemplate,
-    WorkflowTemplate, MaintenanceSchedule, FadingTemplate,
+    WorkflowTemplate, MaintenanceSchedule,
     Lesson, LessonProgram, ProgramModule, ProgramSubmodule,
     TargetSubItem, TargetSubItemStatusChange,
 )
@@ -79,13 +79,6 @@ class PromptingTemplateAdmin(OrganizationScopedAdminMixin, ModelAdmin):
 
 @admin.register(WorkflowTemplate)
 class WorkflowTemplateAdmin(OrganizationScopedAdminMixin, ModelAdmin):
-    list_display = ['name', 'is_org_default', 'created_at']
-    list_filter = ['is_org_default']
-    search_fields = ['name']
-
-
-@admin.register(FadingTemplate)
-class FadingTemplateAdmin(OrganizationScopedAdminMixin, ModelAdmin):
     list_display = ['name', 'is_org_default', 'created_at']
     list_filter = ['is_org_default']
     search_fields = ['name']

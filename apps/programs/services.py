@@ -138,10 +138,9 @@ def evaluate_session_fading(session_run) -> list[Target]:
     """
     Called immediately after a SessionRun is submitted (same call site as
     evaluate_session_mastery). For every target that had trial events in this
-    session, checks whether the target's fading_mode is automatic, and if so
-    whether recent performance at its *current* prompt level meets the
-    fading_template's rules, then moves the target toward a less intrusive
-    prompt or back toward a more intrusive prompt accordingly.
+    session, checks whether its PromptingTemplate has automatic prompt fading
+    hints enabled, then moves the target toward a less intrusive prompt or back
+    toward a more intrusive prompt accordingly.
 
     Returns the list of targets whose prompt level was changed.
     """
@@ -156,9 +155,10 @@ def evaluate_session_fading(session_run) -> list[Target]:
 
     faded: list[Target] = []
     for target in Target.objects.filter(id__in=target_ids).select_related(
-        'prompting_template', 'fading_template', 'program__prompting_template', 'program__fading_template',
+        'prompting_template', 'program__prompting_template',
     ):
-        if target.fading_mode != 'automatic':
+        prompting_template = target.prompting_template or target.program.prompting_template
+        if not prompting_template or prompting_template.fading_hint_mode not in {'across_trials', 'across_sessions'}:
             continue
         if _fade_if_criteria_met(target, session_run.id):
             faded.append(target)
@@ -610,12 +610,10 @@ def _fade_if_criteria_met(target: Target, session_run_id: int) -> bool:
     """
     Returns True if the target's current_prompt_level_index was changed.
 
-    Resolves the target's FadingTemplate (target override or program default),
-    looks at the last `consecutive_sessions` submitted/approved sessions'
-    trials recorded at the target's *current* prompt level, and advances
-    (moves toward the top of the least-to-most hierarchy) if all of them meet threshold_pct,
-    or regresses (moves toward the bottom of the hierarchy) if all of them are
-    at/below regression_threshold_pct. Mixed/plateaued performance is a no-op.
+    Uses the target's PromptingTemplate automatic fading hints, looks at the
+    target's current prompt level, and advances (moves toward the top of the
+    least-to-most hierarchy) or regresses based on the configured match
+    thresholds. Mixed/plateaued performance is a no-op.
     """
     prompting_template = target.prompting_template or target.program.prompting_template
     all_levels = prompting_template.levels if prompting_template else []
@@ -641,10 +639,7 @@ def _fade_if_criteria_met(target: Target, session_run_id: int) -> bool:
     current_label = levels[idx].get('label')
 
     hint_mode = prompting_template.fading_hint_mode if prompting_template else None
-    ft = target.fading_template or target.program.fading_template
-    if ft:
-        rules = ft.rules
-    elif prompting_template and hint_mode in {'across_trials', 'across_sessions'}:
+    if prompting_template and hint_mode in {'across_trials', 'across_sessions'}:
         hint_settings = prompting_template.fading_hint_settings or {}
         rules = {
             'consecutive_sessions': hint_settings.get('decrease_across', 3),
@@ -666,7 +661,7 @@ def _fade_if_criteria_met(target: Target, session_run_id: int) -> bool:
 
     from apps.sessions.models import SessionRun, TrialEvent
 
-    if not ft and hint_mode == 'across_trials':
+    if hint_mode == 'across_trials':
         trials = TrialEvent.objects.filter(
             session_run_id=session_run_id, target_id=target.id, prompt_level_label=current_label,
         )

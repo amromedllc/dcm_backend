@@ -181,48 +181,6 @@ class PromptingTemplateUpdateRequest(Schema):
 # Fading templates
 # ---------------------------------------------------------------------------
 
-class FadingRulesSchema(Schema):
-    """Mirrors the .get(key, default) reads in services.py's fading logic —
-    every key is optional with the same default, so validating this shape
-    can't change behavior for a caller that omits a key."""
-    threshold_pct: int = Field(default=90, ge=0, le=100)
-    consecutive_sessions: int = Field(default=3, ge=1)
-    minimum_trials: int = Field(default=5, ge=1)
-    regression_threshold_pct: int = Field(default=50, ge=0, le=100)
-
-
-class FadingTemplateSchema(Schema):
-    id: int
-    name: str
-    description: str
-    rules: dict[str, Any]
-    is_org_default: bool
-    created_at: datetime
-
-
-class FadingTemplateCreateRequest(Schema):
-    name: NonEmptyStr
-    description: str = ''
-    rules: dict[str, Any]
-    is_org_default: bool = False
-
-    @field_validator('rules')
-    @classmethod
-    def _validate_rules(cls, v):
-        return FadingRulesSchema(**v).dict()
-
-
-class FadingTemplateUpdateRequest(Schema):
-    name: NonEmptyStr | None = None
-    description: str | None = None
-    rules: dict[str, Any] | None = None
-    is_org_default: bool | None = None
-
-    @field_validator('rules')
-    @classmethod
-    def _validate_rules(cls, v):
-        return FadingRulesSchema(**v).dict() if v is not None else v
-
 
 # ---------------------------------------------------------------------------
 # Programs
@@ -270,7 +228,6 @@ class ProgramSchema(Schema):
     hidden_prompt_level_labels: list[str] = []
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
-    fading_template_id: int | None = None
     image_url: str | None = None
     display_order: int
     archived_at: datetime | None
@@ -296,7 +253,6 @@ class ProgramListSchema(Schema):
     hidden_prompt_level_labels: list[str] = []
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
-    fading_template_id: int | None = None
     image_url: str | None = None
     display_order: int
     target_count: int = 0
@@ -319,7 +275,6 @@ class ProgramCreateRequest(Schema):
     hidden_prompt_level_labels: list[str] = []
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
-    fading_template_id: int | None = None
     display_order: int = Field(default=0, ge=0)
 
 
@@ -337,7 +292,6 @@ class ProgramUpdateRequest(Schema):
     hidden_prompt_level_labels: list[str] | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
-    fading_template_id: int | None = None
     display_order: int | None = Field(default=None, ge=0)
 
 
@@ -395,7 +349,6 @@ class TargetSchema(Schema):
     prompting_template_id: int | None
     workflow_template_id: int | None
     maintenance_schedule_id: int | None
-    fading_template_id: int | None
     maintenance_episodes_completed: int
     sd_text: str
     teaching_instructions: str
@@ -408,7 +361,6 @@ class TargetSchema(Schema):
     interval_warning_sound: str = ''
     status: str
     mastery_mode: str
-    fading_mode: str
     current_prompt_level_index: int
     display_order: int
     is_visible_to_staff: bool
@@ -438,7 +390,6 @@ class TargetCreateRequest(Schema):
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
-    fading_template_id: int | None = None
     sd_text: str = ''
     teaching_instructions: str = ''
     instructions_html: str = ''
@@ -450,7 +401,6 @@ class TargetCreateRequest(Schema):
     interval_warning_sound: str = ''
     status: str = ''  # empty = resolve server-side to the org's default TargetStatus
     mastery_mode: Target.MasteryMode = Target.MasteryMode.MANUAL
-    fading_mode: Target.FadingMode = Target.FadingMode.MANUAL
     display_order: int = Field(default=0, ge=0)
     is_visible_to_staff: bool = True
     module_id: int | None = None
@@ -471,7 +421,6 @@ class TargetUpdateRequest(Schema):
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
-    fading_template_id: int | None = None
     sd_text: str | None = None
     teaching_instructions: str | None = None
     instructions_html: str | None = None
@@ -483,7 +432,6 @@ class TargetUpdateRequest(Schema):
     interval_warning_sound: str | None = None
     status: str | None = None
     mastery_mode: Target.MasteryMode | None = None
-    fading_mode: Target.FadingMode | None = None
     current_prompt_level_index: int | None = Field(default=None, ge=0)
     display_order: int | None = Field(default=None, ge=0)
     is_visible_to_staff: bool | None = None
@@ -497,7 +445,6 @@ class BulkUpdateTargetsRequest(Schema):
     # Only fields present (non-null) will be written — preserves other fields
     name: NonEmptyStr | None = None
     mastery_mode: Target.MasteryMode | None = None
-    fading_mode: Target.FadingMode | None = None
     status: str | None = None
     measurement_type: str | None = None
     measurement: str | None = None
@@ -507,7 +454,6 @@ class BulkUpdateTargetsRequest(Schema):
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
-    fading_template_id: int | None = None
     is_visible_to_staff: bool | None = None
 
 
@@ -586,7 +532,6 @@ class OrgProgramSchema(Schema):
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
-    fading_template_id: int | None = None
     folder_id: int | None = None
     image_url: str | None = None
     already_imported: bool = False
@@ -611,7 +556,6 @@ class OrgProgramCreateRequest(Schema):
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
-    fading_template_id: int | None = None
     display_order: int = Field(default=0, ge=0)
 
 

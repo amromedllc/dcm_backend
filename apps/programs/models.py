@@ -69,28 +69,6 @@ class PromptingTemplate(TenantAwareModel):
         return max(lvl['score'] for lvl in self.levels)
 
 
-class FadingTemplate(TenantAwareModel):
-    """
-    Defines prompt-fading advancement/regression rules applied to a target's
-    current prompt level (an index into its PromptingTemplate.levels), evaluated
-    at whichever level the target currently sits.
-    Example rules: {"consecutive_sessions": 3, "threshold_pct": 90, "minimum_trials": 5,
-                     "regression_threshold_pct": 50}
-    """
-    name = models.CharField(max_length=200)
-    description = models.TextField(blank=True)
-    rules = models.JSONField(default=dict)
-    is_org_default = models.BooleanField(default=False)
-
-    class Meta:
-        app_label = 'programs'
-        ordering = ['name']
-        unique_together = [('organization', 'name')]
-
-    def __str__(self) -> str:
-        return self.name
-
-
 class Program(TenantAwareModel):
     class Category(models.TextChoices):
         SKILL_ACQUISITION = 'skill_acquisition', 'Skill Acquisition'
@@ -140,12 +118,6 @@ class Program(TenantAwareModel):
         null=True, blank=True,
         related_name='programs',
     )
-    fading_template = models.ForeignKey(
-        'FadingTemplate',
-        on_delete=models.SET_NULL,
-        null=True, blank=True,
-        related_name='programs',
-    )
     category = models.CharField(max_length=30, choices=Category.choices, default=Category.SKILL_ACQUISITION)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
     phase = models.CharField(max_length=20, choices=Phase.choices, default=Phase.ACTIVE, blank=True)
@@ -165,7 +137,7 @@ class Program(TenantAwareModel):
         related_name='programs',
     )
 
-    _org_scoped_fk_fields = ('prompting_template', 'workflow_template', 'maintenance_schedule', 'fading_template', 'folder')
+    _org_scoped_fk_fields = ('prompting_template', 'workflow_template', 'maintenance_schedule', 'folder')
 
     class Meta:
         app_label = 'programs'
@@ -210,10 +182,6 @@ class Target(TenantAwareModel):
     #     DISCONTINUED = 'discontinued', 'Discontinued'
 
     class MasteryMode(models.TextChoices):
-        MANUAL    = 'manual',    'Manual'
-        AUTOMATIC = 'automatic', 'Automatic'
-
-    class FadingMode(models.TextChoices):
         MANUAL    = 'manual',    'Manual'
         AUTOMATIC = 'automatic', 'Automatic'
 
@@ -333,14 +301,7 @@ class Target(TenantAwareModel):
         null=True, blank=True,
         related_name='targets',
     )
-    fading_template = models.ForeignKey(
-        'FadingTemplate',
-        on_delete=models.SET_NULL,
-        null=True, blank=True,
-        related_name='targets',
-    )
     maintenance_episodes_completed = models.PositiveIntegerField(default=0)
-    fading_mode = models.CharField(max_length=10, choices=FadingMode.choices, default=FadingMode.MANUAL)
     current_prompt_level_index = models.PositiveSmallIntegerField(default=0)
     sd_text = models.TextField(blank=True, verbose_name='Discriminative Stimulus')
     teaching_instructions = models.TextField(blank=True)
@@ -390,7 +351,7 @@ class Target(TenantAwareModel):
     # wrong if this is ever created from a background job).
     _org_scoped_fk_fields = (
         'prompting_template', 'workflow_template',
-        'maintenance_schedule', 'fading_template',
+        'maintenance_schedule',
         'default_sub_prompting_template', 'default_sub_workflow_template',
     )
 
