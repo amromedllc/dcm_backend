@@ -188,6 +188,8 @@ class ProgramSchema(Schema):
     baseline_notes: str = ''
     objective: str = ''
     instructions: str = ''
+    instructions_html: str = ''
+    professional_instructions_html: str = ''
     prompting_template_id: int | None = None
     hidden_prompt_level_labels: list[str] = []
     workflow_template_id: int | None = None
@@ -212,6 +214,8 @@ class ProgramListSchema(Schema):
     baseline_notes: str = ''
     objective: str = ''
     instructions: str = ''
+    instructions_html: str = ''
+    professional_instructions_html: str = ''
     prompting_template_id: int | None = None
     hidden_prompt_level_labels: list[str] = []
     workflow_template_id: int | None = None
@@ -233,6 +237,8 @@ class ProgramCreateRequest(Schema):
     baseline_notes: str = ''
     objective: str = ''
     instructions: str = ''
+    instructions_html: str = ''
+    professional_instructions_html: str = ''
     prompting_template_id: int | None = None
     hidden_prompt_level_labels: list[str] = []
     workflow_template_id: int | None = None
@@ -249,6 +255,8 @@ class ProgramUpdateRequest(Schema):
     baseline_notes: str | None = None
     objective: str | None = None
     instructions: str | None = None
+    instructions_html: str | None = None
+    professional_instructions_html: str | None = None
     prompting_template_id: int | None = None
     hidden_prompt_level_labels: list[str] | None = None
     workflow_template_id: int | None = None
@@ -485,6 +493,8 @@ class OrgProgramSchema(Schema):
     tags: list[str]
     objective: str
     instructions: str
+    instructions_html: str = ''
+    professional_instructions_html: str = ''
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     folder_id: int | None = None
@@ -508,6 +518,8 @@ class OrgProgramCreateRequest(Schema):
     tags: list[str] = []
     objective: str = ''
     instructions: str = ''
+    instructions_html: str = ''
+    professional_instructions_html: str = ''
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     display_order: int = Field(default=0, ge=0)
