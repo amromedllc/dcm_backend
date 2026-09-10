@@ -9,14 +9,14 @@ from apps.accounts.auth import partner_auth
 from apps.programs.models import Program, Target, ProgramModule
 from .models import GraphAnnotation, ClientAnnotation, SavedInsightGraph
 from .schemas import (
-    TrialDataPointSchema, BehaviorDataPointSchema,
+    TrialDataPointSchema, BehaviorDataPointSchema, ABCDataPointSchema,
     ProgramSummarySchema, ModuleSummarySchema, TargetSummarySchema,
     GraphAnnotationSchema, GraphAnnotationCreateRequest, GraphAnnotationUpdateRequest,
     ClientAnnotationSchema, ClientAnnotationCreateRequest, ClientAnnotationUpdateRequest,
     SavedInsightGraphSchema, SavedInsightGraphCreateRequest, SavedInsightGraphUpdateRequest,
 )
 from .services import (
-    get_trial_data_by_day, get_behavior_data_by_day, get_program_summary, get_module_summary,
+    get_trial_data_by_day, get_behavior_data_by_day, get_abc_data_by_day, get_program_summary, get_module_summary,
     get_program_mastery_criteria, get_client_progress_report, get_client_progress_overview,
 )
 
@@ -76,6 +76,7 @@ def _clear_default_saved_insights(view: SavedInsightGraph, request):
 # ---------------------------------------------------------------------------
 
 _VALID_GROUP_BY = {'target', 'prompt_level', 'user', 'module', 'submodule'}
+_VALID_ABC_GROUP_BY = {'antecedent', 'behavior', 'consequence', 'setting'}
 
 
 @router.get('/analytics/programs/{program_id}/trials', response=list[TrialDataPointSchema])
@@ -133,6 +134,34 @@ def program_behavior_data(
         Target.objects.filter(program_id=program_id).values_list('id', flat=True)
     )
     return get_behavior_data_by_day(target_ids, frm, to)
+
+
+@router.get('/analytics/clients/{client_id}/abc', response=list[ABCDataPointSchema])
+def client_abc_data(
+    request,
+    client_id: int,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    group_by: str = 'behavior',
+    antecedent: str | None = None,
+    behavior: str | None = None,
+    consequence: str | None = None,
+    setting: str | None = None,
+):
+    """Daily ABC event counts grouped by antecedent, behavior, consequence, or setting."""
+    if group_by not in _VALID_ABC_GROUP_BY:
+        raise HttpError(400, f'Invalid group_by: {group_by}')
+    frm, to = _resolve_dates(date_from, date_to)
+    return get_abc_data_by_day(
+        client_id,
+        frm,
+        to,
+        group_by=group_by,
+        antecedent=antecedent,
+        behavior=behavior,
+        consequence=consequence,
+        setting=setting,
+    )
 
 
 # ---------------------------------------------------------------------------

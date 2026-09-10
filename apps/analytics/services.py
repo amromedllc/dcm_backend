@@ -7,7 +7,7 @@ from apps.programs.measurements import (
     aggregate_measurement, MEASUREMENT_LABELS, MEASUREMENT_UNIT,
     DURATION_MEASUREMENTS, RATE_MEASUREMENTS,
 )
-from apps.sessions.models import TrialEvent, BehaviorEvent, SessionRun
+from apps.sessions.models import TrialEvent, BehaviorEvent, ABCEvent, SessionRun
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +47,14 @@ class BehaviorDataPoint(TypedDict):
     measurement_value: float
     measurement_label: str
     measurement_unit: str
+
+
+class ABCDataPoint(TypedDict):
+    date: date
+    series_id: str
+    series_name: str
+    count: int
+    total_duration_seconds: int
 
 
 class TargetSummary(TypedDict):
@@ -407,6 +415,66 @@ def get_behavior_data_by_day(
             'measurement_value': round(value, 2),
             'measurement_label': MEASUREMENT_LABELS.get(measurement, 'Frequency'),
             'measurement_unit': MEASUREMENT_UNIT.get(measurement, 'count'),
+        })
+    return result
+
+
+# ---------------------------------------------------------------------------
+# ABC data — powers antecedent/behavior/consequence analysis graphs
+# ---------------------------------------------------------------------------
+
+_ABC_GROUP_FIELD = {
+    'antecedent': 'antecedent',
+    'behavior': 'behavior_description',
+    'consequence': 'consequence',
+    'setting': 'setting',
+}
+
+
+def get_abc_data_by_day(
+    external_client_id: int,
+    date_from: date,
+    date_to: date,
+    *,
+    group_by: str = 'behavior',
+    antecedent: str | None = None,
+    behavior: str | None = None,
+    consequence: str | None = None,
+    setting: str | None = None,
+) -> list[ABCDataPoint]:
+    """Returns daily ABC event counts grouped by one ABC dimension."""
+    field = _ABC_GROUP_FIELD.get(group_by, 'behavior_description')
+    qs = ABCEvent.objects.filter(
+        external_client_id=external_client_id,
+        occurred_at__date__gte=date_from,
+        occurred_at__date__lte=date_to,
+    )
+    if antecedent:
+        qs = qs.filter(antecedent__icontains=antecedent)
+    if behavior:
+        qs = qs.filter(behavior_description__icontains=behavior)
+    if consequence:
+        qs = qs.filter(consequence__icontains=consequence)
+    if setting:
+        qs = qs.filter(setting__icontains=setting)
+
+    raw = list(qs.values('occurred_at__date', field, 'duration_seconds'))
+    grouped: dict[tuple, dict] = defaultdict(lambda: {'count': 0, 'duration': 0, 'name': ''})
+    for event in raw:
+        value = (event.get(field) or '').strip() or 'Unspecified'
+        key = (event['occurred_at__date'], value)
+        grouped[key]['count'] += 1
+        grouped[key]['duration'] += event.get('duration_seconds') or 0
+        grouped[key]['name'] = value
+
+    result: list[ABCDataPoint] = []
+    for (day, value), data in sorted(grouped.items()):
+        result.append({
+            'date': day,
+            'series_id': f'{group_by}:{value}',
+            'series_name': data['name'],
+            'count': data['count'],
+            'total_duration_seconds': data['duration'],
         })
     return result
 

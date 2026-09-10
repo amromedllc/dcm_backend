@@ -38,6 +38,14 @@ class BehaviorDataPointSchema(Schema):
     measurement_unit: str = 'count'
 
 
+class ABCDataPointSchema(Schema):
+    date: Date
+    series_id: str
+    series_name: str
+    count: int
+    total_duration_seconds: int
+
+
 class TargetSummarySchema(Schema):
     target_id: int
     target_name: str
