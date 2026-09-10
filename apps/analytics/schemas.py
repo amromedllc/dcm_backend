@@ -1,4 +1,5 @@
 from datetime import date as Date, datetime
+from typing import Any
 from ninja import Schema
 
 
@@ -141,3 +142,32 @@ class ClientAnnotationUpdateRequest(Schema):
     color: str | None = None
     style: str | None = None
     notes: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Saved insights graphs
+# ---------------------------------------------------------------------------
+
+class SavedInsightGraphSchema(Schema):
+    id: int
+    external_client_id: int | None
+    program_id: int | None
+    name: str
+    config: dict[str, Any]
+    visibility: str
+    roles: list[str]
+    display_order: int
+    created_by_id: int | None
+    is_mine: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class SavedInsightGraphCreateRequest(Schema):
+    external_client_id: int | None = None
+    program_id: int | None = None
+    name: str
+    config: dict[str, Any]
+    visibility: str = 'private'
+    roles: list[str] = []
+    display_order: int = 0
