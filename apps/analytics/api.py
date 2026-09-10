@@ -13,7 +13,7 @@ from .schemas import (
     ProgramSummarySchema, ModuleSummarySchema, TargetSummarySchema,
     GraphAnnotationSchema, GraphAnnotationCreateRequest, GraphAnnotationUpdateRequest,
     ClientAnnotationSchema, ClientAnnotationCreateRequest, ClientAnnotationUpdateRequest,
-    SavedInsightGraphSchema, SavedInsightGraphCreateRequest,
+    SavedInsightGraphSchema, SavedInsightGraphCreateRequest, SavedInsightGraphUpdateRequest,
 )
 from .services import (
     get_trial_data_by_day, get_behavior_data_by_day, get_program_summary, get_module_summary,
@@ -53,6 +53,7 @@ def _serialize_saved_insight(view: SavedInsightGraph, request) -> dict:
         'config': view.config,
         'visibility': view.visibility,
         'roles': view.roles,
+        'is_default': view.is_default,
         'display_order': view.display_order,
         'created_by_id': view.created_by_id,
         'is_mine': view.created_by_id == request.user.id,
@@ -61,11 +62,20 @@ def _serialize_saved_insight(view: SavedInsightGraph, request) -> dict:
     }
 
 
+def _clear_default_saved_insights(view: SavedInsightGraph, request):
+    qs = SavedInsightGraph.objects.filter(_same_practice_q(request.user, 'created_by__'))
+    if view.program_id:
+        qs = qs.filter(program_id=view.program_id)
+    else:
+        qs = qs.filter(program__isnull=True, external_client_id=view.external_client_id)
+    qs.exclude(id=view.id).update(is_default=False)
+
+
 # ---------------------------------------------------------------------------
 # Trial graph data
 # ---------------------------------------------------------------------------
 
-_VALID_GROUP_BY = {'target', 'prompt_level', 'user'}
+_VALID_GROUP_BY = {'target', 'prompt_level', 'user', 'module', 'submodule'}
 
 
 @router.get('/analytics/programs/{program_id}/trials', response=list[TrialDataPointSchema])
@@ -75,7 +85,7 @@ def program_trial_data(
     date_from: date | None = None,
     date_to: date | None = None,
     target_ids: str | None = None,   # comma-separated IDs to filter to specific targets
-    group_by: str = 'target',        # 'target' (default) | 'prompt_level' | 'user'
+    group_by: str = 'target',        # 'target' (default) | 'prompt_level' | 'user' | 'module' | 'submodule'
 ):
     """
     Daily trial accuracy for a program, grouped into data series by `group_by`.
@@ -304,10 +314,32 @@ def create_saved_insight(request, data: SavedInsightGraphCreateRequest):
         config=data.config,
         visibility=data.visibility,
         roles=data.roles,
+        is_default=data.is_default,
         display_order=data.display_order,
         created_by=request.user,
     )
+    if view.is_default:
+        _clear_default_saved_insights(view, request)
     return 201, _serialize_saved_insight(view, request)
+
+
+@router.patch('/analytics/saved-insights/{view_id}', response=SavedInsightGraphSchema)
+def update_saved_insight(request, view_id: int, data: SavedInsightGraphUpdateRequest):
+    try:
+        view = _visible_saved_insights_qs(request).get(id=view_id)
+    except SavedInsightGraph.DoesNotExist:
+        raise HttpError(404, 'Saved insight graph not found')
+    if view.created_by_id != request.user.id and request.user.role not in ('admin', 'supervisor'):
+        raise HttpError(403, 'Only the creator or a supervisor/admin can update this saved insight graph')
+    if data.visibility is not None and data.visibility not in SavedInsightGraph.Visibility.values:
+        raise HttpError(400, f'Invalid visibility: {data.visibility}')
+
+    for field, value in data.dict(exclude_none=True).items():
+        setattr(view, field, value)
+    view.save()
+    if view.is_default:
+        _clear_default_saved_insights(view, request)
+    return _serialize_saved_insight(view, request)
 
 
 @router.delete('/analytics/saved-insights/{view_id}', response={204: None})

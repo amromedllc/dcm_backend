@@ -104,6 +104,7 @@ class SavedInsightGraph(TenantAwareModel):
     config = models.JSONField(default=dict)
     visibility = models.CharField(max_length=20, choices=Visibility.choices, default=Visibility.PRIVATE)
     roles = models.JSONField(default=list)
+    is_default = models.BooleanField(default=False)
     display_order = models.PositiveIntegerField(default=0)
 
     _org_scoped_fk_fields = ('program',)

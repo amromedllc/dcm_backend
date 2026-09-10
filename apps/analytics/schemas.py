@@ -156,6 +156,7 @@ class SavedInsightGraphSchema(Schema):
     config: dict[str, Any]
     visibility: str
     roles: list[str]
+    is_default: bool
     display_order: int
     created_by_id: int | None
     is_mine: bool
@@ -170,4 +171,14 @@ class SavedInsightGraphCreateRequest(Schema):
     config: dict[str, Any]
     visibility: str = 'private'
     roles: list[str] = []
+    is_default: bool = False
     display_order: int = 0
+
+
+class SavedInsightGraphUpdateRequest(Schema):
+    name: str | None = None
+    config: dict[str, Any] | None = None
+    visibility: str | None = None
+    roles: list[str] | None = None
+    is_default: bool | None = None
+    display_order: int | None = None

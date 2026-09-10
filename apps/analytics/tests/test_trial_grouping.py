@@ -1,6 +1,7 @@
 """
 get_trial_data_by_day's group_by param — 'target' (default), 'prompt_level',
-and 'user' each collapse TrialEvent rows into a different series dimension.
+and 'user' / 'module' / 'submodule' each collapse TrialEvent rows into a
+different series dimension.
 """
 from datetime import date, datetime, timezone
 
@@ -9,7 +10,7 @@ from django_tenants.utils import schema_context
 
 from apps.accounts.models import User
 from apps.analytics.services import get_trial_data_by_day
-from apps.programs.models import Program, Target
+from apps.programs.models import Program, ProgramModule, ProgramSubmodule, Target
 from apps.sessions.models import SessionRun, TrialEvent
 from apps.tenants.models import Organization
 from shared.tenancy import tenant_context
@@ -31,7 +32,12 @@ class TrialGroupingTests(TestCase):
 
         with schema_context(self.org.schema_name), tenant_context(self.org.pk):
             self.program = Program.objects.create(name='Manding', category='skill_acquisition', external_client_id=1)
-            self.target1 = Target.objects.create(program=self.program, name='Target 1', measurement_type='discrete_trial')
+            self.module = ProgramModule.objects.create(program=self.program, name='Communication')
+            self.submodule = ProgramSubmodule.objects.create(module=self.module, name='Requests')
+            self.target1 = Target.objects.create(
+                program=self.program, name='Target 1', measurement_type='discrete_trial',
+                module=self.module, submodule=self.submodule,
+            )
             self.target2 = Target.objects.create(program=self.program, name='Target 2', measurement_type='discrete_trial')
 
             self.session_a = SessionRun.objects.create(external_client_id=1, staff=self.rbt_a)
@@ -80,6 +86,22 @@ class TrialGroupingTests(TestCase):
             self.assertEqual(set(by_staff.keys()), {'Ann A', 'Bo B'})
             self.assertEqual(by_staff['Ann A']['total_trials'], 2)
             self.assertEqual(by_staff['Bo B']['total_trials'], 1)
+
+    def test_group_by_module_collapses_across_target_modules(self):
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            points = get_trial_data_by_day([self.target1.id, self.target2.id], self.day, self.day, group_by='module')
+            by_module = {p['target_name']: p for p in points}
+            self.assertEqual(set(by_module.keys()), {'Communication', 'Unassigned Module'})
+            self.assertEqual(by_module['Communication']['total_trials'], 2)
+            self.assertEqual(by_module['Unassigned Module']['total_trials'], 1)
+
+    def test_group_by_submodule_collapses_across_target_submodules(self):
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            points = get_trial_data_by_day([self.target1.id, self.target2.id], self.day, self.day, group_by='submodule')
+            by_submodule = {p['target_name']: p for p in points}
+            self.assertEqual(set(by_submodule.keys()), {'Requests', 'Unassigned Submodule'})
+            self.assertEqual(by_submodule['Requests']['total_trials'], 2)
+            self.assertEqual(by_submodule['Unassigned Submodule']['total_trials'], 1)
 
     def test_empty_target_ids_returns_empty(self):
         with schema_context(self.org.schema_name), tenant_context(self.org.pk):

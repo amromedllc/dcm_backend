@@ -210,6 +210,9 @@ def get_trial_data_by_day(
     group_by='user' — collapses all targets into one series per the staff
     member who ran the session (SessionRun.staff), useful for comparing
     accuracy across RBTs.
+
+    group_by='module' / 'submodule' — collapses all targets into clinical
+    groupings configured on the program.
     """
     if not target_ids:
         return []
@@ -257,6 +260,16 @@ def get_trial_data_by_day(
             series_id = event['session_run__staff_id'] or 0
             full_name = f"{event.get('session_run__staff__first_name') or ''} {event.get('session_run__staff__last_name') or ''}".strip()
             series_name = full_name or 'Unknown'
+        elif group_by == 'module':
+            meta = target_meta.get(event['target_id'], {})
+            module_id = meta.get('module_id')
+            series_id = f'module:{module_id}' if module_id else 'module:unassigned'
+            series_name = mod_names.get(module_id) if module_id else 'Unassigned Module'
+        elif group_by == 'submodule':
+            meta = target_meta.get(event['target_id'], {})
+            submodule_id = meta.get('submodule_id')
+            series_id = f'submodule:{submodule_id}' if submodule_id else 'submodule:unassigned'
+            series_name = sub_names.get(submodule_id) if submodule_id else 'Unassigned Submodule'
         else:
             child = child_series.get((event['target_id'], event.get('sub_item_key') or ''))
             series_id = child['series_id'] if child else event['target_id']
@@ -283,9 +296,9 @@ def get_trial_data_by_day(
     for (day, sid), data in sorted(grouped.items()):
         total = data['total']
         correct = data['correct']
-        meta = target_meta.get(data['parent_target_id'], {}) if group_by == 'target' else {}
-        mid = meta.get('module_id')
-        subid = meta.get('submodule_id')
+        meta = target_meta.get(data['parent_target_id'], {})
+        mid = meta.get('module_id') if group_by in {'target', 'module'} else None
+        subid = meta.get('submodule_id') if group_by in {'target', 'submodule'} else None
         duration_seconds = sum(session_seconds.get(rid, 0.0) for rid in data['session_ids'])
         result.append({
             'date': day,
