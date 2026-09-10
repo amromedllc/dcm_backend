@@ -149,17 +149,49 @@ class CaregiverJWTAuth(_BaseJWTAuth):
 
 
 class APIKeyAuth(APIKeyHeader):
+    """X-API-Key auth for partner integrations.
+
+    A key is bound to one Organization and a dedicated service User. By the
+    time this runs, TenantResolverMiddleware has already resolved
+    request.tenant from the same key (see shared/middleware.py); this rejects
+    the request if anything put a different tenant on it. Keys are read-only
+    (GET/HEAD/OPTIONS) unless created with can_write.
+    """
     param_name = 'X-API-Key'
+
+    _SAFE_METHODS = frozenset({'GET', 'HEAD', 'OPTIONS'})
 
     def authenticate(self, request, key: str) -> APIKey | None:
         api_key = APIKey.verify(key)
-        if api_key:
-            request.api_key = api_key
-            return api_key
-        return None
+        if api_key is None:
+            return None
+
+        if api_key.organization_id is None or api_key.service_user_id is None:
+            return None
+
+        tenant = getattr(request, 'tenant', None)
+        if tenant is None or api_key.organization_id != tenant.pk:
+            return None
+
+        if not api_key.can_write and request.method not in self._SAFE_METHODS:
+            return None
+
+        service_user = api_key.service_user
+        if service_user is None or not service_user.is_active:
+            return None
+
+        request.api_key = api_key
+        request.user = service_user
+        request._jwt_payload = {'org_id': api_key.organization_id}
+        return api_key
 
 
 jwt_auth = JWTAuth()
 jwt_auth_any_role = AnyRoleJWTAuth()
 caregiver_auth = CaregiverJWTAuth()
 api_key_auth = APIKeyAuth()
+
+# Auth accepted by partner-reachable domain routers: an interactive user JWT,
+# or an organization-scoped X-API-Key. jwt_auth is tried first, so keyed
+# access is a fallback that never shadows a real user token.
+partner_auth = [jwt_auth, api_key_auth]

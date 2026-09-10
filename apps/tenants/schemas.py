@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from ninja import Schema
 
 
@@ -63,3 +65,35 @@ class TpmsAdminEmailSettingUpdate(Schema):
     admin_id: int | None = None
     facility_name: str | None = None
     email_notifications_enabled: bool | None = None
+
+
+class SuperadminAPIKeyCreate(Schema):
+    organization_id: int
+    name: str
+    can_write: bool = False
+    # Optional practice scope for the key's service account. Must be one of the
+    # target org's mapped TPMS practice admin IDs (OrganizationTpmsAdminId).
+    # When omitted it is inherited from an org admin if that admin's practice
+    # is mapped to the org, else left null (native / single-practice orgs).
+    external_admin_id: int | None = None
+    expires_at: datetime | None = None
+
+
+class SuperadminAPIKeySchema(Schema):
+    id: int
+    name: str
+    key_prefix: str
+    organization_id: int | None
+    organization_name: str
+    external_admin_id: int | None
+    tpms_facility_name: str | None
+    can_write: bool
+    is_active: bool
+    expires_at: datetime | None
+    last_used_at: datetime | None
+    created_at: datetime
+
+
+class SuperadminAPIKeyCreatedSchema(SuperadminAPIKeySchema):
+    raw_key: str
+    message: str = 'Store this key securely — it will not be shown again.'

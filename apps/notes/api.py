@@ -5,7 +5,7 @@ from django.utils import timezone
 from ninja import Router
 from ninja.errors import HttpError
 
-from apps.accounts.auth import jwt_auth
+from apps.accounts.auth import partner_auth
 from apps.accounts.permissions import require_permission
 from apps.clients.models import Client
 from .models import LessonNote, NoteTemplate, NoteSignature, NoteAssignment
@@ -18,7 +18,7 @@ from .schemas import (
 )
 from .services import submit_note, approve_note, reject_note, resolve_template_tokens
 
-router = Router(auth=jwt_auth)
+router = Router(auth=partner_auth)
 
 
 # ---------------------------------------------------------------------------

@@ -9,7 +9,7 @@ from ninja.errors import HttpError
 from django.db import transaction
 from django.db.models import Q
 
-from .models import User, APIKey
+from .models import User
 from .auth import create_access_token, create_refresh_token, decode_token, jwt_auth, jwt_auth_any_role, token_tenant_mismatch
 from .permissions import get_user_permissions, require_permission, resolve_permission_organization
 from .schemas import (
@@ -22,9 +22,6 @@ from .schemas import (
     CurrentUserSchema,
     UserCreateRequest,
     UserUpdateRequest,
-    APIKeyCreateRequest,
-    APIKeyCreatedResponse,
-    APIKeyListItem,
     ErrorResponse,
     StaffSchema,
 )
@@ -698,45 +695,10 @@ def update_user(request, user_id: int, data: UserUpdateRequest):
     return user
 
 
-@router.get('/api-keys', response=list[APIKeyListItem], auth=jwt_auth)
-def list_api_keys(request):
-    if not request.user.has_role('admin'):
-        raise HttpError(403, 'Admin access required')
-    return list(
-        APIKey.objects.filter(_same_practice_q(request.user, 'created_by__'), is_active=True)
-        .order_by('-created_at')
-    )
+# Partner API keys are created, listed and revoked only by a platform
+# superadmin — see apps.tenants.api ("/organization/superadmin/api-keys").
+# There is deliberately no practice-admin-facing key management endpoint.
 
-
-@router.post('/api-keys', response={201: APIKeyCreatedResponse}, auth=jwt_auth)
-def create_api_key(request, data: APIKeyCreateRequest):
-    if not request.user.has_role('admin'):
-        raise HttpError(403, 'Admin access required')
-    key_instance, raw_key = APIKey.generate(
-        name=data.name,
-        created_by=request.user,
-        expires_at=data.expires_at,
-    )
-    return 201, APIKeyCreatedResponse(
-        id=key_instance.id,
-        name=key_instance.name,
-        key_prefix=key_instance.key_prefix,
-        raw_key=raw_key,
-        expires_at=key_instance.expires_at,
-    )
-
-
-@router.delete('/api-keys/{key_id}', response={204: None}, auth=jwt_auth)
-def revoke_api_key(request, key_id: int):
-    if not request.user.has_role('admin'):
-        raise HttpError(403, 'Admin access required')
-    try:
-        key = APIKey.objects.get(_same_practice_q(request.user, 'created_by__'), id=key_id)
-    except APIKey.DoesNotExist:
-        raise HttpError(404, 'API key not found')
-    key.is_active = False
-    key.save(update_fields=['is_active'])
-    return 204, None
 
 @router.get('/admin/logs', auth=jwt_auth)
 def get_logs(request, limit: int = 200):

@@ -12,7 +12,7 @@ from django.utils import timezone
 from PIL import Image
 
 from apps.accounts.api import _same_practice_q
-from apps.accounts.auth import jwt_auth
+from apps.accounts.auth import partner_auth
 from apps.accounts.permissions import require_permission
 from apps.central_library.models import (
     CentralProgram, CentralProgramFolder, CentralTarget,
@@ -55,7 +55,7 @@ from .schemas import (
     KnowledgeBaseTopicSchema, KnowledgeBaseTopicRequest, KnowledgeBaseTopicUpdateRequest,
 )
 
-router = Router(auth=jwt_auth)
+router = Router(auth=partner_auth)
 
 
 def _require_supervisor(request):

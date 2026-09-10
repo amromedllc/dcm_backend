@@ -4,7 +4,7 @@ from ninja import Router, Form, File
 from ninja.files import UploadedFile
 from ninja.errors import HttpError
 
-from apps.accounts.auth import jwt_auth
+from apps.accounts.auth import partner_auth
 from apps.accounts.permissions import require_permission
 from apps.programs.measurements import (
     aggregate_measurement, MEASUREMENT_LABELS,
@@ -33,7 +33,7 @@ from .schemas import (
 )
 from .services import build_program_snapshot, submit_session, approve_session, reject_session
 
-router = Router(auth=jwt_auth)
+router = Router(auth=partner_auth)
 
 DEFAULT_ABC_CATEGORIES = [
     {'key': 'antecedent', 'label': 'Antecedent', 'is_required': True, 'display_order': 10},

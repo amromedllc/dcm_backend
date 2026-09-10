@@ -10,7 +10,7 @@ from ninja.errors import HttpError
 from django.conf import settings
 from django.db.models import Q, Count
 
-from apps.accounts.auth import jwt_auth
+from apps.accounts.auth import partner_auth
 from apps.accounts.permissions import require_permission
 from apps.integrations.tpms_auth_client import (
     TpmsAuthError,
@@ -64,7 +64,7 @@ from .schemas import (
 )
 from apps.integrations.telehealth_client import TelehealthError, get_connection_details, admit_participant
 
-router = Router(auth=jwt_auth)
+router = Router(auth=partner_auth)
 
 
 def _get_accessible_clients(request):

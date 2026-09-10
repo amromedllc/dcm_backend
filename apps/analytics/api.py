@@ -3,7 +3,7 @@ from django.utils import timezone
 from ninja import Router
 from ninja.errors import HttpError
 
-from apps.accounts.auth import jwt_auth
+from apps.accounts.auth import partner_auth
 from apps.programs.models import Program, Target, ProgramModule
 from .models import GraphAnnotation, ClientAnnotation
 from .schemas import (
@@ -17,7 +17,7 @@ from .services import (
     get_program_mastery_criteria, get_client_progress_report, get_client_progress_overview,
 )
 
-router = Router(auth=jwt_auth)
+router = Router(auth=partner_auth)
 
 _DEFAULT_DAYS = 90
 

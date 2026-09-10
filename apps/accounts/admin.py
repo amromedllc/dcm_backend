@@ -25,7 +25,14 @@ class UserAdmin(ModelAdmin, BaseUserAdmin):
 
 @admin.register(APIKey)
 class APIKeyAdmin(ModelAdmin):
-    list_display = ['name', 'key_prefix', 'created_by', 'is_active', 'expires_at', 'last_used_at']
-    list_filter = ['is_active']
+    list_display = ['name', 'key_prefix', 'organization', 'can_write', 'created_by', 'is_active', 'expires_at', 'last_used_at']
+    list_filter = ['is_active', 'can_write']
     search_fields = ['name', 'key_prefix']
-    readonly_fields = ['key_prefix', 'key_hash', 'last_used_at', 'created_at']
+    readonly_fields = ['key_prefix', 'key_hash', 'service_user', 'last_used_at', 'created_at']
+    def has_add_permission(self, request):
+        return False
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        if not obj.is_active and obj.service_user_id:
+            User.objects.filter(id=obj.service_user_id).update(is_active=False)

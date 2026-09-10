@@ -6,6 +6,7 @@ from django_tenants.utils import schema_context
 from ninja import Router
 from ninja.errors import HttpError
 
+from apps.accounts.models import APIKey, User
 from .models import Domain, Organization, OrganizationTpmsAdminId
 from .schemas import (
     OrganizationAuthenticationSettingsSchema,
@@ -13,6 +14,9 @@ from .schemas import (
     OrganizationPracticeEmailSettingsSchema,
     OrganizationSuperadminCreate,
     OrganizationSuperadminUpdate,
+    SuperadminAPIKeyCreate,
+    SuperadminAPIKeyCreatedSchema,
+    SuperadminAPIKeySchema,
     TpmsAdminIdCreate,
     TpmsAdminEmailSettingSchema,
     TpmsAdminEmailSettingUpdate,
@@ -295,3 +299,118 @@ def update_authentication_settings(request, data: OrganizationAuthenticationSett
         'automatic_logout_enabled': org.automatic_logout_enabled,
         'automatic_logout_minutes': org.automatic_logout_minutes,
     }
+
+
+# ---------------------------------------------------------------------------
+# Superadmin: partner API keys for any organization
+#
+# Partner API keys are a superadmin-only concern — there is no
+# practice-admin-facing key endpoint. These let a platform superadmin mint /
+# list / revoke a key for any organization, then hand the one-time raw key
+# to the partner.
+# ---------------------------------------------------------------------------
+
+def _facility_name_map(admin_ids: set[int]) -> dict[int, str]:
+    """admin_id -> facility_name for the given TPMS practice admin IDs."""
+    if not admin_ids:
+        return {}
+    return dict(
+        OrganizationTpmsAdminId.objects
+        .filter(admin_id__in=admin_ids)
+        .values_list('admin_id', 'facility_name')
+    )
+
+
+def _serialize_superadmin_api_key(key: APIKey, facility_names: dict[int, str] | None = None) -> dict:
+    facility_names = facility_names or {}
+    return {
+        'id': key.id,
+        'name': key.name,
+        'key_prefix': key.key_prefix,
+        'organization_id': key.organization_id,
+        'organization_name': key.organization.name if key.organization_id else '',
+        'external_admin_id': key.external_admin_id,
+        'tpms_facility_name': (
+            facility_names.get(key.external_admin_id) or None
+            if key.external_admin_id is not None else None
+        ),
+        'can_write': key.can_write,
+        'is_active': key.is_active,
+        'expires_at': key.expires_at,
+        'last_used_at': key.last_used_at,
+        'created_at': key.created_at,
+    }
+
+
+@router.get('/superadmin/api-keys', response=list[SuperadminAPIKeySchema])
+def list_superadmin_api_keys(request, organization_id: int | None = None):
+    _require_superadmin(request)
+    qs = APIKey.objects.select_related('organization').order_by('-created_at')
+    if organization_id is not None:
+        qs = qs.filter(organization_id=organization_id)
+    keys = list(qs)
+    facility_names = _facility_name_map({k.external_admin_id for k in keys if k.external_admin_id is not None})
+    return [_serialize_superadmin_api_key(key, facility_names) for key in keys]
+
+
+@router.post('/superadmin/api-keys', response={201: SuperadminAPIKeyCreatedSchema})
+def create_superadmin_api_key(request, data: SuperadminAPIKeyCreate):
+    _require_superadmin(request)
+    try:
+        org = Organization.objects.get(id=data.organization_id)
+    except Organization.DoesNotExist:
+        raise HttpError(404, 'Organization not found')
+
+    # Own the key with an existing admin of the target org where one exists,
+    # so it has a sensible created_by; fall back to the superadmin.
+    owner = (
+        User.objects.filter(organization=org, role=User.Role.ADMIN, is_active=True)
+        .order_by('id')
+        .first()
+        or request.user
+    )
+
+    # The key's practice scope must be one of THIS org's mapped TPMS practices
+    # (OrganizationTpmsAdminId). A caller-supplied id that isn't mapped here is
+    # rejected; an inherited one is only used if it is actually mapped.
+    org_admin_ids = set(
+        OrganizationTpmsAdminId.objects.filter(organization=org).values_list('admin_id', flat=True)
+    )
+    external_admin_id = data.external_admin_id
+    if external_admin_id is not None:
+        if org_admin_ids and external_admin_id not in org_admin_ids:
+            raise HttpError(
+                400,
+                f'TPMS practice admin ID {external_admin_id} is not mapped to "{org.name}". '
+                f'Mapped: {sorted(org_admin_ids) or "none"}.',
+            )
+    elif owner is not None and owner.external_admin_id in org_admin_ids:
+        external_admin_id = owner.external_admin_id
+
+    key, raw = APIKey.generate(
+        name=data.name,
+        created_by=owner,
+        organization_id=org.id,
+        external_admin_id=external_admin_id,
+        can_write=data.can_write,
+        expires_at=data.expires_at,
+    )
+    payload = _serialize_superadmin_api_key(
+        key, _facility_name_map({external_admin_id} if external_admin_id is not None else set()),
+    )
+    payload['raw_key'] = raw
+    return 201, payload
+
+
+@router.delete('/superadmin/api-keys/{key_id}', response={204: None})
+def revoke_superadmin_api_key(request, key_id: int):
+    _require_superadmin(request)
+    try:
+        key = APIKey.objects.get(id=key_id)
+    except APIKey.DoesNotExist:
+        raise HttpError(404, 'API key not found')
+    key.is_active = False
+    key.save(update_fields=['is_active'])
+    if key.service_user_id:
+        User.objects.filter(id=key.service_user_id).update(is_active=False)
+    return 204, None

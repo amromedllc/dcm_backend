@@ -82,28 +82,8 @@ class UserUpdateRequest(Schema):
     is_active: bool | None = None
 
 
-class APIKeyCreateRequest(Schema):
-    name: str
-    expires_at: datetime | None = None
-
-
-class APIKeyCreatedResponse(Schema):
-    id: int
-    name: str
-    key_prefix: str
-    raw_key: str
-    expires_at: datetime | None
-    message: str = 'Store this key securely — it will not be shown again.'
-
-
-class APIKeyListItem(Schema):
-    id: int
-    name: str
-    key_prefix: str
-    is_active: bool
-    expires_at: datetime | None
-    last_used_at: datetime | None
-    created_at: datetime
+# Partner API-key schemas live in apps.tenants.schemas — keys are a
+# superadmin-only concern (see apps.tenants.api).
 
 
 class ErrorResponse(Schema):
