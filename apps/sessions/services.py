@@ -3,7 +3,7 @@ from datetime import timedelta
 from django.utils import timezone
 from ninja.errors import HttpError
 
-from apps.programs.models import Program, Lesson
+from apps.programs.models import Program, Lesson, ProgramDataField
 
 RUNNABLE_PROGRAM_PHASES = {
     Program.Phase.BASELINE,
@@ -170,6 +170,12 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
     else:
         programs_qs = Program.objects.none()
 
+    session_fields = list(
+        ProgramDataField.objects
+        .filter(is_active=True, show_in_client_sessions=True)
+        .order_by('display_order', 'name')
+    )
+
     for program in programs_qs:
         targets_data = []
         for target in program.targets.visible_to_staff():
@@ -203,6 +209,15 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
             'name': program.name,
             'category': program.category,
             'treatment_area': program.treatment_area,
+            'custom_fields': [
+                {
+                    'id': field.id,
+                    'name': field.name,
+                    'field_type': field.field_type,
+                    'value': (program.custom_field_values or {}).get(str(field.id)),
+                }
+                for field in session_fields
+            ],
             'targets': targets_data,
         })
 

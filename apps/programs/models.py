@@ -128,6 +128,7 @@ class Program(TenantAwareModel):
     instructions_html = models.TextField(blank=True, default='')
     professional_instructions_html = models.TextField(blank=True, default='')
     hidden_prompt_level_labels = models.JSONField(default=list, blank=True)
+    custom_field_values = models.JSONField(default=dict, blank=True)
     image = models.ImageField(upload_to=_program_upload_path, max_length=500, blank=True, null=True)
     display_order = models.PositiveIntegerField(default=0, db_index=True)
     archived_at = models.DateTimeField(null=True, blank=True)
@@ -712,6 +713,10 @@ class ProgramDataField(TenantAwareModel):
     name = models.CharField(max_length=200)
     field_type = models.CharField(max_length=20, choices=FieldType.choices, default=FieldType.TEXT)
     field_location = models.CharField(max_length=30, choices=FieldLocation.choices, default=FieldLocation.TREATMENT_TAB)
+    enable_on_all_programs = models.BooleanField(default=True)
+    enable_on_program_templates = models.BooleanField(default=False)
+    program_template_ids = models.JSONField(default=list, blank=True)
+    show_in_client_sessions = models.BooleanField(default=False)
     display_order = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)
 

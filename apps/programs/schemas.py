@@ -190,6 +190,7 @@ class ProgramSchema(Schema):
     instructions: str = ''
     instructions_html: str = ''
     professional_instructions_html: str = ''
+    custom_field_values: dict[str, Any] = {}
     prompting_template_id: int | None = None
     hidden_prompt_level_labels: list[str] = []
     workflow_template_id: int | None = None
@@ -216,6 +217,7 @@ class ProgramListSchema(Schema):
     instructions: str = ''
     instructions_html: str = ''
     professional_instructions_html: str = ''
+    custom_field_values: dict[str, Any] = {}
     prompting_template_id: int | None = None
     hidden_prompt_level_labels: list[str] = []
     workflow_template_id: int | None = None
@@ -239,6 +241,7 @@ class ProgramCreateRequest(Schema):
     instructions: str = ''
     instructions_html: str = ''
     professional_instructions_html: str = ''
+    custom_field_values: dict[str, Any] = {}
     prompting_template_id: int | None = None
     hidden_prompt_level_labels: list[str] = []
     workflow_template_id: int | None = None
@@ -257,6 +260,7 @@ class ProgramUpdateRequest(Schema):
     instructions: str | None = None
     instructions_html: str | None = None
     professional_instructions_html: str | None = None
+    custom_field_values: dict[str, Any] | None = None
     prompting_template_id: int | None = None
     hidden_prompt_level_labels: list[str] | None = None
     workflow_template_id: int | None = None
@@ -495,6 +499,7 @@ class OrgProgramSchema(Schema):
     instructions: str
     instructions_html: str = ''
     professional_instructions_html: str = ''
+    custom_field_values: dict[str, Any] = {}
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     folder_id: int | None = None
@@ -520,6 +525,7 @@ class OrgProgramCreateRequest(Schema):
     instructions: str = ''
     instructions_html: str = ''
     professional_instructions_html: str = ''
+    custom_field_values: dict[str, Any] = {}
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
     display_order: int = Field(default=0, ge=0)
@@ -814,6 +820,10 @@ class ProgramDataFieldSchema(Schema):
     name: str
     field_type: str
     field_location: str
+    enable_on_all_programs: bool = True
+    enable_on_program_templates: bool = False
+    program_template_ids: list[int] = []
+    show_in_client_sessions: bool = False
     display_order: int
     is_active: bool
     created_at: datetime
@@ -824,6 +834,10 @@ class ProgramDataFieldRequest(Schema):
     name: NonEmptyStr
     field_type: ProgramDataField.FieldType = ProgramDataField.FieldType.TEXT
     field_location: ProgramDataField.FieldLocation = ProgramDataField.FieldLocation.TREATMENT_TAB
+    enable_on_all_programs: bool = True
+    enable_on_program_templates: bool = False
+    program_template_ids: list[int] = []
+    show_in_client_sessions: bool = False
     display_order: int = Field(default=0, ge=0)
     is_active: bool = True
 
