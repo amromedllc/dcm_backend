@@ -15,6 +15,16 @@ def _program_material_upload_path(instance, filename):
 
 
 class PromptingTemplate(TenantAwareModel):
+    class OutcomeMeasurement(models.TextChoices):
+        BINARY = 'binary', 'Successful / Unsuccessful'
+        RATING_SCALE = 'rating_scale', 'Rating Scale'
+        WEIGHTED = 'weighted', 'Weighted'
+
+    class FadingHintMode(models.TextChoices):
+        NONE = 'none', 'None'
+        ACROSS_TRIALS = 'across_trials', 'Most-to-Least (across trials)'
+        ACROSS_SESSIONS = 'across_sessions', 'Most-to-Least (across sessions)'
+
     """
     Defines the scored response levels used during trial data entry.
     Example levels: [{"label": "Full Physical", "score": 0, "color": "#e74c3c",
@@ -23,7 +33,19 @@ class PromptingTemplate(TenantAwareModel):
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True)
     levels = models.JSONField(default=list)
+    outcome_measurement = models.CharField(
+        max_length=20,
+        choices=OutcomeMeasurement.choices,
+        default=OutcomeMeasurement.BINARY,
+    )
+    fading_hint_mode = models.CharField(
+        max_length=20,
+        choices=FadingHintMode.choices,
+        default=FadingHintMode.NONE,
+    )
+    fading_hint_settings = models.JSONField(default=dict, blank=True)
     is_org_default = models.BooleanField(default=False)
+    is_locked = models.BooleanField(default=False)
 
     class Meta:
         app_label = 'programs'
@@ -47,34 +69,17 @@ class PromptingTemplate(TenantAwareModel):
         return max(lvl['score'] for lvl in self.levels)
 
 
-class FadingTemplate(TenantAwareModel):
-    """
-    Defines prompt-fading advancement/regression rules applied to a target's
-    current prompt level (an index into its PromptingTemplate.levels), evaluated
-    at whichever level the target currently sits.
-    Example rules: {"consecutive_sessions": 3, "threshold_pct": 90, "minimum_trials": 5,
-                     "regression_threshold_pct": 50}
-    """
-    name = models.CharField(max_length=200)
-    description = models.TextField(blank=True)
-    rules = models.JSONField(default=dict)
-    is_org_default = models.BooleanField(default=False)
-
-    class Meta:
-        app_label = 'programs'
-        ordering = ['name']
-        unique_together = [('organization', 'name')]
-
-    def __str__(self) -> str:
-        return self.name
-
-
 class Program(TenantAwareModel):
     class Category(models.TextChoices):
         SKILL_ACQUISITION = 'skill_acquisition', 'Skill Acquisition'
         BEHAVIOR_REDUCTION = 'behavior_reduction', 'Behavior Reduction'
         ABC_RECORDING = 'abc_recording', 'ABC Recording'
         TELEHEALTH = 'telehealth', 'Telehealth'
+        # Info-only — background/behavior-plan/emergency notes, videos, materials
+        # for staff reference. Structurally cannot hold targets (see
+        # create_target/update_program in api.py) — there is nothing to collect
+        # data on, so it never appears in data reports or progress metrics.
+        INSTRUCTIONS_ONLY = 'instructions_only', 'Instructions Only'
 
     class Status(models.TextChoices):
         ACTIVE = 'active', 'Active'
@@ -112,18 +117,6 @@ class Program(TenantAwareModel):
         null=True, blank=True,
         related_name='programs',
     )
-    maintenance_schedule = models.ForeignKey(
-        'MaintenanceSchedule',
-        on_delete=models.SET_NULL,
-        null=True, blank=True,
-        related_name='programs',
-    )
-    fading_template = models.ForeignKey(
-        'FadingTemplate',
-        on_delete=models.SET_NULL,
-        null=True, blank=True,
-        related_name='programs',
-    )
     category = models.CharField(max_length=30, choices=Category.choices, default=Category.SKILL_ACQUISITION)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
     phase = models.CharField(max_length=20, choices=Phase.choices, default=Phase.ACTIVE, blank=True)
@@ -132,6 +125,10 @@ class Program(TenantAwareModel):
     baseline_notes = models.TextField(blank=True)
     objective = models.TextField(blank=True)
     instructions = models.TextField(blank=True)
+    instructions_html = models.TextField(blank=True, default='')
+    professional_instructions_html = models.TextField(blank=True, default='')
+    hidden_prompt_level_labels = models.JSONField(default=list, blank=True)
+    custom_field_values = models.JSONField(default=dict, blank=True)
     image = models.ImageField(upload_to=_program_upload_path, max_length=500, blank=True, null=True)
     display_order = models.PositiveIntegerField(default=0, db_index=True)
     archived_at = models.DateTimeField(null=True, blank=True)
@@ -142,7 +139,7 @@ class Program(TenantAwareModel):
         related_name='programs',
     )
 
-    _org_scoped_fk_fields = ('prompting_template', 'workflow_template', 'maintenance_schedule', 'fading_template', 'folder')
+    _org_scoped_fk_fields = ('prompting_template', 'workflow_template', 'folder')
 
     class Meta:
         app_label = 'programs'
@@ -187,10 +184,6 @@ class Target(TenantAwareModel):
     #     DISCONTINUED = 'discontinued', 'Discontinued'
 
     class MasteryMode(models.TextChoices):
-        MANUAL    = 'manual',    'Manual'
-        AUTOMATIC = 'automatic', 'Automatic'
-
-    class FadingMode(models.TextChoices):
         MANUAL    = 'manual',    'Manual'
         AUTOMATIC = 'automatic', 'Automatic'
 
@@ -304,20 +297,7 @@ class Target(TenantAwareModel):
         null=True, blank=True,
         related_name='targets',
     )
-    maintenance_schedule = models.ForeignKey(
-        'MaintenanceSchedule',
-        on_delete=models.SET_NULL,
-        null=True, blank=True,
-        related_name='targets',
-    )
-    fading_template = models.ForeignKey(
-        'FadingTemplate',
-        on_delete=models.SET_NULL,
-        null=True, blank=True,
-        related_name='targets',
-    )
     maintenance_episodes_completed = models.PositiveIntegerField(default=0)
-    fading_mode = models.CharField(max_length=10, choices=FadingMode.choices, default=FadingMode.MANUAL)
     current_prompt_level_index = models.PositiveSmallIntegerField(default=0)
     sd_text = models.TextField(blank=True, verbose_name='Discriminative Stimulus')
     teaching_instructions = models.TextField(blank=True)
@@ -367,7 +347,6 @@ class Target(TenantAwareModel):
     # wrong if this is ever created from a background job).
     _org_scoped_fk_fields = (
         'prompting_template', 'workflow_template',
-        'maintenance_schedule', 'fading_template',
         'default_sub_prompting_template', 'default_sub_workflow_template',
     )
 
@@ -539,49 +518,6 @@ class WorkflowTemplate(TenantAwareModel):
     phases = models.JSONField(default=list)
     is_org_default = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
-
-    class Meta:
-        app_label = 'programs'
-        ordering = ['name']
-        unique_together = [('organization', 'name')]
-
-    def __str__(self) -> str:
-        return self.name
-
-
-class MaintenanceSchedule(TenantAwareModel):
-    """
-    Controls how a mastered target reappears during maintenance before final closure.
-    """
-    class IntervalType(models.TextChoices):
-        EVERY_N_SESSIONS = 'every_n_sessions', 'Every N Sessions'
-        WEEKLY = 'weekly', 'Weekly'
-        MONTHLY = 'monthly', 'Monthly'
-
-    class OnFailure(models.TextChoices):
-        BACK_TO_ACQUISITION = 'back_to_acquisition', 'Back to Acquisition'
-        STAY_IN_MAINTENANCE = 'stay_in_maintenance', 'Stay in Maintenance'
-
-    name = models.CharField(max_length=200)
-    interval_type = models.CharField(
-        max_length=20, choices=IntervalType.choices, default=IntervalType.EVERY_N_SESSIONS
-    )
-    interval_value = models.PositiveIntegerField(
-        default=5,
-        help_text='Number of sessions between maintenance appearances (used with every_n_sessions)',
-    )
-    episodes = models.PositiveIntegerField(
-        default=4,
-        help_text='Number of successful maintenance episodes before auto-close',
-    )
-    success_threshold_pct = models.PositiveIntegerField(
-        default=80,
-        help_text='Minimum % correct to count a maintenance episode as successful',
-    )
-    on_failure = models.CharField(
-        max_length=25, choices=OnFailure.choices, default=OnFailure.BACK_TO_ACQUISITION
-    )
-    is_org_default = models.BooleanField(default=False)
 
     class Meta:
         app_label = 'programs'
@@ -777,6 +713,10 @@ class ProgramDataField(TenantAwareModel):
     name = models.CharField(max_length=200)
     field_type = models.CharField(max_length=20, choices=FieldType.choices, default=FieldType.TEXT)
     field_location = models.CharField(max_length=30, choices=FieldLocation.choices, default=FieldLocation.TREATMENT_TAB)
+    enable_on_all_programs = models.BooleanField(default=True)
+    enable_on_program_templates = models.BooleanField(default=False)
+    program_template_ids = models.JSONField(default=list, blank=True)
+    show_in_client_sessions = models.BooleanField(default=False)
     display_order = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)
 

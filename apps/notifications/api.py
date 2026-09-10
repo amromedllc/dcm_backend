@@ -10,6 +10,7 @@ from apps.accounts.models import User
 from apps.accounts.permissions import require_permission, resolve_permission_organization, user_has_permission
 from apps.clients.api import _get_accessible_clients
 from apps.clients.models import ClientStaffAssignment
+from apps.tenants.models import OrganizationTpmsAdminId
 from .models import (
     FirebaseMessagingToken,
     Notification,
@@ -17,7 +18,7 @@ from .models import (
     RoleNotificationPolicy,
 )
 from .preferences import PREFERENCE_TYPES
-from .service import _send_firebase_push
+from .service import _practice_email_notifications_enabled, _send_firebase_push
 
 router = Router(auth=jwt_auth)
 
@@ -76,6 +77,7 @@ class NotificationPreferenceSchema(Schema):
     # True when an admin has locked this notification type for the user's role;
     # the toggles are read-only and the values below reflect the role policy.
     locked: bool = False
+    email_available: bool = True
 
 
 class NotificationPreferenceUpdate(Schema):
@@ -101,6 +103,11 @@ class ReportReviewerSchema(Schema):
     full_name: str
     email: str
     role: str
+
+
+class PracticeEmailNotificationSettingSchema(Schema):
+    admin_id: int
+    email_notifications_enabled: bool
 
 
 class ReportReviewRequestCreate(Schema):
@@ -141,6 +148,7 @@ def _default_preferences_for_user(user) -> list[NotificationPreference]:
 def list_notification_preferences(request):
     labels = dict(PREFERENCE_TYPES)
     policy = _role_policy_map(getattr(request.user, 'role', ''))
+    email_available = _practice_email_notifications_enabled(request.user)
     rows = []
     for pref in _default_preferences_for_user(request.user):
         entry = policy.get(pref.event_type, {})
@@ -149,9 +157,10 @@ def list_notification_preferences(request):
             'event_type': pref.event_type,
             'label': labels[pref.event_type],
             # A locked type shows (and enforces) the role policy value.
-            'email_enabled': entry['email_enabled'] if locked else pref.email_enabled,
+            'email_enabled': email_available and (entry['email_enabled'] if locked else pref.email_enabled),
             'web_enabled': entry['web_enabled'] if locked else pref.web_enabled,
             'locked': locked,
+            'email_available': email_available,
         })
     return rows
 
@@ -164,6 +173,7 @@ def update_notification_preferences(request, payload: NotificationPreferenceUpda
         if item.event_type not in allowed:
             raise HttpError(400, f'Unknown notification type: {item.event_type}')
         entry = policy.get(item.event_type, {})
+        email_enabled = item.email_enabled and _practice_email_notifications_enabled(request.user)
         if entry.get('locked'):
             # Ignore client-supplied values for locked types — the role policy wins.
             continue
@@ -171,11 +181,22 @@ def update_notification_preferences(request, payload: NotificationPreferenceUpda
             recipient=request.user,
             event_type=item.event_type,
             defaults={
-                'email_enabled': item.email_enabled,
+                'email_enabled': email_enabled,
                 'web_enabled': item.web_enabled,
             },
         )
     return list_notification_preferences(request)
+
+
+@router.get('/notifications/practice-email-settings', response=list[PracticeEmailNotificationSettingSchema])
+def list_practice_email_notification_settings(request):
+    require_permission(request, 'admin_privileges')
+    org = resolve_permission_organization(request)
+    return list(
+        OrganizationTpmsAdminId.objects.filter(organization=org)
+        .order_by('admin_id')
+        .values('admin_id', 'email_notifications_enabled')
+    )
 
 
 @router.get('/notifications/role-policies')

@@ -40,10 +40,14 @@ def _channel_enabled(recipient, event_type: str, channel: str) -> bool:
         from .preferences import preference_key_for_event
         preference_event_type = preference_key_for_event(event_type)
 
+        if channel == 'email' and not _practice_email_notifications_enabled(recipient):
+            return False
+
         def channel_value(obj):
             return obj.email_enabled if channel == 'email' else obj.web_enabled
 
         policy = RoleNotificationPolicy.all_organizations.filter(
+            organization_id=getattr(recipient, 'organization_id', None),
             role=getattr(recipient, 'role', ''),
             event_type=preference_event_type,
         ).first()
@@ -52,6 +56,7 @@ def _channel_enabled(recipient, event_type: str, channel: str) -> bool:
             return channel_value(policy)
 
         pref = NotificationPreference.all_organizations.filter(
+            organization_id=getattr(recipient, 'organization_id', None),
             recipient=recipient,
             event_type=preference_event_type,
         ).first()
@@ -63,6 +68,22 @@ def _channel_enabled(recipient, event_type: str, channel: str) -> bool:
     except Exception:
         logger.exception('Failed to resolve notification preference (event=%s recipient=%s)', event_type, recipient.id)
         return True
+
+
+def _practice_email_notifications_enabled(recipient) -> bool:
+    admin_id = getattr(recipient, 'external_admin_id', None)
+    if admin_id is None:
+        return True
+    try:
+        from apps.tenants.models import OrganizationTpmsAdminId
+        return OrganizationTpmsAdminId.objects.filter(
+            organization_id=getattr(recipient, 'organization_id', None),
+            admin_id=admin_id,
+            email_notifications_enabled=True,
+        ).exists()
+    except Exception:
+        logger.exception('Failed to resolve practice email notification gate for recipient=%s', recipient.id)
+        return False
 
 
 def _send_email(email: str, subject: str, body: str, data: dict | None = None):

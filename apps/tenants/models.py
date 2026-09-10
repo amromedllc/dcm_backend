@@ -62,6 +62,8 @@ class OrganizationTpmsAdminId(models.Model):
         related_name='tpms_admin_ids',
     )
     admin_id = models.IntegerField(unique=True, db_index=True)
+    facility_name = models.CharField(max_length=200, blank=True)
+    email_notifications_enabled = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -69,7 +71,8 @@ class OrganizationTpmsAdminId(models.Model):
         ordering = ['admin_id']
 
     def __str__(self):
-        return f'{self.admin_id} → {self.organization.name}'
+        label = f'{self.admin_id} ({self.facility_name})' if self.facility_name else str(self.admin_id)
+        return f'{label} → {self.organization.name}'
 
 class DefaultTargetStatus(models.Model):
     key = models.SlugField(max_length=20, unique=True)

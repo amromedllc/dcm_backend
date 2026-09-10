@@ -88,12 +88,36 @@ class User(AbstractBaseUser, PermissionsMixin):
 
 class APIKey(models.Model):
     """
-    Tenant-scoped API keys for facility-to-facility integrations.
-    The raw key is shown once at creation — only the SHA-256 hash is stored.
+    Organization-scoped API keys for partner / facility integrations.
+
+    Each key is bound to exactly one Organization and backed by a dedicated
+    service ``User`` (role ``admin``), so every ``request.user``-based
+    scoping path in the API works unchanged for a keyed request. ``can_write``
+    is off by default — a key can only issue GET/HEAD/OPTIONS requests until
+    it is explicitly created with write access (see
+    ``apps.accounts.auth.APIKeyAuth``). ``external_admin_id`` is copied from
+    the creating user so keys minted by a TPMS-linked admin stay scoped to
+    that admin's practice (one Organization can front several TPMS practices).
+
+    The raw key is shown once at creation — only its SHA-256 hash is stored.
     """
     name = models.CharField(max_length=100)
     key_prefix = models.CharField(max_length=8, db_index=True)
     key_hash = models.CharField(max_length=64)
+    organization = models.ForeignKey(
+        'tenants.Organization',
+        on_delete=models.CASCADE,
+        null=True,
+        related_name='api_keys',
+    )
+    external_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
+    service_user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        null=True,
+        related_name='+',
+    )
+    can_write = models.BooleanField(default=False)
     created_by = models.ForeignKey(
         User,
         on_delete=models.SET_NULL,
@@ -113,14 +137,35 @@ class APIKey(models.Model):
         cls,
         name: str,
         created_by: User,
+        *,
+        organization_id: int,
+        external_admin_id: int | None = None,
+        can_write: bool = False,
         expires_at=None,
     ) -> tuple['APIKey', str]:
         raw_key = f'dcm_{secrets.token_urlsafe(32)}'
         key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+
+        service_user = User.objects.create(
+            email=f'apikey.{raw_key[4:12]}@service.dcm.local',
+            first_name='API Key',
+            last_name=name[:100],
+            role=User.Role.ADMIN,
+            is_active=True,
+            organization_id=organization_id,
+            external_admin_id=external_admin_id,
+        )
+        service_user.set_unusable_password()
+        service_user.save(update_fields=['password'])
+
         instance = cls.objects.create(
             name=name,
             key_prefix=raw_key[:8],
             key_hash=key_hash,
+            organization_id=organization_id,
+            external_admin_id=external_admin_id,
+            service_user=service_user,
+            can_write=can_write,
             created_by=created_by,
             expires_at=expires_at,
         )
@@ -132,18 +177,42 @@ class APIKey(models.Model):
             return None
         key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
         try:
-            key = cls.objects.select_related('created_by').get(
+            key = cls.objects.select_related('service_user').get(
                 key_prefix=raw_key[:8],
                 key_hash=key_hash,
                 is_active=True,
             )
-            if key.expires_at and key.expires_at < timezone.now():
-                return None
-            key.last_used_at = timezone.now()
-            key.save(update_fields=['last_used_at'])
-            return key
         except cls.DoesNotExist:
             return None
+
+        if key.expires_at and key.expires_at < timezone.now():
+            return None
+
+        # Throttle the write: one row-write per key per minute at most, not
+        # one per request.
+        now = timezone.now()
+        if key.last_used_at is None or (now - key.last_used_at).total_seconds() > 60:
+            key.last_used_at = now
+            key.save(update_fields=['last_used_at'])
+        return key
+
+    @classmethod
+    def org_id_for(cls, raw_key: str) -> int | None:
+        """Resolve the owning organization id without verify()'s side effects
+        — used by TenantResolverMiddleware to bind the request tenant before
+        Ninja auth runs."""
+        if not raw_key.startswith('dcm_'):
+            return None
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        return (
+            cls.objects.filter(
+                key_prefix=raw_key[:8],
+                key_hash=key_hash,
+                is_active=True,
+            )
+            .values_list('organization_id', flat=True)
+            .first()
+        )
 
     def __str__(self) -> str:
         return f'{self.name} ({self.key_prefix}...)'

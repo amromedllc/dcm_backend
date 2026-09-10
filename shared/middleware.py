@@ -1,8 +1,9 @@
 """
 Tenant resolution middleware. Resolves Organization from hostname via Domain
-lookup, falls back to reading org_id from the JWT token, and as a last resort
-queries for the first Organization. Sets connection.set_tenant() for schema
-routing and the tenancy contextvar for row-level scoping.
+lookup, falls back to reading org_id from the JWT token, then from a partner
+X-API-Key, and as a last resort queries for the first Organization. Sets
+connection.set_tenant() for schema routing and the tenancy contextvar for
+row-level scoping.
 """
 import base64
 import hashlib
@@ -62,6 +63,14 @@ def _org_id_from_jwt(request) -> int | None:
         return None
 
 
+def _org_id_from_api_key(request) -> int | None:
+    raw = request.META.get('HTTP_X_API_KEY', '')
+    if not raw.startswith('dcm_'):
+        return None
+    from apps.accounts.models import APIKey
+    return APIKey.org_id_for(raw)
+
+
 class TenantResolverMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
@@ -108,6 +117,11 @@ class TenantResolverMiddleware:
         if request.tenant is None:
             org_id = _org_id_from_jwt(request)
             if org_id and org_id != 0:
+                request.tenant = self._get_org_by_pk(org_id)
+
+        if request.tenant is None:
+            org_id = _org_id_from_api_key(request)
+            if org_id:
                 request.tenant = self._get_org_by_pk(org_id)
 
         if request.tenant is None:

@@ -76,3 +76,46 @@ class ClientAnnotation(TenantAwareModel):
 
     def __str__(self) -> str:
         return f'{self.label} ({self.date})'
+
+
+class SavedInsightGraph(TenantAwareModel):
+    """
+    User-saved graph configuration for the client/program analytics screens.
+
+    The graph options are intentionally stored as JSON so the frontend can add
+    new axis, chart, and filter options without requiring a schema migration for
+    every graph-builder enhancement.
+    """
+
+    class Visibility(models.TextChoices):
+        PRIVATE = 'private', 'Only me'
+        EVERYONE = 'everyone', 'All users'
+        ROLES = 'roles', 'Specific roles'
+
+    external_client_id = models.PositiveIntegerField(null=True, blank=True, db_index=True)
+    program = models.ForeignKey(
+        'programs.Program',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='saved_insight_graphs',
+    )
+    name = models.CharField(max_length=100)
+    config = models.JSONField(default=dict)
+    visibility = models.CharField(max_length=20, choices=Visibility.choices, default=Visibility.PRIVATE)
+    roles = models.JSONField(default=list)
+    is_default = models.BooleanField(default=False)
+    display_order = models.PositiveIntegerField(default=0)
+
+    _org_scoped_fk_fields = ('program',)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.program.organization_id if self.program_id else None
+
+    class Meta:
+        app_label = 'analytics'
+        ordering = ['display_order', 'name']
+
+    def __str__(self) -> str:
+        scope = f'program:{self.program_id}' if self.program_id else f'client:{self.external_client_id}'
+        return f'{self.name} ({scope})'

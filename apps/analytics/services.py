@@ -7,7 +7,7 @@ from apps.programs.measurements import (
     aggregate_measurement, MEASUREMENT_LABELS, MEASUREMENT_UNIT,
     DURATION_MEASUREMENTS, RATE_MEASUREMENTS,
 )
-from apps.sessions.models import TrialEvent, BehaviorEvent, SessionRun
+from apps.sessions.models import TrialEvent, BehaviorEvent, ABCEvent, SessionRun
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +47,14 @@ class BehaviorDataPoint(TypedDict):
     measurement_value: float
     measurement_label: str
     measurement_unit: str
+
+
+class ABCDataPoint(TypedDict):
+    date: date
+    series_id: str
+    series_name: str
+    count: int
+    total_duration_seconds: int
 
 
 class TargetSummary(TypedDict):
@@ -210,6 +218,9 @@ def get_trial_data_by_day(
     group_by='user' — collapses all targets into one series per the staff
     member who ran the session (SessionRun.staff), useful for comparing
     accuracy across RBTs.
+
+    group_by='module' / 'submodule' — collapses all targets into clinical
+    groupings configured on the program.
     """
     if not target_ids:
         return []
@@ -257,6 +268,16 @@ def get_trial_data_by_day(
             series_id = event['session_run__staff_id'] or 0
             full_name = f"{event.get('session_run__staff__first_name') or ''} {event.get('session_run__staff__last_name') or ''}".strip()
             series_name = full_name or 'Unknown'
+        elif group_by == 'module':
+            meta = target_meta.get(event['target_id'], {})
+            module_id = meta.get('module_id')
+            series_id = f'module:{module_id}' if module_id else 'module:unassigned'
+            series_name = mod_names.get(module_id) if module_id else 'Unassigned Module'
+        elif group_by == 'submodule':
+            meta = target_meta.get(event['target_id'], {})
+            submodule_id = meta.get('submodule_id')
+            series_id = f'submodule:{submodule_id}' if submodule_id else 'submodule:unassigned'
+            series_name = sub_names.get(submodule_id) if submodule_id else 'Unassigned Submodule'
         else:
             child = child_series.get((event['target_id'], event.get('sub_item_key') or ''))
             series_id = child['series_id'] if child else event['target_id']
@@ -283,9 +304,9 @@ def get_trial_data_by_day(
     for (day, sid), data in sorted(grouped.items()):
         total = data['total']
         correct = data['correct']
-        meta = target_meta.get(data['parent_target_id'], {}) if group_by == 'target' else {}
-        mid = meta.get('module_id')
-        subid = meta.get('submodule_id')
+        meta = target_meta.get(data['parent_target_id'], {})
+        mid = meta.get('module_id') if group_by in {'target', 'module'} else None
+        subid = meta.get('submodule_id') if group_by in {'target', 'submodule'} else None
         duration_seconds = sum(session_seconds.get(rid, 0.0) for rid in data['session_ids'])
         result.append({
             'date': day,
@@ -394,6 +415,66 @@ def get_behavior_data_by_day(
             'measurement_value': round(value, 2),
             'measurement_label': MEASUREMENT_LABELS.get(measurement, 'Frequency'),
             'measurement_unit': MEASUREMENT_UNIT.get(measurement, 'count'),
+        })
+    return result
+
+
+# ---------------------------------------------------------------------------
+# ABC data — powers antecedent/behavior/consequence analysis graphs
+# ---------------------------------------------------------------------------
+
+_ABC_GROUP_FIELD = {
+    'antecedent': 'antecedent',
+    'behavior': 'behavior_description',
+    'consequence': 'consequence',
+    'setting': 'setting',
+}
+
+
+def get_abc_data_by_day(
+    external_client_id: int,
+    date_from: date,
+    date_to: date,
+    *,
+    group_by: str = 'behavior',
+    antecedent: str | None = None,
+    behavior: str | None = None,
+    consequence: str | None = None,
+    setting: str | None = None,
+) -> list[ABCDataPoint]:
+    """Returns daily ABC event counts grouped by one ABC dimension."""
+    field = _ABC_GROUP_FIELD.get(group_by, 'behavior_description')
+    qs = ABCEvent.objects.filter(
+        external_client_id=external_client_id,
+        occurred_at__date__gte=date_from,
+        occurred_at__date__lte=date_to,
+    )
+    if antecedent:
+        qs = qs.filter(antecedent__icontains=antecedent)
+    if behavior:
+        qs = qs.filter(behavior_description__icontains=behavior)
+    if consequence:
+        qs = qs.filter(consequence__icontains=consequence)
+    if setting:
+        qs = qs.filter(setting__icontains=setting)
+
+    raw = list(qs.values('occurred_at__date', field, 'duration_seconds'))
+    grouped: dict[tuple, dict] = defaultdict(lambda: {'count': 0, 'duration': 0, 'name': ''})
+    for event in raw:
+        value = (event.get(field) or '').strip() or 'Unspecified'
+        key = (event['occurred_at__date'], value)
+        grouped[key]['count'] += 1
+        grouped[key]['duration'] += event.get('duration_seconds') or 0
+        grouped[key]['name'] = value
+
+    result: list[ABCDataPoint] = []
+    for (day, value), data in sorted(grouped.items()):
+        result.append({
+            'date': day,
+            'series_id': f'{group_by}:{value}',
+            'series_name': data['name'],
+            'count': data['count'],
+            'total_duration_seconds': data['duration'],
         })
     return result
 

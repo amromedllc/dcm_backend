@@ -3,7 +3,7 @@ from django.db.utils import IntegrityError
 from ninja import NinjaAPI
 from shared.tenancy import CrossOrganizationReferenceError
 from apps.accounts.api import router as accounts_router
-from apps.accounts.auth import jwt_auth, api_key_auth
+from apps.accounts.auth import jwt_auth, partner_auth
 from apps.clients.api import router as clients_router
 from apps.programs.api import router as programs_router
 from apps.sessions.api import router as sessions_router
@@ -22,14 +22,20 @@ api = NinjaAPI(
     version='1.0.0',
     description=(
         'Data Collection Platform API. '
-        'Authenticate with Bearer JWT (users) or X-API-Key header (facility integrations).'
+        'Authenticate with Bearer JWT (interactive users). '
+        'Partner integrations use an organization-scoped X-API-Key header — '
+        'read-only by default — and reach only the clients, programs, '
+        'sessions, notes, analytics and exports routers.'
     ),
     docs_url='/docs',
-    # jwt_auth (the default here) now excludes caregiver-role tokens by
-    # construction — see apps.accounts.auth._BaseJWTAuth. apps.caregiver_portal
-    # (mounted at /portal below, with its own auth=caregiver_auth) is the
-    # only caregiver-reachable surface in the whole API.
-    auth=[jwt_auth, api_key_auth],
+    # jwt_auth is the default for every router that doesn't set its own.
+    # X-API-Key is NOT accepted by default — the partner-reachable routers
+    # opt in explicitly via apps.accounts.auth.partner_auth. This keeps the
+    # auth/organization/audit/notifications/integrations surfaces JWT-only.
+    # jwt_auth also excludes caregiver-role tokens by construction (see
+    # apps.accounts.auth._BaseJWTAuth); apps.caregiver_portal (mounted at
+    # /portal, auth=caregiver_auth) is the only caregiver-reachable surface.
+    auth=jwt_auth,
 )
 
 @api.exception_handler(ObjectDoesNotExist)
@@ -71,6 +77,41 @@ api.add_router('/', notifications_router, tags=['Notifications'])
 api.add_router('/integrations', integrations_router, tags=['Integrations'])
 api.add_router('/', audit_router, tags=['Audit'])
 api.add_router('/organization', tenants_router, tags=['Organization'])
+
+
+@api.get('/partner/whoami', auth=partner_auth, tags=['Partner API'])
+def partner_whoami(request):
+    """Cheap read-only endpoint for verifying a partner integration credential.
+
+    Call it with `X-API-Key: dcm_...` (or a normal Bearer token). It echoes
+    back which organization the caller is scoped to and, for an API key,
+    whether the key has write access. A read-only key can call this; any
+    write request (POST/PUT/PATCH/DELETE) with a read-only key gets 401.
+    """
+    api_key = getattr(request, 'api_key', None)
+    org = getattr(request, 'tenant', None)
+
+    external_admin_id = api_key.external_admin_id if api_key is not None else None
+    facility_name = None
+    if external_admin_id is not None:
+        from apps.tenants.models import OrganizationTpmsAdminId
+        facility_name = (
+            OrganizationTpmsAdminId.objects
+            .filter(organization_id=api_key.organization_id, admin_id=external_admin_id)
+            .values_list('facility_name', flat=True)
+            .first()
+        ) or None
+
+    return {
+        'authenticated': True,
+        'auth_method': 'api_key' if api_key is not None else 'jwt',
+        'organization_id': org.pk if org is not None else None,
+        'organization_name': org.name if org is not None else None,
+        'api_key_name': api_key.name if api_key is not None else None,
+        'can_write': api_key.can_write if api_key is not None else True,
+        'external_admin_id': external_admin_id,
+        'tpms_facility_name': facility_name,
+    }
 
 
 @api.get('/dashboard', auth=jwt_auth, tags=['System'])

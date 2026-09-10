@@ -14,7 +14,7 @@ from django_tenants.utils import schema_context
 from ninja.errors import HttpError
 
 from apps.accounts.api import login
-from apps.accounts.auth import JWTAuth, CaregiverJWTAuth, create_access_token
+from apps.accounts.auth import JWTAuth, CaregiverJWTAuth, create_access_token, decode_token
 from apps.accounts.models import User
 from apps.accounts.schemas import LoginRequest
 from apps.clients.models import Client
@@ -111,6 +111,37 @@ class LoginDispatchTests(TestCase):
             with self.assertRaises(HttpError) as ctx:
                 self._login(CLIENT_PORTAL_LOGIN_PAYLOAD)
             self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_superuser_can_login_with_local_password_when_tpms_rejects(self):
+        superuser = User.objects.create_superuser(
+            email='super@example.com',
+            password='secret-pass',
+            first_name='Super',
+            last_name='Admin',
+        )
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            with patch('apps.accounts.api.tpms_authenticate_raw', side_effect=TpmsAuthError('Credentials do not match our records')):
+                tokens = login(self.request, LoginRequest(email=superuser.email, password='secret-pass'))
+
+            self.assertEqual(tokens.user_id, superuser.id)
+            self.assertEqual(tokens.role, User.Role.ADMIN)
+            self.assertTrue(decode_token(tokens.access_token)['is_superuser'])
+
+    def test_regular_local_user_cannot_login_when_tpms_rejects(self):
+        local_user = User.objects.create_user(
+            email='local@example.com',
+            password='secret-pass',
+            first_name='Local',
+            last_name='User',
+            role=User.Role.ADMIN,
+            organization=self.org,
+        )
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            with patch('apps.accounts.api.tpms_authenticate_raw', side_effect=TpmsAuthError('Credentials do not match our records')):
+                with self.assertRaises(HttpError) as ctx:
+                    login(self.request, LoginRequest(email=local_user.email, password='secret-pass'))
+
+            self.assertEqual(ctx.exception.status_code, 401)
 
     def test_client_portal_login_wrong_practice_is_401(self):
         with schema_context(self.org.schema_name), tenant_context(self.org.pk):

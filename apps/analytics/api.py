@@ -1,23 +1,26 @@
 from datetime import date, timedelta
+from django.db import models
 from django.utils import timezone
 from ninja import Router
 from ninja.errors import HttpError
 
-from apps.accounts.auth import jwt_auth
+from apps.accounts.api import _same_practice_q
+from apps.accounts.auth import partner_auth
 from apps.programs.models import Program, Target, ProgramModule
-from .models import GraphAnnotation, ClientAnnotation
+from .models import GraphAnnotation, ClientAnnotation, SavedInsightGraph
 from .schemas import (
-    TrialDataPointSchema, BehaviorDataPointSchema,
+    TrialDataPointSchema, BehaviorDataPointSchema, ABCDataPointSchema,
     ProgramSummarySchema, ModuleSummarySchema, TargetSummarySchema,
     GraphAnnotationSchema, GraphAnnotationCreateRequest, GraphAnnotationUpdateRequest,
     ClientAnnotationSchema, ClientAnnotationCreateRequest, ClientAnnotationUpdateRequest,
+    SavedInsightGraphSchema, SavedInsightGraphCreateRequest, SavedInsightGraphUpdateRequest,
 )
 from .services import (
-    get_trial_data_by_day, get_behavior_data_by_day, get_program_summary, get_module_summary,
+    get_trial_data_by_day, get_behavior_data_by_day, get_abc_data_by_day, get_program_summary, get_module_summary,
     get_program_mastery_criteria, get_client_progress_report, get_client_progress_overview,
 )
 
-router = Router(auth=jwt_auth)
+router = Router(auth=partner_auth)
 
 _DEFAULT_DAYS = 90
 
@@ -33,11 +36,47 @@ def _require_supervisor(request):
         raise HttpError(403, 'Supervisor or admin access required')
 
 
+def _visible_saved_insights_qs(request):
+    return SavedInsightGraph.objects.filter(_same_practice_q(request.user, 'created_by__')).filter(
+        models.Q(created_by=request.user)
+        | models.Q(visibility=SavedInsightGraph.Visibility.EVERYONE)
+        | models.Q(visibility=SavedInsightGraph.Visibility.ROLES, roles__contains=[request.user.role])
+    )
+
+
+def _serialize_saved_insight(view: SavedInsightGraph, request) -> dict:
+    return {
+        'id': view.id,
+        'external_client_id': view.external_client_id,
+        'program_id': view.program_id,
+        'name': view.name,
+        'config': view.config,
+        'visibility': view.visibility,
+        'roles': view.roles,
+        'is_default': view.is_default,
+        'display_order': view.display_order,
+        'created_by_id': view.created_by_id,
+        'is_mine': view.created_by_id == request.user.id,
+        'created_at': view.created_at,
+        'updated_at': view.updated_at,
+    }
+
+
+def _clear_default_saved_insights(view: SavedInsightGraph, request):
+    qs = SavedInsightGraph.objects.filter(_same_practice_q(request.user, 'created_by__'))
+    if view.program_id:
+        qs = qs.filter(program_id=view.program_id)
+    else:
+        qs = qs.filter(program__isnull=True, external_client_id=view.external_client_id)
+    qs.exclude(id=view.id).update(is_default=False)
+
+
 # ---------------------------------------------------------------------------
 # Trial graph data
 # ---------------------------------------------------------------------------
 
-_VALID_GROUP_BY = {'target', 'prompt_level', 'user'}
+_VALID_GROUP_BY = {'target', 'prompt_level', 'user', 'module', 'submodule'}
+_VALID_ABC_GROUP_BY = {'antecedent', 'behavior', 'consequence', 'setting'}
 
 
 @router.get('/analytics/programs/{program_id}/trials', response=list[TrialDataPointSchema])
@@ -47,7 +86,7 @@ def program_trial_data(
     date_from: date | None = None,
     date_to: date | None = None,
     target_ids: str | None = None,   # comma-separated IDs to filter to specific targets
-    group_by: str = 'target',        # 'target' (default) | 'prompt_level' | 'user'
+    group_by: str = 'target',        # 'target' (default) | 'prompt_level' | 'user' | 'module' | 'submodule'
 ):
     """
     Daily trial accuracy for a program, grouped into data series by `group_by`.
@@ -95,6 +134,34 @@ def program_behavior_data(
         Target.objects.filter(program_id=program_id).values_list('id', flat=True)
     )
     return get_behavior_data_by_day(target_ids, frm, to)
+
+
+@router.get('/analytics/clients/{client_id}/abc', response=list[ABCDataPointSchema])
+def client_abc_data(
+    request,
+    client_id: int,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    group_by: str = 'behavior',
+    antecedent: str | None = None,
+    behavior: str | None = None,
+    consequence: str | None = None,
+    setting: str | None = None,
+):
+    """Daily ABC event counts grouped by antecedent, behavior, consequence, or setting."""
+    if group_by not in _VALID_ABC_GROUP_BY:
+        raise HttpError(400, f'Invalid group_by: {group_by}')
+    frm, to = _resolve_dates(date_from, date_to)
+    return get_abc_data_by_day(
+        client_id,
+        frm,
+        to,
+        group_by=group_by,
+        antecedent=antecedent,
+        behavior=behavior,
+        consequence=consequence,
+        setting=setting,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +302,85 @@ def module_summary(
         'date_to': to,
         'targets': targets,
     }
+
+
+# ---------------------------------------------------------------------------
+# Saved insight graphs
+# ---------------------------------------------------------------------------
+
+@router.get('/analytics/saved-insights', response=list[SavedInsightGraphSchema])
+def list_saved_insights(
+    request,
+    program_id: int | None = None,
+    external_client_id: int | None = None,
+):
+    qs = _visible_saved_insights_qs(request)
+    if program_id is not None:
+        qs = qs.filter(program_id=program_id)
+    if external_client_id is not None:
+        qs = qs.filter(external_client_id=external_client_id)
+    return [_serialize_saved_insight(view, request) for view in qs]
+
+
+@router.post('/analytics/saved-insights', response={201: SavedInsightGraphSchema})
+def create_saved_insight(request, data: SavedInsightGraphCreateRequest):
+    if data.visibility not in SavedInsightGraph.Visibility.values:
+        raise HttpError(400, f'Invalid visibility: {data.visibility}')
+    if not data.program_id and not data.external_client_id:
+        raise HttpError(400, 'program_id or external_client_id is required')
+
+    program = None
+    if data.program_id:
+        try:
+            program = Program.objects.get(id=data.program_id)
+        except Program.DoesNotExist:
+            raise HttpError(404, 'Program not found')
+
+    view = SavedInsightGraph.objects.create(
+        external_client_id=data.external_client_id,
+        program=program,
+        name=data.name,
+        config=data.config,
+        visibility=data.visibility,
+        roles=data.roles,
+        is_default=data.is_default,
+        display_order=data.display_order,
+        created_by=request.user,
+    )
+    if view.is_default:
+        _clear_default_saved_insights(view, request)
+    return 201, _serialize_saved_insight(view, request)
+
+
+@router.patch('/analytics/saved-insights/{view_id}', response=SavedInsightGraphSchema)
+def update_saved_insight(request, view_id: int, data: SavedInsightGraphUpdateRequest):
+    try:
+        view = _visible_saved_insights_qs(request).get(id=view_id)
+    except SavedInsightGraph.DoesNotExist:
+        raise HttpError(404, 'Saved insight graph not found')
+    if view.created_by_id != request.user.id and request.user.role not in ('admin', 'supervisor'):
+        raise HttpError(403, 'Only the creator or a supervisor/admin can update this saved insight graph')
+    if data.visibility is not None and data.visibility not in SavedInsightGraph.Visibility.values:
+        raise HttpError(400, f'Invalid visibility: {data.visibility}')
+
+    for field, value in data.dict(exclude_none=True).items():
+        setattr(view, field, value)
+    view.save()
+    if view.is_default:
+        _clear_default_saved_insights(view, request)
+    return _serialize_saved_insight(view, request)
+
+
+@router.delete('/analytics/saved-insights/{view_id}', response={204: None})
+def delete_saved_insight(request, view_id: int):
+    try:
+        view = _visible_saved_insights_qs(request).get(id=view_id)
+    except SavedInsightGraph.DoesNotExist:
+        raise HttpError(404, 'Saved insight graph not found')
+    if view.created_by_id != request.user.id and request.user.role not in ('admin', 'supervisor'):
+        raise HttpError(403, 'Only the creator or a supervisor/admin can delete this saved insight graph')
+    view.delete()
+    return 204, None
 
 
 # ---------------------------------------------------------------------------

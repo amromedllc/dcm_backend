@@ -4,12 +4,12 @@ from django.utils import timezone
 from ninja import Router
 from ninja.errors import HttpError
 
-from apps.accounts.auth import jwt_auth
+from apps.accounts.auth import partner_auth
 from . import tasks
 from .models import Export
 from .schemas import ExportSchema, ExportCreateRequest, ExportDownloadResponse
 
-router = Router(auth=jwt_auth)
+router = Router(auth=partner_auth)
 
 _GENERATE_MAP = {
     'trial_csv': tasks.generate_trial_csv,

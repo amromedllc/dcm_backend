@@ -1,4 +1,5 @@
 from datetime import date as Date, datetime
+from typing import Any
 from ninja import Schema
 
 
@@ -35,6 +36,14 @@ class BehaviorDataPointSchema(Schema):
     measurement_value: float = 0.0
     measurement_label: str = 'Frequency'
     measurement_unit: str = 'count'
+
+
+class ABCDataPointSchema(Schema):
+    date: Date
+    series_id: str
+    series_name: str
+    count: int
+    total_duration_seconds: int
 
 
 class TargetSummarySchema(Schema):
@@ -141,3 +150,43 @@ class ClientAnnotationUpdateRequest(Schema):
     color: str | None = None
     style: str | None = None
     notes: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Saved insights graphs
+# ---------------------------------------------------------------------------
+
+class SavedInsightGraphSchema(Schema):
+    id: int
+    external_client_id: int | None
+    program_id: int | None
+    name: str
+    config: dict[str, Any]
+    visibility: str
+    roles: list[str]
+    is_default: bool
+    display_order: int
+    created_by_id: int | None
+    is_mine: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class SavedInsightGraphCreateRequest(Schema):
+    external_client_id: int | None = None
+    program_id: int | None = None
+    name: str
+    config: dict[str, Any]
+    visibility: str = 'private'
+    roles: list[str] = []
+    is_default: bool = False
+    display_order: int = 0
+
+
+class SavedInsightGraphUpdateRequest(Schema):
+    name: str | None = None
+    config: dict[str, Any] | None = None
+    visibility: str | None = None
+    roles: list[str] | None = None
+    is_default: bool | None = None
+    display_order: int | None = None

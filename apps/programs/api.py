@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import models
@@ -11,13 +12,16 @@ from django.utils import timezone
 from PIL import Image
 
 from apps.accounts.api import _same_practice_q
-from apps.accounts.auth import jwt_auth
+from apps.accounts.auth import partner_auth
 from apps.accounts.permissions import require_permission
-from apps.central_library.models import CentralProgram, CentralProgramFolder, KnowledgeBaseModule
+from apps.central_library.models import (
+    CentralProgram, CentralProgramFolder, CentralTarget,
+    KnowledgeBaseModule, KnowledgeBaseTopic,
+)
 from shared.uploads import validate_image_upload
 from .models import (
     Program, ProgramMaterial, Target, PromptingTemplate,
-    WorkflowTemplate, MaintenanceSchedule, FadingTemplate,
+    WorkflowTemplate,
     Lesson, LessonProgram,
     TreatmentArea, ProgramTag, ProgramDataField, TargetStatus,
     TargetStatusChange, TargetPromptLevelChange, ProgramFolder,
@@ -32,13 +36,13 @@ from .schemas import (
     ReorderModulesRequest, ReorderSubmodulesRequest,
     PromptingTemplateSchema, PromptingTemplateCreateRequest, PromptingTemplateUpdateRequest,
     WorkflowTemplateSchema, WorkflowTemplateCreateRequest, WorkflowTemplateUpdateRequest,
-    MaintenanceScheduleSchema, MaintenanceScheduleCreateRequest, MaintenanceScheduleUpdateRequest,
-    FadingTemplateSchema, FadingTemplateCreateRequest, FadingTemplateUpdateRequest,
     LessonSchema, LessonCreateRequest, LessonUpdateRequest, AddProgramToLessonRequest,
     LessonProgramSchema,
     OrgProgramSchema, OrgProgramCreateRequest, AssignOrgProgramRequest,
     ProgramFolderSchema, ProgramFolderRequest, SetProgramFolderRequest,
-    CentralProgramFolderSchema, ImportCentralFolderResult,
+    CentralProgramFolderSchema, CentralProgramFolderRequest, ImportCentralFolderResult,
+    CentralProgramRequest, CentralProgramUpdateRequest,
+    CentralTargetSchema, CentralTargetRequest, CentralTargetUpdateRequest,
     TreatmentAreaSchema, TreatmentAreaRequest,
     ProgramTagSchema, ProgramTagRequest,
     ProgramDataFieldSchema, ProgramDataFieldRequest,
@@ -47,10 +51,11 @@ from .schemas import (
     TargetStatusSchema, TargetStatusRequest, TargetStatusUpdateRequest,
     ProgramModuleSchema, ProgramModuleRequest, ProgramSubmoduleSchema, ProgramSubmoduleRequest,
     SavedTableViewSchema, SavedTableViewCreateRequest,
-    KnowledgeBaseModuleSchema,
+    KnowledgeBaseModuleSchema, KnowledgeBaseModuleRequest, KnowledgeBaseModuleUpdateRequest,
+    KnowledgeBaseTopicSchema, KnowledgeBaseTopicRequest, KnowledgeBaseTopicUpdateRequest,
 )
 
-router = Router(auth=jwt_auth)
+router = Router(auth=partner_auth)
 
 
 def _require_supervisor(request):
@@ -133,7 +138,7 @@ def _require_settings_permission(request, permission: str):
 
 def _settings_qs(model, request, *, include_org_defaults: bool = False):
     """Practice-scoped queryset for shared facility settings (treatment areas,
-    tags, statuses, prompting/fading/workflow templates, maintenance schedules,
+    tags, statuses, prompting/fading/workflow templates,
     data fields). These carry `created_by` but were previously read/written
     with no practice filter at all — Model.objects.all() — so a TPMS practice
     sharing this org's schema with another practice (see
@@ -183,6 +188,142 @@ def _check_unique_name(model, request, name: str, *, exclude_id: int | None = No
         qs = qs.exclude(id=exclude_id)
     if qs.exists():
         raise HttpError(409, f'{model.__name__} named "{name}" already exists')
+
+
+def _set_single_org_default(model, request, instance) -> None:
+    if getattr(instance, 'is_org_default', False):
+        _settings_qs(model, request).exclude(id=instance.id).update(is_org_default=False)
+
+
+def _default_prompting_template_id(request) -> int | None:
+    template = _settings_qs(PromptingTemplate, request).filter(is_org_default=True).first()
+    return template.id if template else None
+
+
+def _normalize_hidden_prompt_labels(labels: list[str] | None) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for label in labels or []:
+        clean = str(label).strip()
+        if clean and clean not in seen:
+            seen.add(clean)
+            result.append(clean)
+    return result
+
+
+def _requires_prompting_template(measurement_type: str, program: Program | None = None) -> bool:
+    if program and program.category == Program.Category.ABC_RECORDING:
+        return False
+    return measurement_type not in {
+        Target.MeasurementType.INSTRUCTIONS,
+    }
+
+
+def _validate_prompting_required(measurement_type: str, prompting_template_id: int | None, program: Program) -> None:
+    if _requires_prompting_template(measurement_type, program) and not prompting_template_id:
+        raise HttpError(400, 'Prompt level template is required to collect data for this target')
+
+
+def _is_probe_session_for_target(session, target_id: int) -> bool:
+    snapshot = session.program_snapshot or {}
+    for program in snapshot.get('programs') or []:
+        for target in program.get('targets') or []:
+            if target.get('id') == target_id and target.get('status') == 'probe':
+                return True
+    return False
+
+
+def _fadeable_level_indexes(template: PromptingTemplate) -> list[int]:
+    return [
+        idx
+        for idx, level in enumerate(template.levels)
+        if not level.get('exclude_from_fading')
+    ]
+
+
+def _errorless_prompt_level_index(template: PromptingTemplate) -> int:
+    fadeable_indexes = _fadeable_level_indexes(template)
+    return fadeable_indexes[-1] if fadeable_indexes else len(template.levels) - 1
+
+
+def _latest_probe_session(target: Target):
+    from apps.sessions.models import SessionRun
+
+    sessions = (
+        SessionRun.objects
+        .filter(
+            status__in=[SessionRun.Status.SUBMITTED, SessionRun.Status.APPROVED],
+            trial_events__target_id=target.id,
+        )
+        .distinct()
+        .order_by('-submitted_at', '-started_at', '-id')
+    )
+    return next((session for session in sessions if _is_probe_session_for_target(session, target.id)), None)
+
+
+def _last_probe_trial_prompt_level_index(template: PromptingTemplate, target: Target) -> int | None:
+    session = _latest_probe_session(target)
+    if not session:
+        return None
+
+    from apps.sessions.models import TrialEvent
+
+    trial = (
+        TrialEvent.objects
+        .filter(session_run=session, target_id=target.id)
+        .order_by('-recorded_at', '-trial_number', '-id')
+        .first()
+    )
+    if not trial:
+        return None
+    return next(
+        (idx for idx, level in enumerate(template.levels) if level.get('label') == trial.prompt_level_label),
+        None,
+    )
+
+
+def _mass_trial_probe_prompt_level_index(template: PromptingTemplate, target: Target, threshold: int) -> int | None:
+    session = _latest_probe_session(target)
+    if not session:
+        return None
+
+    from apps.sessions.models import TrialEvent
+
+    labels = list(
+        TrialEvent.objects
+        .filter(session_run=session, target_id=target.id)
+        .values_list('prompt_level_label', flat=True)
+    )
+    if not labels:
+        return None
+    threshold = max(1, threshold)
+    for idx in _fadeable_level_indexes(template):
+        label = template.levels[idx].get('label')
+        if label and labels.count(label) >= threshold:
+            return idx
+    return None
+
+
+def _initial_prompt_level_index(template: PromptingTemplate | None, target: Target | None = None) -> int:
+    if not template or not template.levels:
+        return 0
+    settings = template.fading_hint_settings or {}
+    strategy = settings.get('initial_prompt_strategy')
+    if strategy == 'last_probe_trial' and target:
+        idx = _last_probe_trial_prompt_level_index(template, target)
+        return idx if idx is not None else _errorless_prompt_level_index(template)
+    if strategy == 'mass_trial_probe' and target:
+        idx = _mass_trial_probe_prompt_level_index(template, target, int(settings.get('probe_threshold') or 1))
+        return idx if idx is not None else _errorless_prompt_level_index(template)
+    if strategy == 'errorless':
+        return _errorless_prompt_level_index(template)
+
+    label = settings.get('initial_prompt_level')
+    if not label and template.fading_hint_mode != PromptingTemplate.FadingHintMode.NONE:
+        return _errorless_prompt_level_index(template)
+    if not label:
+        return 0
+    return next((idx for idx, level in enumerate(template.levels) if level.get('label') == label), 0)
 
 
 def _serialize_saved_view(view: SavedTableView, request) -> dict:
@@ -258,6 +399,7 @@ def _serialize_knowledge_base_module(module: KnowledgeBaseModule) -> dict:
         'overview': module.overview,
         'audience': module.audience,
         'display_order': module.display_order,
+        'is_active': module.is_active,
         'updated_at': module.updated_at,
         'topics': [
             {
@@ -283,6 +425,129 @@ def list_knowledge_base_modules(request):
             .order_by('display_order', 'title')
         )
         return [_serialize_knowledge_base_module(module) for module in modules]
+
+
+def _require_superadmin(request) -> None:
+    if not request.user.is_superuser:
+        raise HttpError(403, 'Superadmin access required')
+
+
+def _validate_knowledge_base_icon(icon: str) -> None:
+    if icon not in KnowledgeBaseModule.Icon.values:
+        raise HttpError(400, f'Invalid icon "{icon}"')
+
+
+def _get_knowledge_base_module_or_404(module_id: int) -> KnowledgeBaseModule:
+    try:
+        return KnowledgeBaseModule.objects.prefetch_related('topics').get(id=module_id)
+    except KnowledgeBaseModule.DoesNotExist:
+        raise HttpError(404, 'Knowledge base article not found')
+
+
+def _get_knowledge_base_topic_or_404(topic_id: int) -> KnowledgeBaseTopic:
+    try:
+        return KnowledgeBaseTopic.objects.select_related('module').get(id=topic_id)
+    except KnowledgeBaseTopic.DoesNotExist:
+        raise HttpError(404, 'Knowledge base topic not found')
+
+
+def _serialize_knowledge_base_topic(topic: KnowledgeBaseTopic) -> dict:
+    return {
+        'id': topic.id,
+        'title': topic.title,
+        'summary': topic.summary,
+        'items': topic.items,
+        'display_order': topic.display_order,
+    }
+
+
+@router.get('/superadmin/knowledge-base/modules', response=list[KnowledgeBaseModuleSchema])
+def superadmin_list_knowledge_base_modules(request):
+    _require_superadmin(request)
+    modules = (
+        KnowledgeBaseModule.objects
+        .prefetch_related('topics')
+        .order_by('display_order', 'title')
+    )
+    return [_serialize_knowledge_base_module(module) for module in modules]
+
+
+@router.post('/superadmin/knowledge-base/modules', response={201: KnowledgeBaseModuleSchema})
+def superadmin_create_knowledge_base_module(request, data: KnowledgeBaseModuleRequest):
+    _require_superadmin(request)
+    _validate_knowledge_base_icon(data.icon)
+    module = KnowledgeBaseModule.objects.create(
+        slug=data.slug,
+        title=data.title,
+        path=data.path,
+        icon=data.icon,
+        overview=data.overview,
+        audience=data.audience,
+        display_order=data.display_order,
+        is_active=data.is_active,
+        created_by=request.user,
+    )
+    return 201, _serialize_knowledge_base_module(module)
+
+
+@router.get('/superadmin/knowledge-base/modules/{module_id}', response=KnowledgeBaseModuleSchema)
+def superadmin_get_knowledge_base_module(request, module_id: int):
+    _require_superadmin(request)
+    return _serialize_knowledge_base_module(_get_knowledge_base_module_or_404(module_id))
+
+
+@router.patch('/superadmin/knowledge-base/modules/{module_id}', response=KnowledgeBaseModuleSchema)
+def superadmin_update_knowledge_base_module(request, module_id: int, data: KnowledgeBaseModuleUpdateRequest):
+    _require_superadmin(request)
+    module = _get_knowledge_base_module_or_404(module_id)
+    updates = data.dict(exclude_unset=True)
+    if 'icon' in updates:
+        _validate_knowledge_base_icon(updates['icon'])
+    for field, value in updates.items():
+        setattr(module, field, value)
+    module.save()
+    return _serialize_knowledge_base_module(module)
+
+
+@router.delete('/superadmin/knowledge-base/modules/{module_id}', response={204: None})
+def superadmin_delete_knowledge_base_module(request, module_id: int):
+    _require_superadmin(request)
+    module = _get_knowledge_base_module_or_404(module_id)
+    module.delete()
+    return 204, None
+
+
+@router.post('/superadmin/knowledge-base/modules/{module_id}/topics', response={201: KnowledgeBaseTopicSchema})
+def superadmin_create_knowledge_base_topic(request, module_id: int, data: KnowledgeBaseTopicRequest):
+    _require_superadmin(request)
+    module = _get_knowledge_base_module_or_404(module_id)
+    topic = KnowledgeBaseTopic.objects.create(
+        module=module,
+        title=data.title,
+        summary=data.summary,
+        items=data.items,
+        display_order=data.display_order,
+        is_active=data.is_active,
+    )
+    return 201, _serialize_knowledge_base_topic(topic)
+
+
+@router.patch('/superadmin/knowledge-base/topics/{topic_id}', response=KnowledgeBaseTopicSchema)
+def superadmin_update_knowledge_base_topic(request, topic_id: int, data: KnowledgeBaseTopicUpdateRequest):
+    _require_superadmin(request)
+    topic = _get_knowledge_base_topic_or_404(topic_id)
+    for field, value in data.dict(exclude_unset=True).items():
+        setattr(topic, field, value)
+    topic.save()
+    return _serialize_knowledge_base_topic(topic)
+
+
+@router.delete('/superadmin/knowledge-base/topics/{topic_id}', response={204: None})
+def superadmin_delete_knowledge_base_topic(request, topic_id: int):
+    _require_superadmin(request)
+    topic = _get_knowledge_base_topic_or_404(topic_id)
+    topic.delete()
+    return 204, None
 
 
 PROGRAM_MATERIAL_IMAGE_TYPES = {'image/jpeg', 'image/png'}
@@ -345,10 +610,12 @@ def _serialize_program(program: Program, request=None, include_targets: bool = F
         'baseline_notes': program.baseline_notes,
         'objective': program.objective,
         'instructions': program.instructions,
+        'instructions_html': program.instructions_html,
+        'professional_instructions_html': program.professional_instructions_html,
+        'custom_field_values': program.custom_field_values,
         'prompting_template_id': program.prompting_template_id,
+        'hidden_prompt_level_labels': program.hidden_prompt_level_labels,
         'workflow_template_id': program.workflow_template_id,
-        'maintenance_schedule_id': program.maintenance_schedule_id,
-        'fading_template_id': program.fading_template_id,
         'image_url': _optimized_program_image_url(request, program.image) if request is not None else None,
         'display_order': program.display_order,
         'archived_at': program.archived_at,
@@ -431,6 +698,7 @@ def create_program(request, data: ProgramCreateRequest):
     _require_supervisor(request)
     _assert_client_accessible(request, data.client_id)
     _validate_treatment_area_and_tags(request, data.treatment_area, data.tags)
+    prompting_template_id = data.prompting_template_id or _default_prompting_template_id(request)
     program = Program.objects.create(
         external_client_id=data.client_id,
         name=data.name,
@@ -441,10 +709,12 @@ def create_program(request, data: ProgramCreateRequest):
         baseline_notes=data.baseline_notes,
         objective=data.objective,
         instructions=data.instructions,
-        prompting_template_id=data.prompting_template_id,
+        instructions_html=data.instructions_html,
+        professional_instructions_html=data.professional_instructions_html,
+        custom_field_values=data.custom_field_values,
+        prompting_template_id=prompting_template_id,
+        hidden_prompt_level_labels=_normalize_hidden_prompt_labels(data.hidden_prompt_level_labels),
         workflow_template_id=data.workflow_template_id,
-        maintenance_schedule_id=data.maintenance_schedule_id,
-        fading_template_id=data.fading_template_id,
         display_order=data.display_order,
         created_by=request.user,
     )
@@ -462,6 +732,8 @@ def update_program(request, program_id: int, data: ProgramUpdateRequest):
     _require_supervisor(request)
     program = _get_program_or_404(request, program_id)
     updates = data.dict(exclude_none=True)
+    if updates.get('category') == Program.Category.INSTRUCTIONS_ONLY and program.targets.exists():
+        raise HttpError(400, 'Cannot switch to Instructions Only while this program still has targets — remove them first')
     if 'treatment_area' in updates or 'tags' in updates:
         _validate_treatment_area_and_tags(
             request,
@@ -469,17 +741,18 @@ def update_program(request, program_id: int, data: ProgramUpdateRequest):
             updates.get('tags', program.tags),
         )
     for field, value in updates.items():
+        if field == 'hidden_prompt_level_labels':
+            value = _normalize_hidden_prompt_labels(value)
         setattr(program, field, value)
     program.save()
     if 'workflow_template_id' in updates:
-        program.targets.update(workflow_template_id=program.workflow_template_id)
+        _apply_program_workflow_to_compatible_targets(request, program)
     if 'prompting_template_id' in updates:
-        program.targets.update(
-            prompting_template_id=program.prompting_template_id,
-            current_prompt_level_index=0,
-        )
-    if 'fading_template_id' in updates:
-        program.targets.update(fading_template_id=program.fading_template_id)
+        template = _settings_qs(PromptingTemplate, request).filter(id=program.prompting_template_id).first()
+        program.targets.update(prompting_template_id=program.prompting_template_id)
+        for target in program.targets.all():
+            target.current_prompt_level_index = _initial_prompt_level_index(template, target)
+            target.save(update_fields=['current_prompt_level_index', 'updated_at'])
 
     if updates:
         from apps.notifications.service import notify_program_modified
@@ -627,6 +900,61 @@ def _resolve_measurement_fields(
     return resolved_measurement, resolved_timer
 
 
+def _workflow_objective_key(template: WorkflowTemplate) -> str:
+    for phase in template.phases or []:
+        objective_key = str(phase.get('objective_key') or '')
+        if objective_key:
+            return objective_key
+    return ''
+
+
+def _workflow_matches_measurement(template: WorkflowTemplate, measurement: str) -> bool:
+    expected = {
+        Target.Measurement.PERCENT_CORRECT: 'percent_correct',
+        Target.Measurement.FREQUENCY: 'frequency',
+        Target.Measurement.RATE_PER_HOUR: 'rate_per_hour',
+        Target.Measurement.RATE_PER_MINUTE: 'rate_per_minute',
+        Target.Measurement.TOTAL_OBSERVED_DURATION: 'total_duration',
+        Target.Measurement.MIN_OBSERVED_DURATION: 'min_duration',
+        Target.Measurement.MAX_OBSERVED_DURATION: 'max_duration',
+        Target.Measurement.AVG_OBSERVED_DURATION: 'avg_duration',
+    }.get(measurement, 'percent_correct')
+    key = _workflow_objective_key(template)
+    if expected == 'percent_correct':
+        return key in {'', 'increase_percent_correct', 'reduce_percentage'} or 'percent' in key
+    return expected in key
+
+
+def _validate_workflow_matches_measurement(
+    request,
+    workflow_template_id: int | None,
+    measurement: str,
+    field_name: str = 'workflow_template_id',
+) -> None:
+    if workflow_template_id is None:
+        return
+    template = _settings_qs(WorkflowTemplate, request).filter(id=workflow_template_id).first()
+    if not template:
+        raise HttpError(400, f'Invalid {field_name}: {workflow_template_id}')
+    if not _workflow_matches_measurement(template, measurement):
+        raise HttpError(400, f'{field_name} does not match the selected measurement')
+
+
+def _apply_program_workflow_to_compatible_targets(request, program: Program) -> None:
+    if not program.workflow_template_id:
+        program.targets.update(workflow_template_id=None)
+        return
+
+    template = _settings_qs(WorkflowTemplate, request).filter(id=program.workflow_template_id).first()
+    if not template:
+        return
+    for target in program.targets.all():
+        next_workflow_id = program.workflow_template_id if _workflow_matches_measurement(template, target.measurement) else None
+        if target.workflow_template_id != next_workflow_id:
+            target.workflow_template_id = next_workflow_id
+            target.save(update_fields=['workflow_template_id', 'updated_at'])
+
+
 def _default_sub_item_status(target: Target, index: int, total: int) -> str:
     if target.sub_item_progression == Target.SubItemProgression.TOTAL_TASK:
         return TargetSubItem.Status.ACQUISITION
@@ -660,8 +988,7 @@ def _resolve_sub_item_config(request, target: Target, raw: dict) -> dict:
     if request is not None:
         if pt_id is not None and not _settings_qs(PromptingTemplate, request).filter(id=pt_id).exists():
             raise HttpError(400, f'Invalid prompting_template_id on step: {pt_id}')
-        if wf_id is not None and not _settings_qs(WorkflowTemplate, request).filter(id=wf_id).exists():
-            raise HttpError(400, f'Invalid workflow_template_id on step: {wf_id}')
+        _validate_workflow_matches_measurement(request, wf_id, measurement, 'workflow_template_id on step')
 
     return {
         'measurement_type': mt,
@@ -686,11 +1013,16 @@ def _validate_default_sub_fields(request, data: dict) -> None:
 
     for field, model in (
         ('default_sub_prompting_template_id', PromptingTemplate),
-        ('default_sub_workflow_template_id', WorkflowTemplate),
     ):
         fk_id = data.get(field)
         if fk_id is not None and not _settings_qs(model, request).filter(id=fk_id).exists():
             raise HttpError(400, f'Invalid {field}: {fk_id}')
+    _validate_workflow_matches_measurement(
+        request,
+        data.get('default_sub_workflow_template_id'),
+        data['default_sub_measurement'],
+        'default_sub_workflow_template_id',
+    )
 
 
 def _sync_target_sub_items(request, target: Target, items: list[dict], user=None) -> None:
@@ -798,19 +1130,21 @@ def list_targets(request, program_id: int, staff_view: bool = False):
 def create_target(request, program_id: int, data: TargetCreateRequest):
     _require_supervisor(request)
     program = _get_program_or_404(request, program_id)
+    if program.category == Program.Category.INSTRUCTIONS_ONLY:
+        raise HttpError(400, 'Instructions Only programs cannot have targets — they store reference information only')
     target_data = data.dict()
     if program.prompting_template_id and not target_data.get('prompting_template_id'):
         target_data['prompting_template_id'] = program.prompting_template_id
-    if program.workflow_template_id and not target_data.get('workflow_template_id'):
-        target_data['workflow_template_id'] = program.workflow_template_id
-    if program.fading_template_id and not target_data.get('fading_template_id'):
-        target_data['fading_template_id'] = program.fading_template_id
     if target_data.get('status'):
         _validate_target_status(request, target_data['status'])
     else:
         default_status = _settings_qs(TargetStatus, request, include_org_defaults=True).filter(is_default=True).first()
         target_data['status'] = default_status.key if default_status else 'waiting'
     _validate_measurement_type(target_data['measurement_type'], allow_legacy=False)
+    _validate_prompting_required(target_data['measurement_type'], target_data.get('prompting_template_id'), program)
+    if target_data.get('prompting_template_id'):
+        template = _settings_qs(PromptingTemplate, request).filter(id=target_data['prompting_template_id']).first()
+        target_data['current_prompt_level_index'] = _initial_prompt_level_index(template)
     _validate_interval_warning_sound(target_data.get('interval_warning_sound'))
     _require_sub_items_if_needed(target_data['measurement_type'], target_data['sub_items'])
     target_data['measurement'], target_data['timer_type'] = _resolve_measurement_fields(
@@ -818,6 +1152,12 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
         target_data.get('measurement'),
         target_data.get('timer_type'),
     )
+    if target_data.get('workflow_template_id'):
+        _validate_workflow_matches_measurement(request, target_data.get('workflow_template_id'), target_data['measurement'])
+    elif program.workflow_template_id:
+        program_workflow = _settings_qs(WorkflowTemplate, request).filter(id=program.workflow_template_id).first()
+        if program_workflow and _workflow_matches_measurement(program_workflow, target_data['measurement']):
+            target_data['workflow_template_id'] = program.workflow_template_id
     _validate_default_sub_fields(request, target_data)
     target = Target.objects.create(
         program=program,
@@ -844,8 +1184,10 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
         setattr(target, field, value)
     if 'prompting_template_id' in updates:
         # Swapping the level hierarchy invalidates whatever level index the
-        # target was previously faded to — reset to the most-intrusive level.
-        target.current_prompt_level_index = 0
+        # target was previously faded to. Use the template's configured
+        # initial prompt level when present.
+        template = _settings_qs(PromptingTemplate, request).filter(id=target.prompting_template_id).first()
+        target.current_prompt_level_index = _initial_prompt_level_index(template, target)
     if 'status' in updates:
         _validate_target_status(request, updates['status'])
     if 'interval_warning_sound' in updates:
@@ -853,6 +1195,11 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
     mt_changed = 'measurement_type' in updates
     if mt_changed:
         _validate_measurement_type(updates['measurement_type'], allow_legacy=True)
+    _validate_prompting_required(
+        updates.get('measurement_type', target.measurement_type),
+        updates.get('prompting_template_id', target.prompting_template_id),
+        target.program,
+    )
     if mt_changed or 'measurement' in updates or 'timer_type' in updates:
         # When the target type changes without an explicit measurement/timer,
         # reset those to the new type's default rather than carrying over a
@@ -862,6 +1209,13 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
             updates['measurement'] if 'measurement' in updates else (None if mt_changed else target.measurement),
             updates['timer_type'] if 'timer_type' in updates else (None if mt_changed else target.timer_type),
         )
+    if target.workflow_template_id:
+        if 'workflow_template_id' in updates:
+            _validate_workflow_matches_measurement(request, target.workflow_template_id, target.measurement)
+        else:
+            template = _settings_qs(WorkflowTemplate, request).filter(id=target.workflow_template_id).first()
+            if template and not _workflow_matches_measurement(template, target.measurement):
+                target.workflow_template_id = None
     default_sub_changed = any(
         k in updates for k in (
             'default_sub_measurement_type', 'default_sub_measurement',
@@ -1046,8 +1400,6 @@ def client_program_audit(request, client_id: int):
 _BULK_UPDATE_FK_MODELS = {
     'prompting_template_id': PromptingTemplate,
     'workflow_template_id': WorkflowTemplate,
-    'maintenance_schedule_id': MaintenanceSchedule,
-    'fading_template_id': FadingTemplate,
 }
 
 
@@ -1055,7 +1407,7 @@ _BULK_UPDATE_FK_MODELS = {
 def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest):
     """Update specific fields across multiple targets without touching unspecified fields."""
     _require_supervisor(request)
-    _get_program_or_404(request, program_id)
+    program = _get_program_or_404(request, program_id)
     updates = data.dict(exclude={'target_ids'}, exclude_none=True)
     if not updates:
         raise HttpError(400, 'No fields to update were provided')
@@ -1070,6 +1422,18 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
 
     if 'measurement_type' in updates:
         _validate_measurement_type(updates['measurement_type'], allow_legacy=True)
+
+    if ('measurement_type' in updates or 'prompting_template_id' in updates) and _requires_prompting_template(
+        updates.get('measurement_type') or Target.MeasurementType.DISCRETE_TRIAL,
+        program,
+    ) and updates.get('prompting_template_id') is None:
+        missing_prompt_templates = Target.objects.filter(
+            id__in=data.target_ids,
+            program_id=program_id,
+            prompting_template_id__isnull=True,
+        ).exists()
+        if missing_prompt_templates:
+            raise HttpError(400, 'Prompt level template is required to collect data for these targets')
 
     if updates.get('measurement_type') in _SUB_ITEM_MEASUREMENT_TYPES:
         missing_sub_items = Target.objects.filter(
@@ -1093,8 +1457,10 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
             updates['measurement_type'], None, None,
         )
 
+    template_for_prompt_index = None
     if 'prompting_template_id' in updates:
-        updates['current_prompt_level_index'] = 0
+        template = _settings_qs(PromptingTemplate, request).filter(id=updates['prompting_template_id']).first()
+        template_for_prompt_index = template
     updates['updated_at'] = timezone.now()
     updated = Target.objects.filter(
         id__in=data.target_ids,
@@ -1102,6 +1468,10 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
     ).update(**updates)
     if updated == 0:
         raise HttpError(400, 'No matching targets found for this program')
+    if template_for_prompt_index:
+        for target in Target.objects.filter(id__in=data.target_ids, program_id=program_id):
+            target.current_prompt_level_index = _initial_prompt_level_index(template_for_prompt_index, target)
+            target.save(update_fields=['current_prompt_level_index', 'updated_at'])
     return BulkUpdateResult(updated_count=updated, target_ids=data.target_ids)
 
 
@@ -1124,11 +1494,23 @@ def list_prompting_templates(request):
     return list(_settings_qs(PromptingTemplate, request))
 
 
+def _normalize_prompting_template_settings(payload: dict, template: PromptingTemplate | None = None) -> dict:
+    outcome = payload.get('outcome_measurement') or (
+        template.outcome_measurement if template else PromptingTemplate.OutcomeMeasurement.BINARY
+    )
+    if outcome == PromptingTemplate.OutcomeMeasurement.RATING_SCALE:
+        payload['fading_hint_mode'] = PromptingTemplate.FadingHintMode.NONE
+        payload['fading_hint_settings'] = {}
+    return payload
+
+
 @router.post('/programs/templates/prompting', response={201: PromptingTemplateSchema})
 def create_prompting_template(request, data: PromptingTemplateCreateRequest):
     _require_settings_permission(request, 'settings_prompting_templates_create')
     _check_unique_name(PromptingTemplate, request, data.name)
-    template = PromptingTemplate.objects.create(created_by=request.user, **data.dict())
+    payload = _normalize_prompting_template_settings(data.dict())
+    template = PromptingTemplate.objects.create(created_by=request.user, **payload)
+    _set_single_org_default(PromptingTemplate, request, template)
     return 201, template
 
 
@@ -1139,11 +1521,18 @@ def update_prompting_template(request, template_id: int, data: PromptingTemplate
         template = _settings_qs(PromptingTemplate, request).get(id=template_id)
     except PromptingTemplate.DoesNotExist:
         raise HttpError(404, 'Template not found')
+    payload = data.dict(exclude_none=True)
+    if template.is_locked:
+        unlocked_fields = set(payload) - {'is_locked'}
+        if unlocked_fields:
+            raise HttpError(423, 'Prompting template is locked')
     if data.name:
         _check_unique_name(PromptingTemplate, request, data.name, exclude_id=template_id)
-    for field, value in data.dict(exclude_none=True).items():
+    payload = _normalize_prompting_template_settings(payload, template)
+    for field, value in payload.items():
         setattr(template, field, value)
     template.save()
+    _set_single_org_default(PromptingTemplate, request, template)
     return template
 
 
@@ -1151,51 +1540,12 @@ def update_prompting_template(request, template_id: int, data: PromptingTemplate
 def delete_prompting_template(request, template_id: int):
     _require_settings_permission(request, 'settings_prompting_templates_delete')
     try:
-        _settings_qs(PromptingTemplate, request).get(id=template_id).delete()
+        template = _settings_qs(PromptingTemplate, request).get(id=template_id)
     except PromptingTemplate.DoesNotExist:
         raise HttpError(404, 'Template not found')
-    return 204, None
-
-
-# ---------------------------------------------------------------------------
-# Fading templates
-# ---------------------------------------------------------------------------
-
-@router.get('/programs/templates/fading', response=list[FadingTemplateSchema])
-def list_fading_templates(request):
-    return list(_settings_qs(FadingTemplate, request))
-
-
-@router.post('/programs/templates/fading', response={201: FadingTemplateSchema})
-def create_fading_template(request, data: FadingTemplateCreateRequest):
-    _require_settings_permission(request, 'settings_fading_templates_create')
-    _check_unique_name(FadingTemplate, request, data.name)
-    template = FadingTemplate.objects.create(created_by=request.user, **data.dict())
-    return 201, template
-
-
-@router.patch('/programs/templates/fading/{template_id}', response=FadingTemplateSchema)
-def update_fading_template(request, template_id: int, data: FadingTemplateUpdateRequest):
-    _require_settings_permission(request, 'settings_fading_templates_edit')
-    try:
-        template = _settings_qs(FadingTemplate, request).get(id=template_id)
-    except FadingTemplate.DoesNotExist:
-        raise HttpError(404, 'Template not found')
-    if data.name:
-        _check_unique_name(FadingTemplate, request, data.name, exclude_id=template_id)
-    for field, value in data.dict(exclude_none=True).items():
-        setattr(template, field, value)
-    template.save()
-    return template
-
-
-@router.delete('/programs/templates/fading/{template_id}', response={204: None})
-def delete_fading_template(request, template_id: int):
-    _require_settings_permission(request, 'settings_fading_templates_delete')
-    try:
-        _settings_qs(FadingTemplate, request).get(id=template_id).delete()
-    except FadingTemplate.DoesNotExist:
-        raise HttpError(404, 'Template not found')
+    if template.is_locked:
+        raise HttpError(423, 'Prompting template is locked')
+    template.delete()
     return 204, None
 
 
@@ -1249,56 +1599,6 @@ def delete_workflow_template(request, template_id: int):
         _settings_qs(WorkflowTemplate, request).get(id=template_id).delete()
     except WorkflowTemplate.DoesNotExist:
         raise HttpError(404, 'Workflow template not found')
-    return 204, None
-
-
-# ---------------------------------------------------------------------------
-# Maintenance schedules
-# ---------------------------------------------------------------------------
-
-@router.get('/programs/templates/maintenance', response=list[MaintenanceScheduleSchema])
-def list_maintenance_schedules(request):
-    return list(_settings_qs(MaintenanceSchedule, request))
-
-
-@router.post('/programs/templates/maintenance', response={201: MaintenanceScheduleSchema})
-def create_maintenance_schedule(request, data: MaintenanceScheduleCreateRequest):
-    _require_settings_permission(request, 'settings_maintenance_schedules_create')
-    _check_unique_name(MaintenanceSchedule, request, data.name)
-    schedule = MaintenanceSchedule.objects.create(created_by=request.user, **data.dict())
-    return 201, schedule
-
-
-@router.get('/programs/templates/maintenance/{schedule_id}', response=MaintenanceScheduleSchema)
-def get_maintenance_schedule(request, schedule_id: int):
-    try:
-        return _settings_qs(MaintenanceSchedule, request).get(id=schedule_id)
-    except MaintenanceSchedule.DoesNotExist:
-        raise HttpError(404, 'Maintenance schedule not found')
-
-
-@router.patch('/programs/templates/maintenance/{schedule_id}', response=MaintenanceScheduleSchema)
-def update_maintenance_schedule(request, schedule_id: int, data: MaintenanceScheduleUpdateRequest):
-    _require_settings_permission(request, 'settings_maintenance_schedules_edit')
-    try:
-        schedule = _settings_qs(MaintenanceSchedule, request).get(id=schedule_id)
-    except MaintenanceSchedule.DoesNotExist:
-        raise HttpError(404, 'Maintenance schedule not found')
-    if data.name:
-        _check_unique_name(MaintenanceSchedule, request, data.name, exclude_id=schedule_id)
-    for field, value in data.dict(exclude_none=True).items():
-        setattr(schedule, field, value)
-    schedule.save()
-    return schedule
-
-
-@router.delete('/programs/templates/maintenance/{schedule_id}', response={204: None})
-def delete_maintenance_schedule(request, schedule_id: int):
-    _require_settings_permission(request, 'settings_maintenance_schedules_delete')
-    try:
-        _settings_qs(MaintenanceSchedule, request).get(id=schedule_id).delete()
-    except MaintenanceSchedule.DoesNotExist:
-        raise HttpError(404, 'Maintenance schedule not found')
     return 204, None
 
 
@@ -1412,10 +1712,11 @@ def _serialize_org_program(program: Program, request, include_targets: bool = Fa
         'tags': program.tags,
         'objective': program.objective,
         'instructions': program.instructions,
+        'instructions_html': program.instructions_html,
+        'professional_instructions_html': program.professional_instructions_html,
+        'custom_field_values': program.custom_field_values,
         'prompting_template_id': program.prompting_template_id,
         'workflow_template_id': program.workflow_template_id,
-        'maintenance_schedule_id': program.maintenance_schedule_id,
-        'fading_template_id': program.fading_template_id,
         'folder_id': program.folder_id,
         'image_url': _optimized_program_image_url(request, program.image),
         'display_order': program.display_order,
@@ -1468,9 +1769,11 @@ def create_org_program(request, data: OrgProgramCreateRequest):
         tags=data.tags,
         objective=data.objective,
         instructions=data.instructions,
+        instructions_html=data.instructions_html,
+        professional_instructions_html=data.professional_instructions_html,
+        custom_field_values=data.custom_field_values,
         prompting_template_id=data.prompting_template_id,
         workflow_template_id=data.workflow_template_id,
-        fading_template_id=data.fading_template_id,
         display_order=data.display_order,
         created_by=request.user,
     )
@@ -1583,9 +1886,7 @@ def update_org_program(request, program_id: int, data: ProgramUpdateRequest):
             current_prompt_level_index=0,
         )
     if 'workflow_template_id' in updates:
-        program.targets.update(workflow_template_id=program.workflow_template_id)
-    if 'fading_template_id' in updates:
-        program.targets.update(fading_template_id=program.fading_template_id)
+        _apply_program_workflow_to_compatible_targets(request, program)
     return _serialize_org_program(program, request, include_targets=True)
 
 
@@ -1652,10 +1953,11 @@ def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
         tags=source.tags,
         objective=source.objective,
         instructions=source.instructions,
+        instructions_html=source.instructions_html,
+        professional_instructions_html=source.professional_instructions_html,
+        custom_field_values=source.custom_field_values,
         prompting_template=source.prompting_template,
         workflow_template=source.workflow_template,
-        maintenance_schedule=source.maintenance_schedule,
-        fading_template=source.fading_template,
         display_order=source.display_order,
         created_by=user,
     )
@@ -1814,6 +2116,270 @@ def _serialize_central_program(
         'created_at': program.created_at,
         'updated_at': program.updated_at,
     }
+
+
+def _get_central_folder_or_404(folder_id: int) -> CentralProgramFolder:
+    try:
+        return CentralProgramFolder.objects.get(id=folder_id)
+    except CentralProgramFolder.DoesNotExist:
+        raise HttpError(404, 'Folder not found')
+
+
+def _get_superadmin_central_program_or_404(program_id: int) -> CentralProgram:
+    try:
+        return CentralProgram.objects.prefetch_related('targets').get(id=program_id)
+    except CentralProgram.DoesNotExist:
+        raise HttpError(404, 'Program not found')
+
+
+def _get_central_target_or_404(target_id: int) -> CentralTarget:
+    try:
+        return CentralTarget.objects.select_related('program').get(id=target_id)
+    except CentralTarget.DoesNotExist:
+        raise HttpError(404, 'Target not found')
+
+
+def _validate_central_program_fields(data) -> None:
+    category = getattr(data, 'category', None)
+    if category is not None and category not in CentralProgram.Category.values:
+        raise HttpError(400, f'Invalid category "{category}"')
+    phase = getattr(data, 'phase', None)
+    if phase is not None and phase not in CentralProgram.Phase.values:
+        raise HttpError(400, f'Invalid phase "{phase}"')
+    status = getattr(data, 'status', None)
+    if status is not None and status not in CentralProgram.Status.values:
+        raise HttpError(400, f'Invalid status "{status}"')
+    folder_id = getattr(data, 'folder_id', None)
+    if folder_id is not None and not CentralProgramFolder.objects.filter(id=folder_id).exists():
+        raise HttpError(404, 'Folder not found')
+
+
+def _serialize_superadmin_central_target(target: CentralTarget) -> dict:
+    return {
+        'id': target.id,
+        'program_id': target.program_id,
+        'name': target.name,
+        'measurement_type': target.measurement_type,
+        'measurement': target.measurement,
+        'timer_type': target.timer_type,
+        'sub_items': target.sub_items,
+        'sd_text': target.sd_text,
+        'teaching_instructions': target.teaching_instructions,
+        'prompting_levels': target.prompting_levels,
+        'display_order': target.display_order,
+        'is_visible_to_staff': target.is_visible_to_staff,
+    }
+
+
+def _serialize_superadmin_central_program(program: CentralProgram, request, include_targets: bool = False) -> dict:
+    target_count = program.targets.count()
+    return {
+        'id': program.id,
+        'is_template': True,
+        'name': program.name,
+        'category': program.category,
+        'status': program.status,
+        'phase': program.phase,
+        'treatment_area': program.treatment_area,
+        'tags': program.tags,
+        'objective': program.objective,
+        'instructions': program.instructions,
+        'prompting_template_id': None,
+        'folder_id': program.folder_id,
+        'image_url': _optimized_program_image_url(request, program.image),
+        'already_imported': False,
+        'imported_target_count': 0,
+        'display_order': program.display_order,
+        'target_count': target_count,
+        'targets': [
+            {
+                'id': target.id,
+                'name': target.name,
+                'status': 'waiting',
+                'measurement_type': target.measurement_type,
+                'measurement': target.measurement,
+                'timer_type': target.timer_type,
+                'display_order': target.display_order,
+                'is_visible_to_staff': target.is_visible_to_staff,
+            }
+            for target in program.targets.all()
+        ] if include_targets else [],
+        'created_at': program.created_at,
+        'updated_at': program.updated_at,
+    }
+
+
+def _normalize_central_target_payload(payload) -> tuple[str, str]:
+    measurement_type = payload.measurement_type
+    _validate_measurement_type(measurement_type, allow_legacy=False)
+    return _resolve_measurement_fields(
+        measurement_type,
+        payload.measurement,
+        payload.timer_type,
+    )
+
+
+@router.get('/superadmin/central-program-folders', response=list[CentralProgramFolderSchema])
+def superadmin_list_central_program_folders(request):
+    _require_superadmin(request)
+    return [
+        {
+            'id': folder.id,
+            'name': folder.name,
+            'display_order': folder.display_order,
+            'program_count': folder.programs.count(),
+        }
+        for folder in CentralProgramFolder.objects.all()
+    ]
+
+
+@router.post('/superadmin/central-program-folders', response={201: CentralProgramFolderSchema})
+def superadmin_create_central_program_folder(request, data: CentralProgramFolderRequest):
+    _require_superadmin(request)
+    folder = CentralProgramFolder.objects.create(
+        name=data.name,
+        display_order=data.display_order,
+        created_by=request.user,
+    )
+    return 201, {
+        'id': folder.id,
+        'name': folder.name,
+        'display_order': folder.display_order,
+        'program_count': 0,
+    }
+
+
+@router.patch('/superadmin/central-program-folders/{folder_id}', response=CentralProgramFolderSchema)
+def superadmin_update_central_program_folder(request, folder_id: int, data: CentralProgramFolderRequest):
+    _require_superadmin(request)
+    folder = _get_central_folder_or_404(folder_id)
+    folder.name = data.name
+    folder.display_order = data.display_order
+    folder.save(update_fields=['name', 'display_order', 'updated_at'])
+    return {
+        'id': folder.id,
+        'name': folder.name,
+        'display_order': folder.display_order,
+        'program_count': folder.programs.count(),
+    }
+
+
+@router.delete('/superadmin/central-program-folders/{folder_id}', response={204: None})
+def superadmin_delete_central_program_folder(request, folder_id: int):
+    _require_superadmin(request)
+    folder = _get_central_folder_or_404(folder_id)
+    folder.delete()
+    return 204, None
+
+
+@router.get('/superadmin/central-programs', response=list[OrgProgramSchema])
+def superadmin_list_central_programs(request):
+    _require_superadmin(request)
+    qs = CentralProgram.objects.prefetch_related('targets').all()
+    return [_serialize_superadmin_central_program(program, request) for program in qs]
+
+
+@router.post('/superadmin/central-programs', response={201: OrgProgramSchema})
+def superadmin_create_central_program(request, data: CentralProgramRequest):
+    _require_superadmin(request)
+    _validate_central_program_fields(data)
+    program = CentralProgram.objects.create(
+        name=data.name,
+        category=data.category,
+        phase=data.phase,
+        status=data.status,
+        treatment_area=data.treatment_area,
+        tags=data.tags,
+        objective=data.objective,
+        instructions=data.instructions,
+        folder_id=data.folder_id,
+        display_order=data.display_order,
+        created_by=request.user,
+    )
+    return 201, _serialize_superadmin_central_program(program, request, include_targets=True)
+
+
+@router.get('/superadmin/central-programs/{program_id}', response=OrgProgramSchema)
+def superadmin_get_central_program(request, program_id: int):
+    _require_superadmin(request)
+    program = _get_superadmin_central_program_or_404(program_id)
+    return _serialize_superadmin_central_program(program, request, include_targets=True)
+
+
+@router.patch('/superadmin/central-programs/{program_id}', response=OrgProgramSchema)
+def superadmin_update_central_program(request, program_id: int, data: CentralProgramUpdateRequest):
+    _require_superadmin(request)
+    _validate_central_program_fields(data)
+    program = _get_superadmin_central_program_or_404(program_id)
+    for field, value in data.dict(exclude_unset=True).items():
+        setattr(program, field, value)
+    program.save()
+    return _serialize_superadmin_central_program(program, request, include_targets=True)
+
+
+@router.delete('/superadmin/central-programs/{program_id}', response={204: None})
+def superadmin_delete_central_program(request, program_id: int):
+    _require_superadmin(request)
+    program = _get_superadmin_central_program_or_404(program_id)
+    program.delete()
+    return 204, None
+
+
+@router.get('/superadmin/central-programs/{program_id}/targets', response=list[CentralTargetSchema])
+def superadmin_list_central_targets(request, program_id: int):
+    _require_superadmin(request)
+    program = _get_superadmin_central_program_or_404(program_id)
+    return [_serialize_superadmin_central_target(target) for target in program.targets.all()]
+
+
+@router.post('/superadmin/central-programs/{program_id}/targets', response={201: CentralTargetSchema})
+def superadmin_create_central_target(request, program_id: int, data: CentralTargetRequest):
+    _require_superadmin(request)
+    program = _get_superadmin_central_program_or_404(program_id)
+    measurement, timer_type = _normalize_central_target_payload(data)
+    target = CentralTarget.objects.create(
+        program=program,
+        name=data.name,
+        measurement_type=data.measurement_type,
+        measurement=measurement,
+        timer_type=timer_type,
+        sub_items=data.sub_items,
+        sd_text=data.sd_text,
+        teaching_instructions=data.teaching_instructions,
+        prompting_levels=data.prompting_levels,
+        display_order=data.display_order,
+        is_visible_to_staff=data.is_visible_to_staff,
+    )
+    return 201, _serialize_superadmin_central_target(target)
+
+
+@router.patch('/superadmin/central-targets/{target_id}', response=CentralTargetSchema)
+def superadmin_update_central_target(request, target_id: int, data: CentralTargetUpdateRequest):
+    _require_superadmin(request)
+    target = _get_central_target_or_404(target_id)
+    updates = data.dict(exclude_unset=True)
+    next_measurement_type = updates.get('measurement_type', target.measurement_type)
+    measurement_payload = SimpleNamespace(
+        measurement_type=next_measurement_type,
+        measurement=updates.get('measurement', target.measurement),
+        timer_type=updates.get('timer_type', target.timer_type),
+    )
+    measurement, timer_type = _normalize_central_target_payload(measurement_payload)
+    for field, value in updates.items():
+        if field not in {'measurement', 'timer_type'}:
+            setattr(target, field, value)
+    target.measurement = measurement
+    target.timer_type = timer_type
+    target.save()
+    return _serialize_superadmin_central_target(target)
+
+
+@router.delete('/superadmin/central-targets/{target_id}', response={204: None})
+def superadmin_delete_central_target(request, target_id: int):
+    _require_superadmin(request)
+    target = _get_central_target_or_404(target_id)
+    target.delete()
+    return 204, None
 
 
 @router.get('/central-programs', response=list[OrgProgramSchema])

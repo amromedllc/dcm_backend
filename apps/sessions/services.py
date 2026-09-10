@@ -3,7 +3,7 @@ from datetime import timedelta
 from django.utils import timezone
 from ninja.errors import HttpError
 
-from apps.programs.models import Program, Lesson
+from apps.programs.models import Program, Lesson, ProgramDataField
 
 RUNNABLE_PROGRAM_PHASES = {
     Program.Phase.BASELINE,
@@ -104,6 +104,29 @@ def _snapshot_sub_items(target) -> list[dict]:
     return target.sub_items
 
 
+def _visible_prompting_levels(program: Program, target) -> tuple[dict | None, int]:
+    pt = target.prompting_template or program.prompting_template
+    if not pt:
+        return None, 0
+    hidden = set(program.hidden_prompt_level_labels or [])
+    levels = [level for level in pt.levels if level.get('label') not in hidden]
+    if not levels:
+        levels = pt.levels
+    current_label = None
+    if pt.levels:
+        current_idx = min(target.current_prompt_level_index, len(pt.levels) - 1)
+        current_label = pt.levels[current_idx].get('label')
+    visible_idx = next((idx for idx, level in enumerate(levels) if level.get('label') == current_label), 0)
+    return {
+        'id': pt.id,
+        'name': pt.name,
+        'levels': levels,
+        'outcome_measurement': pt.outcome_measurement,
+        'fading_hint_mode': pt.fading_hint_mode,
+        'fading_hint_settings': pt.fading_hint_settings,
+    }, visible_idx
+
+
 def build_program_snapshot(client_id: int, lesson_id: int | None = None, restrict_to_lesson: bool = False) -> dict:
     """
     Captures the full program/target configuration as an immutable JSONB snapshot.
@@ -134,23 +157,31 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
         programs_qs = (
             Program.objects
             .filter(id__in=program_ids, archived_at__isnull=True, phase__in=RUNNABLE_PROGRAM_PHASES)
+            .select_related('prompting_template')
             .prefetch_related('targets__prompting_template', 'targets__child_items')
         )
     elif not restrict_to_lesson:
         programs_qs = (
             Program.objects
             .filter(external_client_id=client_id, archived_at__isnull=True, phase__in=RUNNABLE_PROGRAM_PHASES)
+            .select_related('prompting_template')
             .prefetch_related('targets__prompting_template', 'targets__child_items')
         )
     else:
         programs_qs = Program.objects.none()
+
+    session_fields = list(
+        ProgramDataField.objects
+        .filter(is_active=True, show_in_client_sessions=True)
+        .order_by('display_order', 'name')
+    )
 
     for program in programs_qs:
         targets_data = []
         for target in program.targets.visible_to_staff():
             if not _target_due_for_session(target):
                 continue
-            pt = target.prompting_template
+            prompting_template, current_prompt_level_index = _visible_prompting_levels(program, target)
             targets_data.append({
                 'id': target.id,
                 'name': target.name,
@@ -169,13 +200,8 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
                 'interval_pause_on_warning': target.interval_pause_on_warning,
                 'interval_warn_seconds_before': target.interval_warn_seconds_before,
                 'interval_warning_sound': target.interval_warning_sound,
-                'prompting_template': {
-                    'id': pt.id,
-                    'name': pt.name,
-                    'levels': pt.levels,
-                } if pt else None,
-                'current_prompt_level_index': target.current_prompt_level_index,
-                'fading_mode': target.fading_mode,
+                'prompting_template': prompting_template,
+                'current_prompt_level_index': current_prompt_level_index,
             })
 
         snapshot['programs'].append({
@@ -183,6 +209,15 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
             'name': program.name,
             'category': program.category,
             'treatment_area': program.treatment_area,
+            'custom_fields': [
+                {
+                    'id': field.id,
+                    'name': field.name,
+                    'field_type': field.field_type,
+                    'value': (program.custom_field_values or {}).get(str(field.id)),
+                }
+                for field in session_fields
+            ],
             'targets': targets_data,
         })
 
