@@ -77,6 +77,7 @@ def _clear_default_saved_insights(view: SavedInsightGraph, request):
 # ---------------------------------------------------------------------------
 
 _VALID_GROUP_BY = {'target', 'prompt_level', 'user', 'module', 'submodule'}
+_VALID_TRIAL_X_AXIS = {'daily', 'session'}
 _VALID_ABC_GROUP_BY = {'antecedent', 'behavior', 'consequence', 'setting'}
 _VALID_ASSESSMENT_GROUP_BY = {'assessment', 'domain', 'metric'}
 
@@ -89,6 +90,7 @@ def program_trial_data(
     date_to: date | None = None,
     target_ids: str | None = None,   # comma-separated IDs to filter to specific targets
     group_by: str = 'target',        # 'target' (default) | 'prompt_level' | 'user' | 'module' | 'submodule'
+    x_axis: str = 'daily',           # 'daily' | 'session'
 ):
     """
     Daily trial accuracy for a program, grouped into data series by `group_by`.
@@ -96,6 +98,8 @@ def program_trial_data(
     """
     if group_by not in _VALID_GROUP_BY:
         raise HttpError(400, f'Invalid group_by: {group_by}')
+    if x_axis not in _VALID_TRIAL_X_AXIS:
+        raise HttpError(400, f'Invalid x_axis: {x_axis}')
     frm, to = _resolve_dates(date_from, date_to)
 
     qs = Target.objects.filter(program_id=program_id)
@@ -104,7 +108,7 @@ def program_trial_data(
         qs = qs.filter(id__in=ids)
 
     ids_list = list(qs.values_list('id', flat=True))
-    return get_trial_data_by_day(ids_list, frm, to, group_by=group_by)
+    return get_trial_data_by_day(ids_list, frm, to, group_by=group_by, x_axis=x_axis)
 
 
 @router.get('/analytics/targets/{target_id}/trials', response=list[TrialDataPointSchema])

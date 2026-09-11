@@ -214,6 +214,7 @@ def get_trial_data_by_day(
     date_from: date,
     date_to: date,
     group_by: str = 'target',
+    x_axis: str = 'daily',
 ) -> list[TrialDataPoint]:
     """
     Returns daily trial accuracy between two dates, one series per day+group.
@@ -238,8 +239,11 @@ def get_trial_data_by_day(
     max_scores = _max_scores_for_targets(target_ids)
     prompt_ranks = _prompt_rank_maps(target_ids)
 
-    base_fields = ['recorded_at__date', 'target_id', 'target_name', 'response_score',
-                   'sub_item_key', 'session_run_id', 'prompt_level_label']
+    base_fields = [
+        'recorded_at__date', 'target_id', 'target_name', 'response_score',
+        'sub_item_key', 'session_run_id', 'prompt_level_label',
+        'session_run__started_at',
+    ]
     qs = TrialEvent.objects.filter(
         target_id__in=target_ids,
         recorded_at__date__gte=date_from,
@@ -293,11 +297,14 @@ def get_trial_data_by_day(
             series_id = child['series_id'] if child else event['target_id']
             series_name = child['name'] if child else event['target_name']
 
-        key = (event['recorded_at__date'], series_id)
+        bucket = event['session_run_id'] if x_axis == 'session' else event['recorded_at__date']
+        key = (bucket, series_id)
         grouped[key]['total'] += 1
         grouped[key]['name'] = series_name
         grouped[key]['parent_target_id'] = event['target_id']
         grouped[key]['session_ids'].add(event['session_run_id'])
+        grouped[key]['date'] = event['recorded_at__date']
+        grouped[key]['started_at'] = event.get('session_run__started_at')
         max_score = max_scores.get(event['target_id'])
         is_correct = (
             event['response_score'] >= max_score if max_score is not None
@@ -311,15 +318,39 @@ def get_trial_data_by_day(
             grouped[key]['prompt_rank_count'] += 1
 
     result: list[TrialDataPoint] = []
-    for (day, sid), data in sorted(grouped.items()):
+    def sort_key(item):
+        (_, series_id), data = item
+        started = data.get('started_at')
+        day = data.get('date')
+        return (
+            started.isoformat() if started else (day.isoformat() if day else ''),
+            str(series_id),
+        )
+
+    session_order: dict[int, int] = {}
+    if x_axis == 'session':
+        first_by_session: dict[int, str] = {}
+        for (bucket, _), data in grouped.items():
+            if isinstance(bucket, int):
+                started = data.get('started_at')
+                day = data.get('date')
+                first_by_session[bucket] = started.isoformat() if started else (day.isoformat() if day else '')
+        ordered_session_ids = sorted(first_by_session, key=lambda sid: (first_by_session[sid], sid))
+        session_order = {sid: idx + 1 for idx, sid in enumerate(ordered_session_ids)}
+
+    for (bucket, sid), data in sorted(grouped.items(), key=sort_key):
         total = data['total']
         correct = data['correct']
         meta = target_meta.get(data['parent_target_id'], {})
         mid = meta.get('module_id') if group_by in {'target', 'module'} else None
         subid = meta.get('submodule_id') if group_by in {'target', 'submodule'} else None
         duration_seconds = sum(session_seconds.get(rid, 0.0) for rid in data['session_ids'])
+        session_id = bucket if x_axis == 'session' and isinstance(bucket, int) else None
+        point_date = data.get('date') or bucket
         result.append({
-            'date': day,
+            'date': point_date,
+            'session_id': session_id,
+            'session_label': f'Session {session_order.get(session_id)}' if session_id else None,
             'target_id': sid,
             'target_name': data['name'],
             'module_id': mid,

@@ -5,6 +5,8 @@ from ninja import Schema
 
 class TrialDataPointSchema(Schema):
     date: Date
+    session_id: int | None = None
+    session_label: str | None = None
     target_id: int | str
     target_name: str
     module_id: int | None
