@@ -1,7 +1,7 @@
 from django.contrib import admin
 from unfold.admin import ModelAdmin
 from shared.admin import OrganizationScopedAdminMixin
-from .models import GraphAnnotation, ClientAnnotation, SavedInsightGraph
+from .models import GraphAnnotation, ClientAnnotation, SavedInsightGraph, AssessmentRecord
 
 
 @admin.register(GraphAnnotation)
@@ -26,4 +26,13 @@ class SavedInsightGraphAdmin(OrganizationScopedAdminMixin, ModelAdmin):
     list_display = ['name', 'external_client_id', 'program', 'visibility', 'display_order']
     list_filter = ['visibility']
     search_fields = ['name']
+    readonly_fields = ['created_at', 'updated_at']
+
+
+@admin.register(AssessmentRecord)
+class AssessmentRecordAdmin(OrganizationScopedAdminMixin, ModelAdmin):
+    list_display = ['assessment_name', 'external_client_id', 'domain', 'metric', 'assessed_on', 'score', 'max_score']
+    list_filter = ['assessment_name', 'domain', 'metric']
+    search_fields = ['assessment_name', 'domain', 'metric', 'notes']
+    date_hierarchy = 'assessed_on'
     readonly_fields = ['created_at', 'updated_at']

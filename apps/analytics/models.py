@@ -119,3 +119,24 @@ class SavedInsightGraph(TenantAwareModel):
     def __str__(self) -> str:
         scope = f'program:{self.program_id}' if self.program_id else f'client:{self.external_client_id}'
         return f'{self.name} ({scope})'
+
+
+class AssessmentRecord(TenantAwareModel):
+    """Client-scoped assessment score captured over time for graphing."""
+
+    external_client_id = models.PositiveIntegerField(db_index=True)
+    assessment_name = models.CharField(max_length=120, db_index=True)
+    domain = models.CharField(max_length=120, blank=True, db_index=True)
+    metric = models.CharField(max_length=120, blank=True, db_index=True)
+    assessed_on = models.DateField(db_index=True)
+    score = models.FloatField()
+    max_score = models.FloatField(null=True, blank=True)
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        app_label = 'analytics'
+        ordering = ['assessed_on', 'assessment_name', 'domain', 'metric']
+
+    def __str__(self) -> str:
+        label = ' / '.join(part for part in [self.assessment_name, self.domain, self.metric] if part)
+        return f'{label}: {self.score} ({self.assessed_on})'

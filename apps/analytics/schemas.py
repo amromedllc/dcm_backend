@@ -46,6 +46,39 @@ class ABCDataPointSchema(Schema):
     total_duration_seconds: int
 
 
+class AssessmentRecordSchema(Schema):
+    id: int
+    external_client_id: int
+    assessment_name: str
+    domain: str
+    metric: str
+    assessed_on: Date
+    score: float
+    max_score: float | None
+    notes: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class AssessmentRecordCreateRequest(Schema):
+    assessment_name: str
+    domain: str = ''
+    metric: str = ''
+    assessed_on: Date
+    score: float
+    max_score: float | None = None
+    notes: str = ''
+
+
+class AssessmentDataPointSchema(Schema):
+    date: Date
+    series_id: str
+    series_name: str
+    score: float
+    max_score: float | None
+    pct_score: float | None
+
+
 class TargetSummarySchema(Schema):
     target_id: int
     target_name: str
