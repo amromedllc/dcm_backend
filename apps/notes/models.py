@@ -31,9 +31,13 @@ class NoteTemplate(TenantAwareModel):
     ]
     template_type = models.CharField(max_length=20, choices=TEMPLATE_TYPES, default='notes')
     body_template = models.TextField(blank=True, default='')
+    activity_types = models.JSONField(default=list, blank=True)
     require_completer_signature = models.BooleanField(default=False)
     require_additional_signatures = models.BooleanField(default=False)
+    include_signatory_credentials = models.BooleanField(default=False)
     lock_content = models.BooleanField(default=False)
+    enable_time_change_requests = models.BooleanField(default=False)
+    show_only_user_collected_data = models.BooleanField(default=False)
 
     class Meta:
         app_label = 'notes'
