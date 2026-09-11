@@ -7,16 +7,17 @@ from ninja.errors import HttpError
 from apps.accounts.api import _same_practice_q
 from apps.accounts.auth import partner_auth
 from apps.programs.models import Program, Target, ProgramModule
-from .models import GraphAnnotation, ClientAnnotation, SavedInsightGraph
+from .models import GraphAnnotation, ClientAnnotation, SavedInsightGraph, AssessmentRecord
 from .schemas import (
     TrialDataPointSchema, BehaviorDataPointSchema, ABCDataPointSchema,
+    AssessmentRecordSchema, AssessmentRecordCreateRequest, AssessmentDataPointSchema,
     ProgramSummarySchema, ModuleSummarySchema, TargetSummarySchema,
     GraphAnnotationSchema, GraphAnnotationCreateRequest, GraphAnnotationUpdateRequest,
     ClientAnnotationSchema, ClientAnnotationCreateRequest, ClientAnnotationUpdateRequest,
     SavedInsightGraphSchema, SavedInsightGraphCreateRequest, SavedInsightGraphUpdateRequest,
 )
 from .services import (
-    get_trial_data_by_day, get_behavior_data_by_day, get_abc_data_by_day, get_program_summary, get_module_summary,
+    get_trial_data_by_day, get_behavior_data_by_day, get_abc_data_by_day, get_assessment_data, get_program_summary, get_module_summary,
     get_program_mastery_criteria, get_client_progress_report, get_client_progress_overview,
 )
 
@@ -77,6 +78,7 @@ def _clear_default_saved_insights(view: SavedInsightGraph, request):
 
 _VALID_GROUP_BY = {'target', 'prompt_level', 'user', 'module', 'submodule'}
 _VALID_ABC_GROUP_BY = {'antecedent', 'behavior', 'consequence', 'setting'}
+_VALID_ASSESSMENT_GROUP_BY = {'assessment', 'domain', 'metric'}
 
 
 @router.get('/analytics/programs/{program_id}/trials', response=list[TrialDataPointSchema])
@@ -161,6 +163,48 @@ def client_abc_data(
         behavior=behavior,
         consequence=consequence,
         setting=setting,
+    )
+
+
+@router.get('/analytics/clients/{client_id}/assessment-records', response=list[AssessmentRecordSchema])
+def list_assessment_records(request, client_id: int):
+    return list(AssessmentRecord.objects.filter(external_client_id=client_id))
+
+
+@router.post('/analytics/clients/{client_id}/assessment-records', response={201: AssessmentRecordSchema})
+def create_assessment_record(request, client_id: int, data: AssessmentRecordCreateRequest):
+    _require_supervisor(request)
+    record = AssessmentRecord.objects.create(
+        external_client_id=client_id,
+        created_by=request.user,
+        **data.dict(),
+    )
+    return 201, record
+
+
+@router.get('/analytics/clients/{client_id}/assessments', response=list[AssessmentDataPointSchema])
+def client_assessment_data(
+    request,
+    client_id: int,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    group_by: str = 'domain',
+    assessment_name: str | None = None,
+    domain: str | None = None,
+    metric: str | None = None,
+):
+    """Assessment score graph data grouped by assessment, domain, or metric."""
+    if group_by not in _VALID_ASSESSMENT_GROUP_BY:
+        raise HttpError(400, f'Invalid group_by: {group_by}')
+    frm, to = _resolve_dates(date_from, date_to)
+    return get_assessment_data(
+        client_id,
+        frm,
+        to,
+        group_by=group_by,
+        assessment_name=assessment_name,
+        domain=domain,
+        metric=metric,
     )
 
 

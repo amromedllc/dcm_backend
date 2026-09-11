@@ -8,6 +8,7 @@ from apps.programs.measurements import (
     DURATION_MEASUREMENTS, RATE_MEASUREMENTS,
 )
 from apps.sessions.models import TrialEvent, BehaviorEvent, ABCEvent, SessionRun
+from .models import AssessmentRecord
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +56,15 @@ class ABCDataPoint(TypedDict):
     series_name: str
     count: int
     total_duration_seconds: int
+
+
+class AssessmentDataPoint(TypedDict):
+    date: date
+    series_id: str
+    series_name: str
+    score: float
+    max_score: float | None
+    pct_score: float | None
 
 
 class TargetSummary(TypedDict):
@@ -475,6 +485,58 @@ def get_abc_data_by_day(
             'series_name': data['name'],
             'count': data['count'],
             'total_duration_seconds': data['duration'],
+        })
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Assessment data — powers assessment score graphs
+# ---------------------------------------------------------------------------
+
+_ASSESSMENT_GROUP_FIELD = {
+    'assessment': 'assessment_name',
+    'domain': 'domain',
+    'metric': 'metric',
+}
+
+
+def get_assessment_data(
+    external_client_id: int,
+    date_from: date,
+    date_to: date,
+    *,
+    group_by: str = 'domain',
+    assessment_name: str | None = None,
+    domain: str | None = None,
+    metric: str | None = None,
+) -> list[AssessmentDataPoint]:
+    """Returns assessment score records grouped by assessment, domain, or metric."""
+    field = _ASSESSMENT_GROUP_FIELD.get(group_by, 'domain')
+    qs = AssessmentRecord.objects.filter(
+        external_client_id=external_client_id,
+        assessed_on__gte=date_from,
+        assessed_on__lte=date_to,
+    )
+    if assessment_name:
+        qs = qs.filter(assessment_name__icontains=assessment_name)
+    if domain:
+        qs = qs.filter(domain__icontains=domain)
+    if metric:
+        qs = qs.filter(metric__icontains=metric)
+
+    result: list[AssessmentDataPoint] = []
+    for row in qs.values('assessed_on', field, 'score', 'max_score').order_by('assessed_on', field):
+        value = (row.get(field) or '').strip() or 'Unspecified'
+        max_score = row.get('max_score')
+        score = float(row['score'])
+        pct_score = round(score / max_score * 100, 1) if max_score else None
+        result.append({
+            'date': row['assessed_on'],
+            'series_id': f'{group_by}:{value}',
+            'series_name': value,
+            'score': score,
+            'max_score': max_score,
+            'pct_score': pct_score,
         })
     return result
 
