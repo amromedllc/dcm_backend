@@ -109,6 +109,7 @@ class Command(BaseCommand):
                             is_correct = random.random() < accuracy
                             recorded_at = session_start + timedelta(minutes=trial_num * 2)
                             trial_events.append(TrialEvent(
+                                organization_id=session.organization_id,  # bulk_create bypasses save()'s auto-stamp
                                 session_run=session,
                                 target_id=target.id,
                                 target_name=target.name,

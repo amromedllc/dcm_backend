@@ -28,9 +28,13 @@ class NoteTemplateSchema(Schema):
     created_at: datetime
     template_type: str
     body_template: str
+    activity_types: list[str]
     require_completer_signature: bool
     require_additional_signatures: bool
+    include_signatory_credentials: bool
     lock_content: bool
+    enable_time_change_requests: bool
+    show_only_user_collected_data: bool
 
 
 class NoteTemplateCreateRequest(Schema):
@@ -40,9 +44,13 @@ class NoteTemplateCreateRequest(Schema):
     is_org_default: bool = False
     template_type: Literal['notes', 'forms'] = 'notes'
     body_template: str = ''
+    activity_types: list[str] = []
     require_completer_signature: bool = False
     require_additional_signatures: bool = False
+    include_signatory_credentials: bool = False
     lock_content: bool = False
+    enable_time_change_requests: bool = False
+    show_only_user_collected_data: bool = False
 
 
 class NoteTemplateUpdateRequest(Schema):
@@ -53,9 +61,13 @@ class NoteTemplateUpdateRequest(Schema):
     is_active: bool | None = None
     template_type: Literal['notes', 'forms'] | None = None
     body_template: str | None = None
+    activity_types: list[str] | None = None
     require_completer_signature: bool | None = None
     require_additional_signatures: bool | None = None
+    include_signatory_credentials: bool | None = None
     lock_content: bool | None = None
+    enable_time_change_requests: bool | None = None
+    show_only_user_collected_data: bool | None = None
 
 
 # ---------------------------------------------------------------------------
