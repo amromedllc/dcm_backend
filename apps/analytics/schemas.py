@@ -102,11 +102,9 @@ class ProgramSummarySchema(Schema):
     date_from: Date
     date_to: Date
     targets: list[TargetSummarySchema]
-    # % correct threshold a target must sustain to reach 'mastered', read from
-    # the targets' WorkflowTemplates. None when no target defines one.
-    # `mastery_criteria_varies` is True when targets disagree and `pct` is the
-    # most common value.
     mastery_criteria_pct: int | None = None
+    mastery_criteria_value: float | None = None
+    mastery_criteria_metric: str | None = None
     mastery_criteria_varies: bool = False
 
 

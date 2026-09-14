@@ -5,7 +5,7 @@ from typing import TypedDict
 from apps.programs.models import Program, Target, ProgramModule, ProgramSubmodule, TargetSubItem
 from apps.programs.measurements import (
     aggregate_measurement, MEASUREMENT_LABELS, MEASUREMENT_UNIT,
-    DURATION_MEASUREMENTS, RATE_MEASUREMENTS,
+    DURATION_MEASUREMENTS, RATE_MEASUREMENTS, objective_key_for_measurement,
 )
 from apps.sessions.models import TrialEvent, BehaviorEvent, ABCEvent, SessionRun
 from .models import AssessmentRecord
@@ -599,6 +599,63 @@ def _mastered_threshold_pct(phases: list) -> int | None:
     return explicit if explicit is not None else fallback
 
 
+def _trial_metric_for_objective(objective_key: str, measurement: str) -> str | None:
+    key = (objective_key or objective_key_for_measurement(measurement) or '').lower()
+    for prefix in ('increase_', 'reduce_'):
+        if key.startswith(prefix):
+            key = key[len(prefix):]
+    if key in ('frequency',):
+        return 'count'
+    if key in ('rate_per_minute', 'rate_per_hour'):
+        return key
+    if key in ('', 'percent_correct'):
+        return 'pct_correct'
+    return None
+
+
+def _mastered_threshold_for_target(phases: list, measurement: str) -> tuple[float, str] | None:
+    explicit: tuple[float, str] | None = None
+    fallback: tuple[float, str] | None = None
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        criteria = phase.get('criteria') or {}
+        raw = criteria.get('threshold_pct')
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        metric = _trial_metric_for_objective(criteria.get('objective_key') or phase.get('objective_key') or '', measurement)
+        if metric is None:
+            continue
+        candidate = (value, metric)
+        if fallback is None or value > fallback[0]:
+            fallback = candidate
+        if phase.get('on_success') == 'mastered':
+            explicit = candidate
+    return explicit or fallback
+
+
+def get_program_mastery_criteria_detail(program_id: int) -> tuple[float | None, str | None, bool]:
+    thresholds: list[tuple[float, str]] = []
+    for phases, measurement in (
+        Target.objects
+        .filter(program_id=program_id, workflow_template__isnull=False)
+        .values_list('workflow_template__phases', 'measurement')
+    ):
+        if not isinstance(phases, list):
+            continue
+        result = _mastered_threshold_for_target(phases, measurement)
+        if result is not None:
+            thresholds.append(result)
+
+    if not thresholds:
+        return None, None, False
+    counts = Counter(thresholds)
+    (value, metric), _count = counts.most_common(1)[0]
+    return value, metric, len(counts) > 1
+
+
 def get_program_mastery_criteria(program_id: int) -> tuple[int | None, bool]:
     """Returns (pct, varies) for a program's targets:
     - pct: the most common per-target mastery threshold (% correct), or None
@@ -606,22 +663,10 @@ def get_program_mastery_criteria(program_id: int) -> tuple[int | None, bool]:
     - varies: True when the program's targets disagree on the threshold, so
       the graph can label the line as an approximation.
     """
-    thresholds: list[int] = []
-    for phases in (
-        Target.objects
-        .filter(program_id=program_id, workflow_template__isnull=False)
-        .values_list('workflow_template__phases', flat=True)
-    ):
-        if not isinstance(phases, list):
-            continue
-        pct = _mastered_threshold_pct(phases)
-        if pct is not None:
-            thresholds.append(pct)
-
-    if not thresholds:
+    value, metric, varies = get_program_mastery_criteria_detail(program_id)
+    if value is None or metric != 'pct_correct':
         return None, False
-    counts = Counter(thresholds)
-    return counts.most_common(1)[0][0], len(counts) > 1
+    return int(value), varies
 
 
 # ---------------------------------------------------------------------------

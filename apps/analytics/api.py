@@ -18,7 +18,7 @@ from .schemas import (
 )
 from .services import (
     get_trial_data_by_day, get_behavior_data_by_day, get_abc_data_by_day, get_assessment_data, get_program_summary, get_module_summary,
-    get_program_mastery_criteria, get_client_progress_report, get_client_progress_overview,
+    get_program_mastery_criteria_detail, get_client_progress_report, get_client_progress_overview,
 )
 
 router = Router(auth=partner_auth)
@@ -229,13 +229,15 @@ def program_summary(
     """
     frm, to = _resolve_dates(date_from, date_to)
     targets = get_program_summary(program_id, frm, to)
-    mastery_pct, mastery_varies = get_program_mastery_criteria(program_id)
+    mastery_value, mastery_metric, mastery_varies = get_program_mastery_criteria_detail(program_id)
     return {
         'program_id': program_id,
         'date_from': frm,
         'date_to': to,
         'targets': targets,
-        'mastery_criteria_pct': mastery_pct,
+        'mastery_criteria_pct': int(mastery_value) if mastery_metric == 'pct_correct' and mastery_value is not None else None,
+        'mastery_criteria_value': mastery_value,
+        'mastery_criteria_metric': mastery_metric,
         'mastery_criteria_varies': mastery_varies,
     }
 
