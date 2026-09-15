@@ -6,6 +6,7 @@ PromptingTemplate built from the target's optional `prompting_levels`,
 since PromptingTemplate is tenant-scoped and there is no org to reference.
 """
 from django.test import TestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django_tenants.utils import schema_context
 from ninja.errors import HttpError
 
@@ -20,8 +21,12 @@ from apps.programs.api import (
     superadmin_create_central_target,
     superadmin_create_knowledge_base_module,
     superadmin_create_knowledge_base_topic,
+    superadmin_delete_knowledge_base_topic_video,
+    superadmin_delete_knowledge_base_video,
     superadmin_list_central_programs,
     superadmin_list_knowledge_base_modules,
+    superadmin_upload_knowledge_base_topic_video,
+    superadmin_upload_knowledge_base_video,
     superadmin_update_central_program,
     superadmin_update_knowledge_base_module,
 )
@@ -250,3 +255,60 @@ class SuperadminKnowledgeBaseApiTests(TestCase):
         article.refresh_from_db()
         self.assertIs(result['is_active'], False)
         self.assertIs(article.is_active, False)
+
+    def test_superadmin_can_upload_and_remove_article_video(self):
+        article = KnowledgeBaseModule.objects.create(
+            slug='program-settings',
+            title='Program Settings',
+            overview='How to configure program settings.',
+        )
+        upload = SimpleUploadedFile('settings.mp4', b'fake-video', content_type='video/mp4')
+
+        result = superadmin_upload_knowledge_base_video(
+            FakeRequest(self.superadmin),
+            article.id,
+            upload,
+        )
+
+        article.refresh_from_db()
+        self.assertTrue(article.video.name)
+        self.assertEqual(article.video_content_type, 'video/mp4')
+        self.assertEqual(article.video_size, len(b'fake-video'))
+        self.assertIn('/media/', result['video_url'])
+
+        result = superadmin_delete_knowledge_base_video(FakeRequest(self.superadmin), article.id)
+
+        article.refresh_from_db()
+        self.assertFalse(article.video)
+        self.assertEqual(result['video_url'], None)
+
+    def test_superadmin_can_upload_and_remove_topic_video(self):
+        article = KnowledgeBaseModule.objects.create(
+            slug='program-settings',
+            title='Program Settings',
+            overview='How to configure program settings.',
+        )
+        topic = KnowledgeBaseTopic.objects.create(
+            module=article,
+            title='Prompting setup',
+            summary='How to configure prompting.',
+        )
+        upload = SimpleUploadedFile('prompting.mp4', b'fake-topic-video', content_type='video/mp4')
+
+        result = superadmin_upload_knowledge_base_topic_video(
+            FakeRequest(self.superadmin),
+            topic.id,
+            upload,
+        )
+
+        topic.refresh_from_db()
+        self.assertTrue(topic.video.name)
+        self.assertEqual(topic.video_content_type, 'video/mp4')
+        self.assertEqual(topic.video_size, len(b'fake-topic-video'))
+        self.assertIn('/media/', result['video_url'])
+
+        result = superadmin_delete_knowledge_base_topic_video(FakeRequest(self.superadmin), topic.id)
+
+        topic.refresh_from_db()
+        self.assertFalse(topic.video)
+        self.assertEqual(result['video_url'], None)

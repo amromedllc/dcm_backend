@@ -679,6 +679,9 @@ class KnowledgeBaseTopicSchema(Schema):
     title: str
     summary: str
     items: list[str]
+    video_url: str | None = None
+    video_content_type: str = ''
+    video_size: int = 0
     display_order: int
 
 
@@ -689,6 +692,9 @@ class KnowledgeBaseModuleSchema(Schema):
     path: str
     icon: str
     overview: str
+    video_url: str | None = None
+    video_content_type: str = ''
+    video_size: int = 0
     audience: list[str]
     display_order: int
     is_active: bool = True
