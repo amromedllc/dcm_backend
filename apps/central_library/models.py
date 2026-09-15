@@ -12,6 +12,14 @@ def _knowledge_base_import_upload_path(instance, filename):
     return f'central_library/knowledge_base_imports/{uuid.uuid4().hex}/{filename}'
 
 
+def _knowledge_base_video_upload_path(instance, filename):
+    return f'central_library/knowledge_base_videos/{instance.pk or "new"}/{uuid.uuid4().hex}/{filename}'
+
+
+def _knowledge_base_topic_video_upload_path(instance, filename):
+    return f'central_library/knowledge_base_topic_videos/{instance.pk or "new"}/{uuid.uuid4().hex}/{filename}'
+
+
 class CentralProgramFolder(models.Model):
     """Platform-owned grouping for Central Library programs — same
     "not tenant-scoped, superuser-authored" model as CentralProgram itself.
@@ -163,6 +171,9 @@ class KnowledgeBaseModule(models.Model):
     path = models.CharField(max_length=240, blank=True)
     icon = models.CharField(max_length=30, choices=Icon.choices, default=Icon.BOOK)
     overview = models.TextField()
+    video = models.FileField(upload_to=_knowledge_base_video_upload_path, max_length=500, blank=True, null=True)
+    video_content_type = models.CharField(max_length=120, blank=True)
+    video_size = models.PositiveIntegerField(default=0)
     audience = models.JSONField(default=list, blank=True)
     display_order = models.PositiveIntegerField(default=0, db_index=True)
     is_active = models.BooleanField(default=True, db_index=True)
@@ -188,6 +199,9 @@ class KnowledgeBaseTopic(models.Model):
     title = models.CharField(max_length=180)
     summary = models.TextField(blank=True)
     items = models.JSONField(default=list, blank=True)
+    video = models.FileField(upload_to=_knowledge_base_topic_video_upload_path, max_length=500, blank=True, null=True)
+    video_content_type = models.CharField(max_length=120, blank=True)
+    video_size = models.PositiveIntegerField(default=0)
     display_order = models.PositiveIntegerField(default=0, db_index=True)
     is_active = models.BooleanField(default=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)

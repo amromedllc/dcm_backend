@@ -18,7 +18,7 @@ from apps.central_library.models import (
     CentralProgram, CentralProgramFolder, CentralTarget,
     KnowledgeBaseModule, KnowledgeBaseTopic,
 )
-from shared.uploads import validate_image_upload
+from shared.uploads import validate_image_upload, validate_media_upload
 from .models import (
     Program, ProgramMaterial, Target, PromptingTemplate,
     WorkflowTemplate,
@@ -389,7 +389,7 @@ def delete_saved_view(request, view_id: int):
     return 204, None
 
 
-def _serialize_knowledge_base_module(module: KnowledgeBaseModule) -> dict:
+def _serialize_knowledge_base_module(module: KnowledgeBaseModule, request=None) -> dict:
     return {
         'id': module.id,
         'slug': module.slug,
@@ -397,18 +397,15 @@ def _serialize_knowledge_base_module(module: KnowledgeBaseModule) -> dict:
         'path': module.path,
         'icon': module.icon,
         'overview': module.overview,
+        'video_url': request.build_absolute_uri(module.video.url) if request is not None and module.video else None,
+        'video_content_type': module.video_content_type,
+        'video_size': module.video_size,
         'audience': module.audience,
         'display_order': module.display_order,
         'is_active': module.is_active,
         'updated_at': module.updated_at,
         'topics': [
-            {
-                'id': topic.id,
-                'title': topic.title,
-                'summary': topic.summary,
-                'items': topic.items,
-                'display_order': topic.display_order,
-            }
+            _serialize_knowledge_base_topic(topic, request)
             for topic in module.topics.all()
             if topic.is_active
         ],
@@ -424,7 +421,7 @@ def list_knowledge_base_modules(request):
             .prefetch_related('topics')
             .order_by('display_order', 'title')
         )
-        return [_serialize_knowledge_base_module(module) for module in modules]
+        return [_serialize_knowledge_base_module(module, request) for module in modules]
 
 
 def _require_superadmin(request) -> None:
@@ -451,12 +448,15 @@ def _get_knowledge_base_topic_or_404(topic_id: int) -> KnowledgeBaseTopic:
         raise HttpError(404, 'Knowledge base topic not found')
 
 
-def _serialize_knowledge_base_topic(topic: KnowledgeBaseTopic) -> dict:
+def _serialize_knowledge_base_topic(topic: KnowledgeBaseTopic, request=None) -> dict:
     return {
         'id': topic.id,
         'title': topic.title,
         'summary': topic.summary,
         'items': topic.items,
+        'video_url': request.build_absolute_uri(topic.video.url) if request is not None and topic.video else None,
+        'video_content_type': topic.video_content_type,
+        'video_size': topic.video_size,
         'display_order': topic.display_order,
     }
 
@@ -464,89 +464,155 @@ def _serialize_knowledge_base_topic(topic: KnowledgeBaseTopic) -> dict:
 @router.get('/superadmin/knowledge-base/modules', response=list[KnowledgeBaseModuleSchema])
 def superadmin_list_knowledge_base_modules(request):
     _require_superadmin(request)
-    modules = (
-        KnowledgeBaseModule.objects
-        .prefetch_related('topics')
-        .order_by('display_order', 'title')
-    )
-    return [_serialize_knowledge_base_module(module) for module in modules]
+    with schema_context(get_public_schema_name()):
+        modules = (
+            KnowledgeBaseModule.objects
+            .prefetch_related('topics')
+            .order_by('display_order', 'title')
+        )
+        return [_serialize_knowledge_base_module(module, request) for module in modules]
 
 
 @router.post('/superadmin/knowledge-base/modules', response={201: KnowledgeBaseModuleSchema})
 def superadmin_create_knowledge_base_module(request, data: KnowledgeBaseModuleRequest):
     _require_superadmin(request)
     _validate_knowledge_base_icon(data.icon)
-    module = KnowledgeBaseModule.objects.create(
-        slug=data.slug,
-        title=data.title,
-        path=data.path,
-        icon=data.icon,
-        overview=data.overview,
-        audience=data.audience,
-        display_order=data.display_order,
-        is_active=data.is_active,
-        created_by=request.user,
-    )
-    return 201, _serialize_knowledge_base_module(module)
+    with schema_context(get_public_schema_name()):
+        module = KnowledgeBaseModule.objects.create(
+            slug=data.slug,
+            title=data.title,
+            path=data.path,
+            icon=data.icon,
+            overview=data.overview,
+            audience=data.audience,
+            display_order=data.display_order,
+            is_active=data.is_active,
+            created_by=request.user,
+        )
+        return 201, _serialize_knowledge_base_module(module, request)
 
 
 @router.get('/superadmin/knowledge-base/modules/{module_id}', response=KnowledgeBaseModuleSchema)
 def superadmin_get_knowledge_base_module(request, module_id: int):
     _require_superadmin(request)
-    return _serialize_knowledge_base_module(_get_knowledge_base_module_or_404(module_id))
+    with schema_context(get_public_schema_name()):
+        return _serialize_knowledge_base_module(_get_knowledge_base_module_or_404(module_id), request)
 
 
 @router.patch('/superadmin/knowledge-base/modules/{module_id}', response=KnowledgeBaseModuleSchema)
 def superadmin_update_knowledge_base_module(request, module_id: int, data: KnowledgeBaseModuleUpdateRequest):
     _require_superadmin(request)
-    module = _get_knowledge_base_module_or_404(module_id)
-    updates = data.dict(exclude_unset=True)
-    if 'icon' in updates:
-        _validate_knowledge_base_icon(updates['icon'])
-    for field, value in updates.items():
-        setattr(module, field, value)
-    module.save()
-    return _serialize_knowledge_base_module(module)
+    with schema_context(get_public_schema_name()):
+        module = _get_knowledge_base_module_or_404(module_id)
+        updates = data.dict(exclude_unset=True)
+        if 'icon' in updates:
+            _validate_knowledge_base_icon(updates['icon'])
+        for field, value in updates.items():
+            setattr(module, field, value)
+        module.save()
+        return _serialize_knowledge_base_module(module, request)
 
 
 @router.delete('/superadmin/knowledge-base/modules/{module_id}', response={204: None})
 def superadmin_delete_knowledge_base_module(request, module_id: int):
     _require_superadmin(request)
-    module = _get_knowledge_base_module_or_404(module_id)
-    module.delete()
+    with schema_context(get_public_schema_name()):
+        module = _get_knowledge_base_module_or_404(module_id)
+        module.delete()
     return 204, None
+
+
+@router.post('/superadmin/knowledge-base/modules/{module_id}/video', response=KnowledgeBaseModuleSchema)
+def superadmin_upload_knowledge_base_video(request, module_id: int, file: UploadedFile = File(...)):
+    _require_superadmin(request)
+    validate_media_upload(file, 'video')
+    with schema_context(get_public_schema_name()):
+        module = _get_knowledge_base_module_or_404(module_id)
+        if module.video:
+            module.video.delete(save=False)
+        module.video = file
+        module.video_content_type = file.content_type or ''
+        module.video_size = file.size
+        module.save(update_fields=['video', 'video_content_type', 'video_size', 'updated_at'])
+        return _serialize_knowledge_base_module(module, request)
+
+
+@router.delete('/superadmin/knowledge-base/modules/{module_id}/video', response=KnowledgeBaseModuleSchema)
+def superadmin_delete_knowledge_base_video(request, module_id: int):
+    _require_superadmin(request)
+    with schema_context(get_public_schema_name()):
+        module = _get_knowledge_base_module_or_404(module_id)
+        if module.video:
+            module.video.delete(save=False)
+        module.video = None
+        module.video_content_type = ''
+        module.video_size = 0
+        module.save(update_fields=['video', 'video_content_type', 'video_size', 'updated_at'])
+        return _serialize_knowledge_base_module(module, request)
 
 
 @router.post('/superadmin/knowledge-base/modules/{module_id}/topics', response={201: KnowledgeBaseTopicSchema})
 def superadmin_create_knowledge_base_topic(request, module_id: int, data: KnowledgeBaseTopicRequest):
     _require_superadmin(request)
-    module = _get_knowledge_base_module_or_404(module_id)
-    topic = KnowledgeBaseTopic.objects.create(
-        module=module,
-        title=data.title,
-        summary=data.summary,
-        items=data.items,
-        display_order=data.display_order,
-        is_active=data.is_active,
-    )
-    return 201, _serialize_knowledge_base_topic(topic)
+    with schema_context(get_public_schema_name()):
+        module = _get_knowledge_base_module_or_404(module_id)
+        topic = KnowledgeBaseTopic.objects.create(
+            module=module,
+            title=data.title,
+            summary=data.summary,
+            items=data.items,
+            display_order=data.display_order,
+            is_active=data.is_active,
+        )
+        return 201, _serialize_knowledge_base_topic(topic, request)
 
 
 @router.patch('/superadmin/knowledge-base/topics/{topic_id}', response=KnowledgeBaseTopicSchema)
 def superadmin_update_knowledge_base_topic(request, topic_id: int, data: KnowledgeBaseTopicUpdateRequest):
     _require_superadmin(request)
-    topic = _get_knowledge_base_topic_or_404(topic_id)
-    for field, value in data.dict(exclude_unset=True).items():
-        setattr(topic, field, value)
-    topic.save()
-    return _serialize_knowledge_base_topic(topic)
+    with schema_context(get_public_schema_name()):
+        topic = _get_knowledge_base_topic_or_404(topic_id)
+        for field, value in data.dict(exclude_unset=True).items():
+            setattr(topic, field, value)
+        topic.save()
+        return _serialize_knowledge_base_topic(topic, request)
+
+
+@router.post('/superadmin/knowledge-base/topics/{topic_id}/video', response=KnowledgeBaseTopicSchema)
+def superadmin_upload_knowledge_base_topic_video(request, topic_id: int, file: UploadedFile = File(...)):
+    _require_superadmin(request)
+    validate_media_upload(file, 'video')
+    with schema_context(get_public_schema_name()):
+        topic = _get_knowledge_base_topic_or_404(topic_id)
+        if topic.video:
+            topic.video.delete(save=False)
+        topic.video = file
+        topic.video_content_type = file.content_type or ''
+        topic.video_size = file.size
+        topic.save(update_fields=['video', 'video_content_type', 'video_size', 'updated_at'])
+        return _serialize_knowledge_base_topic(topic, request)
+
+
+@router.delete('/superadmin/knowledge-base/topics/{topic_id}/video', response=KnowledgeBaseTopicSchema)
+def superadmin_delete_knowledge_base_topic_video(request, topic_id: int):
+    _require_superadmin(request)
+    with schema_context(get_public_schema_name()):
+        topic = _get_knowledge_base_topic_or_404(topic_id)
+        if topic.video:
+            topic.video.delete(save=False)
+        topic.video = None
+        topic.video_content_type = ''
+        topic.video_size = 0
+        topic.save(update_fields=['video', 'video_content_type', 'video_size', 'updated_at'])
+        return _serialize_knowledge_base_topic(topic, request)
 
 
 @router.delete('/superadmin/knowledge-base/topics/{topic_id}', response={204: None})
 def superadmin_delete_knowledge_base_topic(request, topic_id: int):
     _require_superadmin(request)
-    topic = _get_knowledge_base_topic_or_404(topic_id)
-    topic.delete()
+    with schema_context(get_public_schema_name()):
+        topic = _get_knowledge_base_topic_or_404(topic_id)
+        topic.delete()
     return 204, None
 
 
