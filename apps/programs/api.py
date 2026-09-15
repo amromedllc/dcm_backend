@@ -461,6 +461,15 @@ def _serialize_knowledge_base_topic(topic: KnowledgeBaseTopic, request=None) -> 
     }
 
 
+MAX_KNOWLEDGE_BASE_VIDEO_BYTES = 100 * 1024 * 1024
+
+
+def _validate_knowledge_base_video_upload(file: UploadedFile) -> None:
+    if file.size > MAX_KNOWLEDGE_BASE_VIDEO_BYTES:
+        raise HttpError(400, 'Knowledge base videos must be under 100MB')
+    validate_media_upload(file, 'video')
+
+
 @router.get('/superadmin/knowledge-base/modules', response=list[KnowledgeBaseModuleSchema])
 def superadmin_list_knowledge_base_modules(request):
     _require_superadmin(request)
@@ -525,7 +534,7 @@ def superadmin_delete_knowledge_base_module(request, module_id: int):
 @router.post('/superadmin/knowledge-base/modules/{module_id}/video', response=KnowledgeBaseModuleSchema)
 def superadmin_upload_knowledge_base_video(request, module_id: int, file: UploadedFile = File(...)):
     _require_superadmin(request)
-    validate_media_upload(file, 'video')
+    _validate_knowledge_base_video_upload(file)
     with schema_context(get_public_schema_name()):
         module = _get_knowledge_base_module_or_404(module_id)
         if module.video:
@@ -581,7 +590,7 @@ def superadmin_update_knowledge_base_topic(request, topic_id: int, data: Knowled
 @router.post('/superadmin/knowledge-base/topics/{topic_id}/video', response=KnowledgeBaseTopicSchema)
 def superadmin_upload_knowledge_base_topic_video(request, topic_id: int, file: UploadedFile = File(...)):
     _require_superadmin(request)
-    validate_media_upload(file, 'video')
+    _validate_knowledge_base_video_upload(file)
     with schema_context(get_public_schema_name()):
         topic = _get_knowledge_base_topic_or_404(topic_id)
         if topic.video:
