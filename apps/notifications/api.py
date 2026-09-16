@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from ninja import Body, Router, Schema
@@ -213,8 +214,10 @@ def get_role_notification_policies(request):
 def save_role_notification_policies(request, body: dict = Body(...)):
     """Persist the matrix. Body: {role: {event_type: {email_enabled, web_enabled, locked}}}."""
     require_permission(request, 'admin_privileges')
+    org = resolve_permission_organization(request)
     allowed_types = {event_type for event_type, _label in PREFERENCE_TYPES}
     valid_roles = set(POLICY_ROLES)
+    current_policy = {role: _role_policy_map(role) for role in POLICY_ROLES}
 
     for role, entries in body.items():
         if role not in valid_roles:
@@ -226,15 +229,36 @@ def save_role_notification_policies(request, body: dict = Body(...)):
                 raise HttpError(400, f'Unknown notification type: {event_type}')
             if not isinstance(vals, dict):
                 raise HttpError(400, f'Entry must be an object for {role}/{event_type}')
-            RoleNotificationPolicy.objects.update_or_create(
-                role=role,
-                event_type=event_type,
-                defaults={
-                    'email_enabled': bool(vals.get('email_enabled', True)),
-                    'web_enabled': bool(vals.get('web_enabled', True)),
-                    'locked': bool(vals.get('locked', False)),
-                },
-            )
+
+    with transaction.atomic():
+        for role, entries in body.items():
+            for event_type, vals in entries.items():
+                email_enabled = bool(vals.get('email_enabled', True))
+                web_enabled = bool(vals.get('web_enabled', True))
+                previous = current_policy[role][event_type]
+
+                if (
+                    previous['email_enabled'] != email_enabled
+                    or previous['web_enabled'] != web_enabled
+                ):
+                    NotificationPreference.objects.filter(
+                        recipient__organization=org,
+                        recipient__role=role,
+                        event_type=event_type,
+                    ).update(
+                        email_enabled=email_enabled,
+                        web_enabled=web_enabled,
+                    )
+
+                RoleNotificationPolicy.objects.update_or_create(
+                    role=role,
+                    event_type=event_type,
+                    defaults={
+                        'email_enabled': email_enabled,
+                        'web_enabled': web_enabled,
+                        'locked': bool(vals.get('locked', False)),
+                    },
+                )
 
     return {role: _role_policy_map(role) for role in POLICY_ROLES}
 
