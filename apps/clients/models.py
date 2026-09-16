@@ -25,10 +25,6 @@ class Client(TenantAwareModel):
     class Meta:
         app_label = 'clients'
         ordering = ['last_name', 'first_name']
-        indexes = [
-            models.Index(fields=['organization', 'status', 'last_name', 'first_name'], name='client_org_status_name_idx'),
-            models.Index(fields=['organization', 'external_admin_id', 'status'], name='client_org_admin_status_idx'),
-        ]
 
     @property
     def full_name(self) -> str:
@@ -62,10 +58,6 @@ class ClientStaffAssignment(OrganizationScopedMixin):
     class Meta:
         app_label = 'clients'
         unique_together = [['client', 'user']]
-        indexes = [
-            models.Index(fields=['organization', 'user', 'is_active'], name='assign_org_user_active_idx'),
-            models.Index(fields=['organization', 'client', 'is_active'], name='assign_org_client_active_idx'),
-        ]
 
     def __str__(self) -> str:
         return f'{self.user_id} → {self.client}'

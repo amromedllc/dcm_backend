@@ -144,11 +144,6 @@ class Program(TenantAwareModel):
     class Meta:
         app_label = 'programs'
         ordering = ['display_order', 'name']
-        indexes = [
-            models.Index(fields=['organization', 'external_client_id', 'status', 'display_order'], name='program_org_client_status_idx'),
-            models.Index(fields=['organization', 'is_template', 'display_order'], name='program_org_template_ord_idx'),
-            models.Index(fields=['organization', 'folder', 'display_order'], name='program_org_folder_ord_idx'),
-        ]
 
     @property
     def client_id(self):
@@ -361,11 +356,6 @@ class Target(TenantAwareModel):
     class Meta:
         app_label = 'programs'
         ordering = ['display_order', 'id']
-        indexes = [
-            models.Index(fields=['organization', 'program', 'status', 'display_order'], name='target_org_program_status_idx'),
-            models.Index(fields=['organization', 'program', 'module', 'display_order'], name='target_org_program_module_idx'),
-            models.Index(fields=['organization', 'program', 'submodule', 'display_order'], name='target_org_program_submod_idx'),
-        ]
 
     def __str__(self) -> str:
         return f'{self.name} [{self.status}]'
@@ -462,9 +452,6 @@ class TargetSubItem(TenantAwareModel):
         app_label = 'programs'
         ordering = ['display_order', 'id']
         unique_together = [('target', 'key')]
-        indexes = [
-            models.Index(fields=['organization', 'target', 'status', 'display_order'], name='subitem_org_target_status_idx'),
-        ]
 
     def __str__(self) -> str:
         return f'{self.target_id}:{self.label} [{self.status}]'
@@ -650,9 +637,6 @@ class ProgramModule(TenantAwareModel):
     class Meta:
         app_label = 'programs'
         ordering = ['display_order', 'name']
-        indexes = [
-            models.Index(fields=['organization', 'program', 'display_order'], name='module_org_program_ord_idx'),
-        ]
 
     def __str__(self):
         return f'{self.program.name} / {self.name}'
@@ -673,9 +657,6 @@ class ProgramSubmodule(TenantAwareModel):
     class Meta:
         app_label = 'programs'
         ordering = ['display_order', 'name']
-        indexes = [
-            models.Index(fields=['organization', 'module', 'display_order'], name='submodule_org_module_ord_idx'),
-        ]
 
     def __str__(self):
         return f'{self.module.name} / {self.name}'

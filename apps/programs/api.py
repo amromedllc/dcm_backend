@@ -3,7 +3,6 @@ from types import SimpleNamespace
 
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import models
-from django.db.models import Prefetch
 from django_tenants.utils import get_public_schema_name, schema_context
 from ninja import Router, File, Form
 from ninja.errors import HttpError
@@ -745,14 +744,7 @@ def _optimized_program_image_url(request, image_field) -> str | None:
 # ---------------------------------------------------------------------------
 
 @router.get('/programs', response=list[ProgramListSchema])
-def list_programs(
-    request,
-    client_id: int,
-    category: str | None = None,
-    status: str | None = None,
-    limit: int | None = None,
-    offset: int = 0,
-):
+def list_programs(request, client_id: int, category: str | None = None, status: str | None = None):
     qs = Program.objects.filter(
         external_client_id=client_id,
         external_client_id__in=_accessible_external_client_ids(request),
@@ -762,17 +754,8 @@ def list_programs(
         qs = qs.filter(category=category)
     if status:
         qs = qs.filter(phase=status)
-    if offset < 0:
-        offset = 0
-    if limit is not None:
-        limit = max(0, min(limit, 100))
-        qs = qs[offset:offset + limit]
-    elif offset:
-        qs = qs[offset:]
-
     result = []
-    targets_prefetch = Prefetch('targets', queryset=Target.objects.only('id', 'program_id', 'status'))
-    for p in qs.prefetch_related(targets_prefetch):
+    for p in qs.prefetch_related('targets'):
         targets = list(p.targets.all())
         status_counts: dict[str, int] = {}
         for t in targets:

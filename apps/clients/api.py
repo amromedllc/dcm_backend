@@ -23,7 +23,6 @@ from apps.integrations.tpms_auth_client import (
 logger = logging.getLogger(__name__)
 
 _PATIENT_LIST_CACHE_TTL_SECONDS = 60
-_MAX_LIST_LIMIT = 100
 _redis_client: 'redis.Redis | None' = None
 
 
@@ -108,47 +107,20 @@ def _get_client_or_404(request, client_id: int) -> Client:
 # Client CRUD
 # ---------------------------------------------------------------------------
 
-def _slice_list(items, limit: int | None, offset: int = 0):
-    if offset < 0:
-        offset = 0
-    if limit is None:
-        return items[offset:]
-    limit = max(0, min(limit, _MAX_LIST_LIMIT))
-    return items[offset:offset + limit]
-
-
-def _limit_queryset(qs, limit: int | None, offset: int = 0):
-    if offset < 0:
-        offset = 0
-    if limit is None:
-        return qs[offset:]
-    limit = max(0, min(limit, _MAX_LIST_LIMIT))
-    return qs[offset:offset + limit]
-
-
-def _list_native_clients(
-    request,
-    include_inactive: bool,
-    search: str | None,
-    status: str | None,
-    limit: int | None,
-    offset: int,
-) -> list[Client]:
+def _list_native_clients(request, include_inactive: bool, search: str | None) -> list[Client]:
     """Native (non-TPMS) equivalent of list_clients — reads the local Client
     table directly instead of live TPMS data, reusing the same staff-scoping
     logic as _get_accessible_clients."""
     qs = _get_accessible_clients(request)
     if not include_inactive:
         qs = qs.filter(status=Client.Status.ACTIVE)
-    if status:
-        qs = qs.filter(status=status)
     if search:
         qs = qs.filter(
             Q(first_name__icontains=search)
             | Q(last_name__icontains=search)
             | Q(preferred_name__icontains=search)
         )
-    return list(_limit_queryset(qs.order_by('last_name', 'first_name'), limit, offset))
+    return list(qs.order_by('last_name', 'first_name'))
 
 
 def _map_patient_fields(patient: dict[str, Any], *, fallback_admin_id: int | None) -> dict[str, Any] | None:
@@ -261,9 +233,6 @@ def _sync_clients_from_tpms(
     *,
     include_inactive: bool,
     search: str | None,
-    status: str | None,
-    limit: int | None,
-    offset: int,
 ) -> list[Client]:
     """Fetch TPMS providers for this session and upsert into DCM Client rows.
 
@@ -282,15 +251,12 @@ def _sync_clients_from_tpms(
             raise HttpError(401, 'TherapyPMS session expired. Please log in again.') from exc
         raise HttpError(502, str(exc) or 'Failed to load patients from TherapyPMS') from exc
 
-    clients = _upsert_clients_from_patients(
+    return _upsert_clients_from_patients(
         patients,
         fallback_admin_id=request.user.external_admin_id,
         include_inactive=include_inactive,
         search=search,
     )
-    if status:
-        clients = [client for client in clients if client.status == status]
-    return _slice_list(clients, limit, offset)
 
 
 @router.get('', response=list[ClientSchema])
@@ -298,9 +264,6 @@ def list_clients(
     request,
     include_inactive: bool = False,
     search: str | None = None,
-    status: str | None = None,
-    limit: int | None = None,
-    offset: int = 0,
     sync: bool = True,
 ):
     """
@@ -313,15 +276,12 @@ def list_clients(
     still treats it as a patient id and has not been updated to match.
     """
     if request.user.external_admin_id is None or not sync:
-        return _list_native_clients(request, include_inactive, search, status, limit, offset)
+        return _list_native_clients(request, include_inactive, search)
 
     return _sync_clients_from_tpms(
         request,
         include_inactive=include_inactive,
         search=search,
-        status=status,
-        limit=limit,
-        offset=offset,
     )
 
 

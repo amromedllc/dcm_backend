@@ -103,10 +103,6 @@ class CentralProgram(models.Model):
     class Meta:
         app_label = 'central_library'
         ordering = ['display_order', 'name']
-        indexes = [
-            models.Index(fields=['status', 'display_order', 'name'], name='central_prog_status_ord_idx'),
-            models.Index(fields=['folder', 'display_order'], name='central_prog_folder_ord_idx'),
-        ]
 
     def __str__(self) -> str:
         return self.name
@@ -144,9 +140,6 @@ class CentralTarget(models.Model):
     class Meta:
         app_label = 'central_library'
         ordering = ['display_order', 'id']
-        indexes = [
-            models.Index(fields=['program', 'display_order'], name='central_target_prog_ord_idx'),
-        ]
 
     def __str__(self) -> str:
         return self.name
@@ -196,9 +189,6 @@ class KnowledgeBaseModule(models.Model):
     class Meta:
         app_label = 'central_library'
         ordering = ['display_order', 'title']
-        indexes = [
-            models.Index(fields=['is_active', 'display_order', 'title'], name='kb_module_active_ord_idx'),
-        ]
 
     def __str__(self) -> str:
         return self.title
@@ -220,9 +210,6 @@ class KnowledgeBaseTopic(models.Model):
     class Meta:
         app_label = 'central_library'
         ordering = ['display_order', 'title']
-        indexes = [
-            models.Index(fields=['module', 'is_active', 'display_order'], name='kb_topic_module_active_idx'),
-        ]
 
     def __str__(self) -> str:
         return f'{self.module.title}: {self.title}'
