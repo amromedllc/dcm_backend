@@ -10,7 +10,8 @@ from apps.accounts.auth import jwt_auth
 from apps.accounts.models import User
 from apps.accounts.permissions import require_permission, resolve_permission_organization, user_has_permission
 from apps.clients.api import _get_accessible_clients
-from apps.clients.models import ClientStaffAssignment
+from apps.clients.models import Client, ClientStaffAssignment
+from apps.integrations.tpms_auth_client import TpmsAuthError, get_tpms_access_token, list_providers
 from apps.tenants.models import OrganizationTpmsAdminId
 from .models import (
     FirebaseMessagingToken,
@@ -87,8 +88,16 @@ class NotificationPreferenceUpdate(Schema):
     web_enabled: bool = Field(...)
 
 
+class UserNotificationPreferenceUpdate(NotificationPreferenceUpdate):
+    locked: bool = Field(...)
+
+
 class NotificationPreferenceUpdateRequest(Schema):
     preferences: list[NotificationPreferenceUpdate]
+
+
+class UserNotificationPreferenceUpdateRequest(Schema):
+    preferences: list[UserNotificationPreferenceUpdate]
 
 
 class FirebaseTokenUpsert(Schema):
@@ -109,6 +118,15 @@ class ReportReviewerSchema(Schema):
 class PracticeEmailNotificationSettingSchema(Schema):
     admin_id: int
     email_notifications_enabled: bool
+
+
+class NotificationUserSchema(Schema):
+    id: int | None
+    full_name: str
+    email: str
+    role: str
+    external_employee_id: int | None = None
+    manageable: bool = True
 
 
 class ReportReviewRequestCreate(Schema):
@@ -145,25 +163,32 @@ def _default_preferences_for_user(user) -> list[NotificationPreference]:
     return preferences
 
 
-@router.get('/notifications/preferences', response=list[NotificationPreferenceSchema])
-def list_notification_preferences(request):
+def _effective_preference_rows(user, *, email_available: bool | None = None) -> list[dict]:
     labels = dict(PREFERENCE_TYPES)
-    policy = _role_policy_map(getattr(request.user, 'role', ''))
-    email_available = _practice_email_notifications_enabled(request.user)
+    policy = _role_policy_map(getattr(user, 'role', ''))
+    if email_available is None:
+        email_available = _practice_email_notifications_enabled(user)
+
     rows = []
-    for pref in _default_preferences_for_user(request.user):
+    for pref in _default_preferences_for_user(user):
         entry = policy.get(pref.event_type, {})
-        locked = bool(entry.get('locked'))
+        has_user_lock_override = pref.locked is not None
+        locked = bool(pref.locked) if has_user_lock_override else bool(entry.get('locked'))
+        use_policy_value = locked and not has_user_lock_override
         rows.append({
             'event_type': pref.event_type,
             'label': labels[pref.event_type],
-            # A locked type shows (and enforces) the role policy value.
-            'email_enabled': email_available and (entry['email_enabled'] if locked else pref.email_enabled),
-            'web_enabled': entry['web_enabled'] if locked else pref.web_enabled,
+            'email_enabled': email_available and (entry['email_enabled'] if use_policy_value else pref.email_enabled),
+            'web_enabled': entry['web_enabled'] if use_policy_value else pref.web_enabled,
             'locked': locked,
             'email_available': email_available,
         })
     return rows
+
+
+@router.get('/notifications/preferences', response=list[NotificationPreferenceSchema])
+def list_notification_preferences(request):
+    return _effective_preference_rows(request.user)
 
 
 @router.put('/notifications/preferences', response=list[NotificationPreferenceSchema])
@@ -174,9 +199,15 @@ def update_notification_preferences(request, payload: NotificationPreferenceUpda
         if item.event_type not in allowed:
             raise HttpError(400, f'Unknown notification type: {item.event_type}')
         entry = policy.get(item.event_type, {})
+        pref = NotificationPreference.objects.filter(
+            recipient=request.user,
+            event_type=item.event_type,
+        ).first()
+        has_user_lock_override = pref is not None and pref.locked is not None
+        locked = bool(pref.locked) if has_user_lock_override else bool(entry.get('locked'))
         email_enabled = item.email_enabled and _practice_email_notifications_enabled(request.user)
-        if entry.get('locked'):
-            # Ignore client-supplied values for locked types — the role policy wins.
+        if locked:
+            # Ignore client-supplied values for locked types.
             continue
         NotificationPreference.objects.update_or_create(
             recipient=request.user,
@@ -187,6 +218,159 @@ def update_notification_preferences(request, payload: NotificationPreferenceUpda
             },
         )
     return list_notification_preferences(request)
+
+
+def _manageable_notification_user(request, user_id: int) -> User:
+    require_permission(request, 'admin_privileges')
+    try:
+        return User.objects.get(_notification_user_scope_q(request), id=user_id, is_active=True)
+    except User.DoesNotExist:
+        raise HttpError(404, 'User not found')
+
+
+def _notification_user_scope_q(request) -> Q:
+    if request.user.external_admin_id is not None:
+        return Q(external_admin_id=request.user.external_admin_id)
+    if request.user.organization_id is None:
+        return Q(pk=None)
+
+    mapped_admin_ids = OrganizationTpmsAdminId.objects.filter(
+        organization_id=request.user.organization_id,
+    ).values_list('admin_id', flat=True)
+    return Q(organization_id=request.user.organization_id) | Q(external_admin_id__in=mapped_admin_ids)
+
+
+def _notification_client_scope_q(request) -> Q:
+    if request.user.external_admin_id is not None:
+        return Q(external_admin_id=request.user.external_admin_id)
+    if request.user.organization_id is None:
+        return Q(pk=None)
+
+    mapped_admin_ids = OrganizationTpmsAdminId.objects.filter(
+        organization_id=request.user.organization_id,
+    ).values_list('admin_id', flat=True)
+    return Q(organization_id=request.user.organization_id) | Q(external_admin_id__in=mapped_admin_ids)
+
+
+def _parse_int(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _notification_central_provider_rows(request) -> list[dict]:
+    rows: list[dict] = []
+    if request.user.external_admin_id is not None:
+        token = get_tpms_access_token(request.user.id)
+        if token:
+            try:
+                rows = list_providers(token)
+            except TpmsAuthError:
+                rows = []
+
+    if not rows:
+        rows = [
+            {'id': client.external_id, 'name': client.full_name}
+            for client in (
+                Client.objects
+                .filter(_notification_client_scope_q(request))
+                .exclude(external_id='')
+                .order_by('last_name', 'first_name')
+            )
+        ]
+
+    seen = set()
+    result = []
+    for row in rows:
+        external_id = row.get('id')
+        if external_id is None:
+            continue
+        key = str(external_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({
+            'external_employee_id': _parse_int(external_id),
+            'external_employee_key': key,
+            'full_name': str(row.get('name') or '').strip() or f'Provider {external_id}',
+        })
+    result.sort(key=lambda item: item['full_name'].lower())
+    return result
+
+
+@router.get('/notifications/users', response=list[NotificationUserSchema])
+def list_notification_users(request):
+    require_permission(request, 'admin_privileges')
+    users = list(
+        User.objects
+        .filter(_notification_user_scope_q(request), is_active=True)
+        .exclude(role=User.Role.CAREGIVER)
+        .order_by('last_name', 'first_name', 'email')
+    )
+    users_by_employee_id = {
+        str(user.external_employee_id): user
+        for user in users
+        if user.external_employee_id is not None
+    }
+
+    result = []
+    added_user_ids = set()
+    for provider in _notification_central_provider_rows(request):
+        user = users_by_employee_id.get(provider['external_employee_key'])
+        if user is not None:
+            added_user_ids.add(user.id)
+        result.append({
+            'id': user.id if user else None,
+            'full_name': (user.full_name or user.email) if user else provider['full_name'],
+            'email': user.email if user else '',
+            'role': user.role if user else User.Role.STAFF,
+            'external_employee_id': provider['external_employee_id'],
+            'manageable': user is not None,
+        })
+
+    for user in users:
+        if user.id in added_user_ids:
+            continue
+        result.append({
+            'id': user.id,
+            'full_name': user.full_name or user.email,
+            'email': user.email,
+            'role': user.role,
+            'external_employee_id': user.external_employee_id,
+            'manageable': True,
+        })
+
+    return result
+
+
+@router.get('/notifications/user-preferences', response=list[NotificationPreferenceSchema])
+def list_user_notification_preferences(request, user_id: int):
+    user = _manageable_notification_user(request, user_id)
+    return _effective_preference_rows(user)
+
+
+@router.put('/notifications/user-preferences/{user_id}', response=list[NotificationPreferenceSchema])
+def save_user_notification_preferences(request, user_id: int, payload: UserNotificationPreferenceUpdateRequest):
+    user = _manageable_notification_user(request, user_id)
+    allowed = {event_type for event_type, _label in PREFERENCE_TYPES}
+    email_available = _practice_email_notifications_enabled(user)
+
+    for item in payload.preferences:
+        if item.event_type not in allowed:
+            raise HttpError(400, f'Unknown notification type: {item.event_type}')
+
+    for item in payload.preferences:
+        NotificationPreference.objects.update_or_create(
+            recipient=user,
+            event_type=item.event_type,
+            defaults={
+                'email_enabled': item.email_enabled and email_available,
+                'web_enabled': item.web_enabled,
+                'locked': item.locked,
+            },
+        )
+    return _effective_preference_rows(user, email_available=email_available)
 
 
 @router.get('/notifications/practice-email-settings', response=list[PracticeEmailNotificationSettingSchema])
@@ -245,6 +429,7 @@ def save_role_notification_policies(request, body: dict = Body(...)):
                         recipient__organization=org,
                         recipient__role=role,
                         event_type=event_type,
+                        locked__isnull=True,
                     ).update(
                         email_enabled=email_enabled,
                         web_enabled=web_enabled,

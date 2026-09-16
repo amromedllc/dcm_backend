@@ -5,6 +5,7 @@ from django_tenants.utils import schema_context
 
 from apps.accounts.auth import create_access_token
 from apps.accounts.models import User
+from apps.clients.models import Client
 from apps.notifications.models import Notification, NotificationPreference, RoleNotificationPolicy
 from apps.notifications.service import _create
 from apps.tenants.models import Domain, Organization, OrganizationTpmsAdminId
@@ -229,6 +230,109 @@ class NotificationPreferenceTests(TestCase):
         self.assertFalse(target_row['locked'])
         self.assertFalse(target_row['email_enabled'])
         self.assertFalse(target_row['web_enabled'])
+
+    def test_admin_can_manage_notification_preferences_for_an_individual_user(self):
+        admin_token = create_access_token(self.admin, self.org.pk)
+        save_response = DjangoClient(
+            HTTP_AUTHORIZATION=f'Bearer {admin_token}',
+            HTTP_HOST='localhost',
+        ).put(
+            f'/api/v1/notifications/user-preferences/{self.user.id}',
+            data={
+                'preferences': [
+                    {
+                        'event_type': 'target_mastered',
+                        'email_enabled': False,
+                        'web_enabled': True,
+                        'locked': True,
+                    },
+                ],
+            },
+            content_type='application/json',
+        )
+        self.addCleanup(connection.set_schema_to_public)
+
+        self.assertEqual(save_response.status_code, 200)
+        saved_row = next(
+            row for row in save_response.json()
+            if row['event_type'] == 'target_mastered'
+        )
+        self.assertTrue(saved_row['locked'])
+        self.assertFalse(saved_row['email_enabled'])
+        self.assertTrue(saved_row['web_enabled'])
+
+        user_token = create_access_token(self.user, self.org.pk)
+        account_response = DjangoClient(
+            HTTP_AUTHORIZATION=f'Bearer {user_token}',
+            HTTP_HOST='localhost',
+        ).get('/api/v1/notifications/preferences')
+
+        self.assertEqual(account_response.status_code, 200)
+        account_row = next(
+            row for row in account_response.json()
+            if row['event_type'] == 'target_mastered'
+        )
+        self.assertTrue(account_row['locked'])
+        self.assertFalse(account_row['email_enabled'])
+        self.assertTrue(account_row['web_enabled'])
+
+    def test_notification_user_picker_includes_mapped_tpms_practice_users(self):
+        OrganizationTpmsAdminId.objects.create(
+            organization=self.org,
+            admin_id=501,
+            email_notifications_enabled=True,
+        )
+        tpms_user = User.objects.create_user(
+            email='tpms-staff@example.com',
+            password='x',
+            first_name='Tpms',
+            last_name='Staff',
+            external_admin_id=501,
+            external_employee_id=9001,
+            role=User.Role.STAFF,
+        )
+
+        admin_token = create_access_token(self.admin, self.org.pk)
+        response = DjangoClient(
+            HTTP_AUTHORIZATION=f'Bearer {admin_token}',
+            HTTP_HOST='localhost',
+        ).get('/api/v1/notifications/users')
+        self.addCleanup(connection.set_schema_to_public)
+
+        self.assertEqual(response.status_code, 200)
+        user_ids = {row['id'] for row in response.json()}
+        self.assertIn(tpms_user.id, user_ids)
+
+    def test_notification_user_picker_shows_central_provider_without_dcm_user_as_unmanageable(self):
+        OrganizationTpmsAdminId.objects.create(
+            organization=self.org,
+            admin_id=501,
+            email_notifications_enabled=True,
+        )
+        with schema_context(self.org.schema_name), tenant_context(self.org.id):
+            Client.objects.create(
+                organization=self.org,
+                external_admin_id=501,
+                external_id='9002',
+                first_name='Central',
+                last_name='Provider',
+            )
+
+        admin_token = create_access_token(self.admin, self.org.pk)
+        response = DjangoClient(
+            HTTP_AUTHORIZATION=f'Bearer {admin_token}',
+            HTTP_HOST='localhost',
+        ).get('/api/v1/notifications/users')
+        self.addCleanup(connection.set_schema_to_public)
+
+        self.assertEqual(response.status_code, 200)
+        provider_row = next(
+            row for row in response.json()
+            if row['external_employee_id'] == 9002
+        )
+        self.assertIsNone(provider_row['id'])
+        self.assertFalse(provider_row['manageable'])
+        self.assertEqual(provider_row['full_name'], 'Central Provider')
 
     def test_tpms_practice_gate_disables_email_delivery(self):
         OrganizationTpmsAdminId.objects.create(
