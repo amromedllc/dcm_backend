@@ -1,3 +1,6 @@
+from datetime import date, datetime, time
+import logging
+
 from django.db.models import Count
 from django.utils import timezone
 from ninja import Router, Form, File
@@ -34,6 +37,7 @@ from .schemas import (
 from .services import build_program_snapshot, submit_session, approve_session, reject_session
 
 router = Router(auth=partner_auth)
+logger = logging.getLogger(__name__)
 
 DEFAULT_ABC_CATEGORIES = [
     {'key': 'antecedent', 'label': 'Antecedent', 'is_required': True, 'display_order': 10},
@@ -86,8 +90,8 @@ def _get_session_or_404(session_id: int, request) -> SessionRun:
     """
     qs = SessionRun.objects.select_related('staff').filter(
         external_client_id__in=_accessible_external_client_ids(request),
-    )
-    if request.user.role == 'staff':
+    ).order_by('-started_at')
+    if request.user.role == 'staff' and client_id is None:
         qs = qs.filter(staff_id=request.user.id)
     try:
         return qs.get(id=session_id)
@@ -490,13 +494,16 @@ def my_schedule(request, date: str | None = None):
     except ValueError:
         raise HttpError(400, 'Invalid date — use YYYY-MM-DD')
 
-    employee_id = request.user.external_employee_id
-    if employee_id is None:
+    def local_schedule():
         return list(
             _appt_qs()
             .filter(staff_id=request.user.id, start_time__date=target)
             .order_by('start_time')
         )
+
+    employee_id = request.user.external_employee_id
+    if employee_id is None:
+        return local_schedule()
 
     token = get_tpms_access_token(request.user.id)
     if not token:
@@ -516,7 +523,14 @@ def my_schedule(request, date: str | None = None):
         if exc.status_code in {401, 403}:
             clear_tpms_access_token(request.user.id)
             raise HttpError(401, 'TherapyPMS session expired. Please log in again.') from exc
-        raise HttpError(502, str(exc) or 'Failed to load appointments from TherapyPMS') from exc
+        logger.warning(
+            'TPMS schedule unavailable for user_id=%s employee_id=%s date=%s; returning local appointments',
+            request.user.id,
+            employee_id,
+            target.isoformat(),
+            exc_info=True,
+        )
+        return local_schedule()
 
     return _serialize_tpms_api_appointments(
         appointments=appointments,
@@ -772,7 +786,13 @@ def list_sessions(
     client_id: int | None = None,
     status: str | None = None,
     staff_id: int | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
 ):
+    def day_bound(day: date, value: time):
+        dt = datetime.combine(day, value)
+        return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+
     qs = SessionRun.objects.select_related('staff').filter(
         external_client_id__in=_accessible_external_client_ids(request),
     )
@@ -780,6 +800,10 @@ def list_sessions(
         qs = qs.filter(external_client_id=_canonical_external_client_id(client_id))
     if status:
         qs = qs.filter(status=status)
+    if date_from:
+        qs = qs.filter(started_at__gte=day_bound(date_from, time.min))
+    if date_to:
+        qs = qs.filter(started_at__lte=day_bound(date_to, time.max))
     if request.user.role == 'staff':
         qs = qs.filter(staff_id=request.user.id)
     elif staff_id:
