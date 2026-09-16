@@ -51,15 +51,18 @@ def _channel_enabled(recipient, event_type: str, channel: str) -> bool:
             role=getattr(recipient, 'role', ''),
             event_type=preference_event_type,
         ).first()
-        # A locked role policy overrides any personal preference.
-        if policy is not None and policy.locked:
-            return channel_value(policy)
-
         pref = NotificationPreference.all_organizations.filter(
             organization_id=getattr(recipient, 'organization_id', None),
             recipient=recipient,
             event_type=preference_event_type,
         ).first()
+
+        # An admin-managed user preference is explicit and wins over role defaults.
+        if pref is not None and pref.locked is not None:
+            return channel_value(pref)
+        # A locked role policy overrides ordinary personal preferences.
+        if policy is not None and policy.locked:
+            return channel_value(policy)
         if pref is not None:
             return channel_value(pref)
         if policy is not None:

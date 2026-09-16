@@ -42,6 +42,7 @@ class NotificationPreference(TenantAwareModel):
     event_type = models.CharField(max_length=80, db_index=True)
     email_enabled = models.BooleanField(default=True)
     web_enabled = models.BooleanField(default=True)
+    locked = models.BooleanField(null=True, blank=True, default=None)
 
     class Meta:
         app_label = 'notifications'
