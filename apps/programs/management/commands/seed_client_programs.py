@@ -78,11 +78,11 @@ PROGRAMS = [
     {
         'name': 'Attending & Compliance — Sit and Attend',
         'category': 'skill_acquisition',
-        'treatment_area': 'Attending Skills',
+        'treatment_area': 'Behavior Management',
         'phase': 'teaching',
         'objective': 'Client will orient to instructor and remain seated for the duration of a 1:1 demand across 3 consecutive sessions with 90% accuracy.',
         'instructions': 'Deliver instruction only once client is seated and oriented. Reinforce brief compliance heavily at first, thinning the schedule as duration increases.',
-        'tags': ['Foundational', 'Readiness'],
+        'tags': ['Priority'],
         'targets': [
             {'name': 'Sit in chair on request', 'measurement_type': 'discrete_trial', 'status': 'mastered', 'sd_text': '"Sit down"'},
             {'name': 'Orient to name (eye contact within 3s)', 'measurement_type': 'discrete_trial', 'status': 'acquisition', 'sd_text': 'Call client\'s name from 3 feet away'},
@@ -97,7 +97,7 @@ PROGRAMS = [
         'phase': 'teaching',
         'objective': 'Client will correctly perform 5 one-step motor instructions when given the verbal SD alone, across 3 consecutive sessions with 80% accuracy.',
         'instructions': 'Present the instruction once; do not repeat. Use errorless teaching (model prompt) on new targets, fading to independent per the org fading template.',
-        'tags': ['Language', 'Receptive'],
+        'tags': ['New'],
         'targets': [
             {'name': 'Come here', 'measurement_type': 'discrete_trial', 'status': 'mastered', 'sd_text': '"Come here"'},
             {'name': 'Stand up', 'measurement_type': 'discrete_trial', 'status': 'acquisition', 'sd_text': '"Stand up"'},
@@ -113,7 +113,7 @@ PROGRAMS = [
         'phase': 'teaching',
         'objective': 'Client will identify 6 body parts by pointing when asked "Show me ___" with 90% accuracy across 3 consecutive sessions.',
         'instructions': 'Use a card or doll for receptive identification. Mix targets across trials. Use errorless learning initially, fading prompts systematically per the fading template.',
-        'tags': ['Language', 'Receptive'],
+        'tags': ['Review'],
         'targets': [
             {'name': 'Identify nose', 'measurement_type': 'discrete_trial', 'status': 'mastered', 'sd_text': '"Show me your nose"'},
             {'name': 'Identify ears', 'measurement_type': 'discrete_trial', 'status': 'mastered', 'sd_text': '"Show me your ears"'},
@@ -130,7 +130,7 @@ PROGRAMS = [
         'phase': 'teaching',
         'objective': 'Client will point to 5 common objects when named, from an array of 3–5 items, with 90% accuracy across 3 consecutive sessions.',
         'instructions': 'Randomize item position each trial to control for side bias. Start with a 2-item field and expand as accuracy improves.',
-        'tags': ['Language', 'Receptive'],
+        'tags': ['New'],
         'targets': [
             {'name': 'Point to ball', 'measurement_type': 'discrete_trial', 'status': 'acquisition', 'sd_text': '"Point to the ball" (array of 3)'},
             {'name': 'Point to cup', 'measurement_type': 'discrete_trial', 'status': 'acquisition', 'sd_text': '"Point to the cup" (array of 3)'},
@@ -142,11 +142,11 @@ PROGRAMS = [
     {
         'name': 'Motor Imitation — Gross Motor Actions',
         'category': 'skill_acquisition',
-        'treatment_area': 'Imitation',
+        'treatment_area': 'Social Skills',
         'phase': 'teaching',
         'objective': 'Client will imitate 4 gross motor actions within 5s of the model, with 90% accuracy across 3 consecutive sessions.',
         'instructions': '"Do this" + model the action. Use physical prompt on first exposure only, fading per the fading template. Vary action order across trials.',
-        'tags': ['Imitation', 'Motor'],
+        'tags': ['Review'],
         'targets': [
             {'name': 'Imitate clap hands', 'measurement_type': 'discrete_trial', 'status': 'mastered', 'sd_text': '"Do this" + clap'},
             {'name': 'Imitate raise arms', 'measurement_type': 'discrete_trial', 'status': 'acquisition', 'sd_text': '"Do this" + raise arms overhead'},
@@ -158,11 +158,11 @@ PROGRAMS = [
     {
         'name': 'Visual Performance — Matching Identical Items',
         'category': 'skill_acquisition',
-        'treatment_area': 'Visual Performance',
+        'treatment_area': 'Language',
         'phase': 'teaching',
         'objective': 'Client will match identical objects/pictures to sample from a field of 3, with 90% accuracy across 3 consecutive sessions.',
         'instructions': 'Present sample, then array of 3 (1 match, 2 distractors). Reinforce independent matches; use gestural prompt only if needed.',
-        'tags': ['Matching', 'Visual Performance'],
+        'tags': ['New'],
         'targets': [
             {'name': 'Match identical picture cards', 'measurement_type': 'discrete_trial', 'status': 'acquisition', 'sd_text': '"Match" (sample card + array of 3)'},
             {'name': 'Match identical objects', 'measurement_type': 'discrete_trial', 'status': 'probe', 'sd_text': '"Match" (sample object + array of 3)'},
@@ -177,7 +177,7 @@ PROGRAMS = [
         'phase': 'teaching',
         'objective': 'Client will vocally label 5 common objects/pictures when shown, with 80% accuracy across 3 consecutive sessions.',
         'instructions': 'Hold up item, "What is this?" Wait 3–5s before prompting with an echoic model. Accept approximations per the client\'s current articulation goals.',
-        'tags': ['Language', 'Expressive', 'Tacting'],
+        'tags': ['Review'],
         'targets': [
             {'name': 'Label ball', 'measurement_type': 'discrete_trial', 'status': 'acquisition', 'sd_text': '"What is this?" (holding ball)'},
             {'name': 'Label cup', 'measurement_type': 'discrete_trial', 'status': 'acquisition', 'sd_text': '"What is this?" (holding cup)'},
@@ -193,7 +193,7 @@ PROGRAMS = [
         'phase': 'teaching',
         'objective': 'Client will independently request preferred items, activities, and breaks using vocal speech or AAC device across 3 consecutive sessions with 80% accuracy.',
         'instructions': 'Present the preferred item just out of reach. Wait 3–5 seconds for a spontaneous mand before prompting. Reinforce immediately and specifically (give the item requested).',
-        'tags': ['Communication', 'Verbal Behavior'],
+        'tags': ['Priority', 'Parent Training'],
         'targets': [
             {'name': 'Request preferred snack', 'measurement_type': 'discrete_trial', 'status': 'acquisition', 'sd_text': 'Present snack just out of reach, pause 5s'},
             {'name': 'Request break', 'measurement_type': 'discrete_trial', 'status': 'acquisition', 'sd_text': 'Present task demand, wait for mand'},
@@ -209,7 +209,7 @@ PROGRAMS = [
         'phase': 'teaching',
         'objective': 'Client will engage in reciprocal turn-taking and respond to bids for joint attention across 3 consecutive sessions with 80% accuracy.',
         'instructions': 'Embed within preferred play (ball rolling, blocks). Model the turn-taking exchange; prompt physically only if needed, fading per the fading template.',
-        'tags': ['Social Skills', 'Play'],
+        'tags': ['Parent Training'],
         'targets': [
             {'name': 'Take turns rolling ball', 'measurement_type': 'discrete_trial', 'status': 'acquisition', 'sd_text': '"Your turn" (ball rolling exchange)'},
             {'name': 'Respond to name call with eye contact + orient', 'measurement_type': 'discrete_trial', 'status': 'probe', 'sd_text': 'Call name from across the room'},
@@ -224,7 +224,7 @@ PROGRAMS = [
         'phase': 'teaching',
         'objective': 'Client will independently complete the hand-washing chain, scored step-by-step, with 90% of steps correct across 3 consecutive sessions.',
         'instructions': 'Use a visual task analysis posted at the sink. Provide the least intrusive prompt needed per step; score each step independently. Reinforce at the end of the full chain.',
-        'tags': ['ADL', 'Independence', 'Task Analysis'],
+        'tags': ['Parent Training'],
         'is_task_analysis': True,
         'targets': [
             {
@@ -251,7 +251,7 @@ PROGRAMS = [
         'phase': 'teaching',
         'objective': 'Reduce frequency of head-hitting behavior to 0–2 occurrences per session across 5 consecutive sessions.',
         'instructions': 'Record each occurrence using frequency count. Implement DRO schedule. Antecedent: avoid known triggers. Consequence: withhold attention, redirect to functional activity.',
-        'tags': ['SIB', 'Behavior Reduction'],
+        'tags': ['Priority'],
         'targets': [
             {'name': 'Head hitting', 'measurement_type': 'frequency', 'status': 'acquisition', 'sd_text': 'Record each occurrence of head hitting (palm or object)'},
         ],
@@ -263,7 +263,7 @@ PROGRAMS = [
         'phase': 'teaching',
         'objective': 'Reduce duration of tantrum episodes to under 2 minutes per session average.',
         'instructions': 'Record start and end time of each tantrum. Tantrum defined as: crying, screaming, or dropping to floor lasting >10 seconds. Use planned ignoring unless safety is a concern.',
-        'tags': ['Behavior Reduction', 'Emotion Regulation'],
+        'tags': ['Priority', 'Parent Training'],
         'targets': [
             {'name': 'Tantrum duration', 'measurement_type': 'duration', 'status': 'acquisition', 'sd_text': 'Record total duration of tantrum episode in seconds'},
         ],
@@ -272,11 +272,11 @@ PROGRAMS = [
     {
         'name': 'ABC Data — Aggression',
         'category': 'abc_recording',
-        'treatment_area': 'Behavior Analysis',
+        'treatment_area': 'Behavior Management',
         'phase': 'baseline',
         'objective': 'Collect ABC data across 10 sessions to identify function and antecedents of aggressive behavior.',
         'instructions': 'Complete an ABC form for every aggressive episode. Antecedent: describe what happened immediately before. Behavior: describe the topography. Consequence: what happened after.',
-        'tags': ['ABC', 'Functional Analysis'],
+        'tags': ['Priority'],
         'targets': [
             {'name': 'Aggression toward peers', 'measurement_type': 'frequency', 'status': 'acquisition', 'sd_text': 'Record each aggressive act toward another person'},
             {'name': 'Property destruction', 'measurement_type': 'frequency', 'status': 'acquisition', 'sd_text': 'Record each instance of throwing or breaking objects'},

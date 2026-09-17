@@ -1,7 +1,8 @@
 """
 Seeds a full demo dataset for one Organization: Settings-page entities
 (treatment areas, tags, target statuses, data fields, prompting/mastery/
-workflow templates), a demo Client, and Programs+Targets for that client.
+workflow templates, ABC categories), a demo Client, and Programs+Targets
+for that client.
 
 Written org-scoped from the start (tenant_context, not schema_context) —
 this is what every seed command moves to once the M3 rework of the
@@ -24,8 +25,6 @@ SEED_STATUSES = [
     {'key': 'acquisition', 'label': 'Acquisition', 'icon': 'graduation-cap', 'color': '#2563eb', 'is_staff_visible': True, 'is_default': False, 'display_order': 2},
     {'key': 'mastered', 'label': 'Mastered', 'icon': 'trophy', 'color': '#7c3aed', 'is_staff_visible': True, 'is_default': False, 'display_order': 3},
     {'key': 'closed', 'label': 'Closed', 'icon': 'check-circle', 'color': '#059669', 'is_staff_visible': False, 'is_default': False, 'display_order': 4},
-    {'key': 'hold', 'label': 'Hold', 'icon': 'hand', 'color': '#ea580c', 'is_staff_visible': False, 'is_default': False, 'display_order': 5},
-    {'key': 'discontinued', 'label': 'Discontinued', 'icon': 'x-square', 'color': '#dc2626', 'is_staff_visible': False, 'is_default': False, 'display_order': 6},
 ]
 
 TREATMENT_AREAS = ['Communication', 'Language', 'Daily Living Skills', 'Behavior Management', 'Social Skills']
@@ -42,6 +41,46 @@ DATA_FIELDS = [
     {'name': 'Re-eval Due Date', 'field_type': 'date', 'field_location': 'treatment_tab'},
     {'name': 'Parent Consent on File', 'field_type': 'yes_no', 'field_location': 'instructions_tab'},
 ]
+
+PROMPTING_TEMPLATES = [
+    {
+        'name': 'Standard Prompt Hierarchy',
+        'description': 'Full Physical → Partial Physical → Model → Gestural → Independent',
+        'levels': [
+            {'label': 'Full Physical', 'score': 0, 'color': '#e74c3c', 'abbreviation': 'FP'},
+            {'label': 'Partial Physical', 'score': 0, 'color': '#e67e22', 'abbreviation': 'PP'},
+            {'label': 'Model', 'score': 0, 'color': '#f1c40f', 'abbreviation': 'M'},
+            {'label': 'Gestural', 'score': 0, 'color': '#3498db', 'abbreviation': 'G'},
+            {'label': 'Independent', 'score': 1, 'color': '#2ecc71', 'abbreviation': 'I'},
+        ],
+        'is_org_default': True,
+    },
+    {
+        'name': 'Errorless Teaching (3-Level)',
+        'description': 'Model → Gestural → Independent — for skills taught with errorless learning.',
+        'levels': [
+            {'label': 'Model', 'score': 0, 'color': '#f1c40f', 'abbreviation': 'M'},
+            {'label': 'Gestural', 'score': 0, 'color': '#3498db', 'abbreviation': 'G'},
+            {'label': 'Independent', 'score': 1, 'color': '#2ecc71', 'abbreviation': 'I'},
+        ],
+        'is_org_default': False,
+    },
+    {
+        'name': 'Verbal Prompt Hierarchy',
+        'description': 'Full Verbal → Partial Verbal → Independent — for vocal/verbal-behavior targets.',
+        'levels': [
+            {'label': 'Full Verbal', 'score': 0, 'color': '#e74c3c', 'abbreviation': 'FV'},
+            {'label': 'Partial Verbal', 'score': 0, 'color': '#e67e22', 'abbreviation': 'PV'},
+            {'label': 'Independent', 'score': 1, 'color': '#2ecc71', 'abbreviation': 'I'},
+        ],
+        'is_org_default': False,
+    },
+]
+
+ABC_CATEGORY_ITEMS = {
+    'setting': ['Home', 'Classroom', 'Community', 'Therapy Room', 'Playground'],
+    'reporter': ['BCBA', 'RBT', 'Parent/Caregiver', 'Teacher'],
+}
 
 WORKFLOWS = [
     {
@@ -159,11 +198,38 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--org', required=True, help='Organization schema_name or slug (e.g. dev)')
         parser.add_argument('--clear', action='store_true', help='Delete this org\'s existing seeded programs/client first')
+        parser.add_argument(
+            '--created-by-email', default='antony@amromed.org',
+            help='Owner stamped on every seeded settings row (Settings tabs are practice-scoped via created_by)',
+        )
 
     def handle(self, *args, **options):
         org = self._resolve_org(options['org'])
         with schema_context(org.schema_name), tenant_context(org.pk):
-            self._seed(org, options['clear'])
+            creator = self._resolve_creator(options['created_by_email'])
+            self._seed(org, options['clear'], creator)
+
+    def _resolve_creator(self, email: str):
+        from apps.accounts.models import User
+        try:
+            return User.objects.get(email__iexact=email)
+        except User.DoesNotExist:
+            raise CommandError(f'No User with email "{email}" — create one first or pass --created-by-email')
+
+    def _owned(self, model, defaults=None, creator=None, **lookup):
+        """get_or_create that always stamps/backfills created_by.
+
+        Settings rows are practice-scoped via created_by (see _settings_qs in
+        apps/programs/api.py) — a row seeded with created_by=None is invisible
+        to every practice-scoped viewer except on TargetStatus. Backfilling on
+        an already-existing row (not just at creation) matters because this
+        command is meant to be re-run safely on orgs seeded before this existed.
+        """
+        obj, created = model.objects.get_or_create(defaults={**(defaults or {}), 'created_by': creator}, **lookup)
+        if not created and obj.created_by_id is None and creator is not None:
+            obj.created_by = creator
+            obj.save(update_fields=['created_by'])
+        return obj, created
 
     def _resolve_org(self, ref: str) -> Organization:
         try:
@@ -175,14 +241,14 @@ class Command(BaseCommand):
         except Organization.DoesNotExist:
             raise CommandError(f'No Organization with schema_name or slug "{ref}"')
 
-    def _seed(self, org: Organization, clear: bool):
+    def _seed(self, org: Organization, clear: bool, creator):
         from apps.clients.models import Client
         from apps.programs.models import (
             PromptingTemplate, Program, ProgramDataField,
             ProgramTag, Target, TargetStatus, TreatmentArea, WorkflowTemplate,
         )
 
-        self.stdout.write(f'Seeding demo data for organization: {org.name} ({org.schema_name})')
+        self.stdout.write(f'Seeding demo data for organization: {org.name} ({org.schema_name}), owner: {creator.email}')
 
         if clear:
             deleted, _ = Program.objects.filter(name__in=[p['name'] for p in PROGRAMS]).delete()
@@ -190,42 +256,66 @@ class Command(BaseCommand):
 
         # ── Settings: statuses ──────────────────────────────────────────────
         for row in SEED_STATUSES:
-            _, created = TargetStatus.objects.get_or_create(key=row['key'], defaults=row)
+            _, created = self._owned(TargetStatus, defaults=row, creator=creator, key=row['key'])
             self.stdout.write(f'  {"Created" if created else "Found"} status: {row["label"]}')
 
         # ── Settings: treatment areas ────────────────────────────────────────
         for name in TREATMENT_AREAS:
-            TreatmentArea.objects.get_or_create(name=name)
+            self._owned(TreatmentArea, creator=creator, name=name)
 
         # ── Settings: tags ───────────────────────────────────────────────────
         tag_objects = {}
         for tag_data in PROGRAM_TAGS:
-            tag, _ = ProgramTag.objects.get_or_create(name=tag_data['name'], defaults={'color': tag_data['color']})
+            tag, _ = self._owned(ProgramTag, defaults={'color': tag_data['color']}, creator=creator, name=tag_data['name'])
             tag_objects[tag_data['name']] = tag
 
         # ── Settings: data fields ───────────────────────────────────────────
         for field_data in DATA_FIELDS:
-            ProgramDataField.objects.get_or_create(name=field_data['name'], defaults=field_data)
+            self._owned(ProgramDataField, defaults=field_data, creator=creator, name=field_data['name'])
 
         # ── Settings: prompting templates ───────────────────────────────────
-        prompt_tpl, _ = PromptingTemplate.objects.get_or_create(
-            name='Standard Prompt Hierarchy',
-            defaults={
-                'description': 'Full Physical → Partial Physical → Model → Gestural → Independent',
-                'levels': [
-                    {'label': 'Full Physical', 'score': 0, 'color': '#e74c3c', 'abbreviation': 'FP'},
-                    {'label': 'Partial Physical', 'score': 0, 'color': '#e67e22', 'abbreviation': 'PP'},
-                    {'label': 'Model', 'score': 0, 'color': '#f1c40f', 'abbreviation': 'M'},
-                    {'label': 'Gestural', 'score': 0, 'color': '#3498db', 'abbreviation': 'G'},
-                    {'label': 'Independent', 'score': 1, 'color': '#2ecc71', 'abbreviation': 'I'},
-                ],
-                'is_org_default': True,
-            },
-        )
+        prompting_objects = {}
+        for tpl_data in PROMPTING_TEMPLATES:
+            tpl, created = self._owned(
+                PromptingTemplate,
+                creator=creator,
+                name=tpl_data['name'],
+                defaults={
+                    'description': tpl_data['description'],
+                    'levels': tpl_data['levels'],
+                    'is_org_default': tpl_data['is_org_default'],
+                },
+            )
+            prompting_objects[tpl_data['name']] = tpl
+            self.stdout.write(f'  {"Created" if created else "Found"} prompting template: {tpl.name}')
+
+        prompt_tpl = prompting_objects.get('Standard Prompt Hierarchy')
+        # ── Settings: ABC categories ─────────────────────────────────────────
+        from apps.sessions.api import DEFAULT_ABC_CATEGORIES
+        from apps.sessions.models import ABCCategory, ABCItem
+
+        category_objects = {}
+        for row in DEFAULT_ABC_CATEGORIES:
+            category, created = self._owned(ABCCategory, defaults=row, creator=creator, key=row['key'])
+            category_objects[row['key']] = category
+            self.stdout.write(f'  {"Created" if created else "Found"} ABC category: {category.label}')
+
+        for key, labels in ABC_CATEGORY_ITEMS.items():
+            category = category_objects.get(key)
+            if not category:
+                continue
+            for order, label in enumerate(labels):
+                self._owned(
+                    ABCItem, defaults={'display_order': order * 10}, creator=creator,
+                    category=category, label=label,
+                )
+
         # ── Settings: workflow templates ────────────────────────────────────
         workflow_objects = {}
         for wf_data in WORKFLOWS:
-            wf, created = WorkflowTemplate.objects.get_or_create(
+            wf, created = self._owned(
+                WorkflowTemplate,
+                creator=creator,
                 name=wf_data['name'],
                 defaults={
                     'description': wf_data['description'],
@@ -240,9 +330,9 @@ class Command(BaseCommand):
         behavior_wf = workflow_objects.get('Behavior Reduction Workflow')
 
         # ── Demo client ──────────────────────────────────────────────────────
-        client, created = Client.objects.get_or_create(
-            first_name='Jordan',
-            last_name='Demo',
+        client, created = self._owned(
+            Client, creator=creator,
+            first_name='Jordan', last_name='Demo',
             defaults={'preferred_name': 'Jordan', 'status': 'active'},
         )
         self.stdout.write(f'  {"Created" if created else "Found"} client: {client.full_name} (id={client.id})')
@@ -266,6 +356,7 @@ class Command(BaseCommand):
                 workflow_template=wf,
                 status='active',
                 display_order=i * 10,
+                created_by=creator,
             )
             total_programs += 1
             for j, t_data in enumerate(prog_data['targets']):
@@ -279,6 +370,7 @@ class Command(BaseCommand):
                     prompting_template=prompt_tpl if use_prompt else None,
                     is_visible_to_staff=t_data['status'] in ('probe', 'acquisition', 'mastered'),
                     display_order=j * 10,
+                    created_by=creator,
                 )
                 total_targets += 1
             self.stdout.write(f'  Created program: "{program.name}" ({len(prog_data["targets"])} targets)')
@@ -287,13 +379,13 @@ class Command(BaseCommand):
         # Scoped by created_by.external_admin_id (apps/backend/apps/programs/api.py's
         # _org_qs), not by `organization` — so the creator must share the same
         # external_admin_id as whoever is logged in and viewing /org-programs.
-        from apps.accounts.models import User
-        creator = User.objects.filter(role='admin', external_admin_id__isnull=False).order_by('id').first()
+        # `creator` already qualifies (see _org_qs — only external_admin_id matters,
+        # not role), so reuse the same owner rather than looking up a separate admin.
         total_templates = 0
         total_template_targets = 0
-        if creator is None:
+        if creator.external_admin_id is None:
             self.stdout.write(self.style.WARNING(
-                '  Skipping org-program library — no admin user with external_admin_id set was found.'
+                f'  Skipping org-program library — {creator.email} has no external_admin_id set.'
             ))
         else:
             for i, tpl_data in enumerate(ORG_PROGRAM_TEMPLATES):
@@ -325,6 +417,7 @@ class Command(BaseCommand):
                         sd_text=t_data.get('sd_text', ''),
                         is_visible_to_staff=False,
                         display_order=j * 10,
+                        created_by=creator,
                     )
                     total_template_targets += 1
                 self.stdout.write(f'  Created org-program template: "{template.name}" ({len(tpl_data["targets"])} targets)')
@@ -332,5 +425,5 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(
             f'\nDone — org "{org.name}": {total_programs} programs, {total_targets} targets, '
             f'client id={client.id}, {total_templates} org-program template(s) with {total_template_targets} target(s), '
-            f'plus Settings-page data (statuses/areas/tags/fields/templates).'
+            f'plus Settings-page data (statuses/areas/tags/fields/templates/ABC categories).'
         ))

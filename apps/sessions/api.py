@@ -91,7 +91,7 @@ def _get_session_or_404(session_id: int, request) -> SessionRun:
     qs = SessionRun.objects.select_related('staff').filter(
         external_client_id__in=_accessible_external_client_ids(request),
     ).order_by('-started_at')
-    if request.user.role == 'staff' and client_id is None:
+    if request.user.role == 'staff':
         qs = qs.filter(staff_id=request.user.id)
     try:
         return qs.get(id=session_id)
