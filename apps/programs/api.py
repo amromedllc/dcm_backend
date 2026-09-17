@@ -1717,6 +1717,14 @@ def _serialize_lesson(lesson: Lesson) -> dict:
     }
 
 
+"""
+Session Playlist API is paused for now.
+
+These endpoints exposed reusable playlist/template management in the client
+Sessions page, but users confused playlists with actual submitted/open session
+records. Keep the underlying Lesson model because appointment program
+assignment depends on it; only the standalone playlist API is disabled.
+
 @router.get('/lessons', response=list[LessonSchema])
 def list_lessons(request, client_id: int):
     lessons = Lesson.objects.filter(
@@ -1804,6 +1812,7 @@ def remove_program_from_lesson(request, lesson_id: int, program_id: int):
     _get_lesson_or_404(request, lesson_id)
     LessonProgram.objects.filter(lesson_id=lesson_id, program_id=program_id).delete()
     return 204, None
+"""
 
 
 # ---------------------------------------------------------------------------
