@@ -36,6 +36,8 @@ class AppointmentSchema(Schema):
 class AssignProgramsRequest(Schema):
     program_ids: list[int]
     client_id: int | None = None
+    external_appointment_id: str | None = None
+    clear_assignment: bool = False
     start_time: datetime | None = None
     end_time: datetime | None = None
     service_type: str | None = None
@@ -113,6 +115,7 @@ class SessionRunSchema(Schema):
 class SessionStartRequest(Schema):
     client_id: int
     appointment_id: int | None = None
+    external_appointment_id: str | None = None
     lesson_id: int | None = None
     session_prototype_id: int | None = None
     latitude: float | None = None

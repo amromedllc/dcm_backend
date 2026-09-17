@@ -863,11 +863,12 @@ def _serialize_tpms_api_appointments(
         service_name = _appointment_service_name(appt)
         dcm = dcm_by_ext.get(ext_id)
         results.append({
-            # same key" and (worse) letting unrelated appointments alias
-            # each other in the UI. crc32 is unique per distinct ext_id
-            # string; negated so it can never collide with a real positive
-            # DCM pk or a real positive numeric external id.
-            'id': dcm.id if dcm else int(ext_id) if ext_id.isdigit() else -zlib.crc32(ext_id.encode()),
+            # Use the local DCM id only after a row exists. For live TPMS-only
+            # rows, use a negative stable temporary id. Numeric TPMS ids can
+            # collide with real DCM appointment PKs; when that happened, program
+            # assignment saved to the wrong local appointment while the UI still
+            # showed a success toast.
+            'id': dcm.id if dcm else -zlib.crc32(ext_id.encode()),
             'client_id': dcm_client_id,
             'staff_id': staff_id,
             'staff_name': str(_dig_appointment(appt, 'provider_name', 'staff_name', 'employee_name') or '') or None,

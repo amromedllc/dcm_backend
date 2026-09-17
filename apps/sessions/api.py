@@ -711,13 +711,21 @@ def assign_appointment_programs(request, appt_id: int, data: AssignProgramsReque
     by the client (from the live TherapyPMS API list) — the TPMS DB is not used.
     """
     require_permission(request, 'appointments_edit')
+    if not data.program_ids and not data.clear_assignment:
+        raise HttpError(400, 'Select at least one program before saving')
 
     accessible_ids = _accessible_external_client_ids(request)
-    appt = _find_appointment(appt_id)
+    external_lookup = str(data.external_appointment_id or '').strip()
+    appt = (
+        Appointment.objects.filter(external_id=external_lookup).select_related('lesson').first()
+        if external_lookup else _find_appointment(appt_id)
+    )
     if appt and appt.external_client_id not in accessible_ids:
         raise HttpError(404, 'Appointment not found')
 
     if not appt:
+        if data.clear_assignment:
+            raise HttpError(404, 'Appointment not found')
         if not data.client_id:
             raise HttpError(400, 'client_id is required to assign programs to a new appointment')
         if data.client_id not in accessible_ids:
@@ -730,7 +738,7 @@ def assign_appointment_programs(request, appt_id: int, data: AssignProgramsReque
             )
         end = data.end_time or data.start_time
         appt = Appointment.objects.create(
-            external_id=str(appt_id),
+            external_id=external_lookup or str(appt_id),
             external_client_id=data.client_id,
             source=Appointment.Source.SYNCED,
             start_time=data.start_time,
@@ -749,6 +757,14 @@ def assign_appointment_programs(request, appt_id: int, data: AssignProgramsReque
     from django.db import transaction
 
     with transaction.atomic():
+        if data.clear_assignment:
+            if appt.lesson_id:
+                lesson = appt.lesson
+                appt.lesson = None
+                appt.save(update_fields=['lesson'])
+                lesson.delete()
+            return _appt_qs().get(id=appt.id)
+
         if appt.lesson_id:
             lesson = appt.lesson
         else:
@@ -822,10 +838,16 @@ def start_session(request, data: SessionStartRequest):
     """
     if data.client_id not in _accessible_external_client_ids(request):
         raise HttpError(404, 'Client not found')
-    appt = _find_appointment(data.appointment_id) if data.appointment_id else None
+    external_lookup = str(data.external_appointment_id or '').strip()
+    appt = (
+        Appointment.objects.filter(external_id=external_lookup).select_related('lesson').first()
+        if external_lookup else _find_appointment(data.appointment_id)
+    ) if (data.appointment_id or external_lookup) else None
     lesson_id = data.lesson_id or (appt.lesson_id if appt else None)
     external_appointment_id = data.appointment_id
-    if appt and appt.external_id and appt.external_id.isdigit():
+    if external_lookup and external_lookup.isdigit():
+        external_appointment_id = int(external_lookup)
+    elif appt and appt.external_id and appt.external_id.isdigit():
         external_appointment_id = int(appt.external_id)
     prototype = None
     if data.session_prototype_id:
