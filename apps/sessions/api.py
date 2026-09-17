@@ -844,6 +844,10 @@ def start_session(request, data: SessionStartRequest):
         if external_lookup else _find_appointment(data.appointment_id)
     ) if (data.appointment_id or external_lookup) else None
     lesson_id = data.lesson_id or (appt.lesson_id if appt else None)
+    lesson_obj = appt.lesson if appt and appt.lesson_id else None
+    if lesson_id and lesson_obj is None:
+        from apps.programs.models import Lesson
+        lesson_obj = Lesson.objects.filter(id=lesson_id, is_active=True).first()
     external_appointment_id = data.appointment_id
     if external_lookup and external_lookup.isdigit():
         external_appointment_id = int(external_lookup)
@@ -854,7 +858,7 @@ def start_session(request, data: SessionStartRequest):
         prototype = _get_session_prototype_or_404(data.session_prototype_id)
         if not prototype.is_active:
             raise HttpError(400, 'Session prototype is inactive')
-    else:
+    elif lesson_id is None:
         prototype = SessionPrototype.objects.filter(is_default=True, is_active=True).first()
     snapshot = build_program_snapshot(
         client_id=data.client_id,
@@ -867,8 +871,8 @@ def start_session(request, data: SessionStartRequest):
         external_appointment_id=external_appointment_id,
         lesson_id=lesson_id,
         session_prototype=prototype,
-        session_name=prototype.name if prototype else '',
-        message_to_therapist=prototype.message_to_therapist if prototype else '',
+        session_name=prototype.name if prototype else (lesson_obj.name if lesson_obj else ''),
+        message_to_therapist=prototype.message_to_therapist if prototype else (lesson_obj.therapist_message if lesson_obj else ''),
         program_snapshot=snapshot,
         start_latitude=data.latitude,
         start_longitude=data.longitude,

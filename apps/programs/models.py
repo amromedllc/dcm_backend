@@ -771,6 +771,7 @@ class Lesson(TenantAwareModel):
 
     external_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     name = models.CharField(max_length=200)
+    therapist_message = models.TextField(blank=True)
     lesson_type = models.CharField(max_length=25, choices=LessonType.choices, default=LessonType.OPEN)
     is_active = models.BooleanField(default=True)
 

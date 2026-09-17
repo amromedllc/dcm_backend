@@ -128,6 +128,19 @@ def _get_lesson_or_404(request, lesson_id: int) -> Lesson:
     return lesson
 
 
+def _validate_lesson_program_ids(request, client_id: int, program_ids: list[int]) -> list[int]:
+    if len(set(program_ids)) != len(program_ids):
+        raise HttpError(400, 'A playlist cannot contain the same program more than once')
+    programs = Program.objects.filter(
+        id__in=program_ids,
+        external_client_id=client_id,
+        external_client_id__in=_accessible_external_client_ids(request),
+    )
+    if set(programs.values_list('id', flat=True)) != set(program_ids):
+        raise HttpError(400, 'One or more selected programs are not available for this client')
+    return program_ids
+
+
 def _require_settings_permission(request, permission: str):
     """Enforce the fine-grained settings privilege (e.g. settings_tags_create).
 
@@ -1695,6 +1708,7 @@ def _serialize_lesson(lesson: Lesson) -> dict:
         'id': lesson.id,
         'client_id': lesson.external_client_id,
         'name': lesson.name,
+        'therapist_message': lesson.therapist_message,
         'lesson_type': lesson.lesson_type,
         'is_active': lesson.is_active,
         'programs': programs,
@@ -1717,13 +1731,17 @@ def list_lessons(request, client_id: int):
 def create_lesson(request, data: LessonCreateRequest):
     _require_supervisor(request)
     _assert_client_accessible(request, data.client_id)
+    if not data.program_ids:
+        raise HttpError(400, 'Select at least one program for the playlist')
+    program_ids = _validate_lesson_program_ids(request, data.client_id, data.program_ids)
     lesson = Lesson.objects.create(
         external_client_id=data.client_id,
         name=data.name,
+        therapist_message=data.therapist_message,
         lesson_type=data.lesson_type,
         created_by=request.user,
     )
-    for order, program_id in enumerate(data.program_ids):
+    for order, program_id in enumerate(program_ids):
         LessonProgram.objects.create(lesson=lesson, program_id=program_id, display_order=order)
     return 201, _serialize_lesson(lesson)
 
@@ -1737,16 +1755,36 @@ def get_lesson(request, lesson_id: int):
 def update_lesson(request, lesson_id: int, data: LessonUpdateRequest):
     _require_supervisor(request)
     lesson = _get_lesson_or_404(request, lesson_id)
-    for field, value in data.dict(exclude_none=True).items():
+    payload = data.dict(exclude_none=True)
+    program_ids = payload.pop('program_ids', None)
+    if program_ids is not None and not program_ids:
+        raise HttpError(400, 'Select at least one program for the playlist')
+    if program_ids is not None:
+        program_ids = _validate_lesson_program_ids(request, lesson.external_client_id, program_ids)
+    for field, value in payload.items():
         setattr(lesson, field, value)
     lesson.save()
+    if program_ids is not None:
+        LessonProgram.objects.filter(lesson=lesson).delete()
+        for order, program_id in enumerate(program_ids):
+            LessonProgram.objects.create(lesson=lesson, program_id=program_id, display_order=order)
     return _serialize_lesson(lesson)
+
+
+@router.delete('/lessons/{lesson_id}', response={204: None})
+def delete_lesson(request, lesson_id: int):
+    _require_supervisor(request)
+    lesson = _get_lesson_or_404(request, lesson_id)
+    lesson.is_active = False
+    lesson.save(update_fields=['is_active'])
+    return 204, None
 
 
 @router.post('/lessons/{lesson_id}/programs', response={201: LessonProgramSchema})
 def add_program_to_lesson(request, lesson_id: int, data: AddProgramToLessonRequest):
     _require_supervisor(request)
     lesson = _get_lesson_or_404(request, lesson_id)
+    _validate_lesson_program_ids(request, lesson.external_client_id, [data.program_id])
     lp, _ = LessonProgram.objects.get_or_create(
         lesson=lesson,
         program_id=data.program_id,

@@ -457,6 +457,7 @@ class LessonSchema(Schema):
     id: int
     client_id: int
     name: str
+    therapist_message: str = ''
     lesson_type: str
     is_active: bool
     programs: list[LessonProgramSchema] = []
@@ -467,14 +468,17 @@ class LessonSchema(Schema):
 class LessonCreateRequest(Schema):
     client_id: int
     name: NonEmptyStr
+    therapist_message: str = ''
     lesson_type: Lesson.LessonType = Lesson.LessonType.OPEN
     program_ids: list[int] = []
 
 
 class LessonUpdateRequest(Schema):
     name: NonEmptyStr | None = None
+    therapist_message: str | None = None
     lesson_type: Lesson.LessonType | None = None
     is_active: bool | None = None
+    program_ids: list[int] | None = None
 
 
 class AddProgramToLessonRequest(Schema):
