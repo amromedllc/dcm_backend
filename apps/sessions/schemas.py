@@ -92,6 +92,9 @@ class SessionRunSchema(Schema):
     appointment_start_time: datetime | None = None
     appointment_end_time: datetime | None = None
     lesson_id: int | None
+    session_prototype_id: int | None = None
+    session_name: str = ''
+    message_to_therapist: str = ''
     status: str
     started_at: datetime
     start_latitude: float | None = None
@@ -111,8 +114,39 @@ class SessionStartRequest(Schema):
     client_id: int
     appointment_id: int | None = None
     lesson_id: int | None = None
+    session_prototype_id: int | None = None
     latitude: float | None = None
     longitude: float | None = None
+
+
+class SessionPrototypeSchema(Schema):
+    id: int
+    name: str
+    description: str
+    message_to_therapist: str
+    display_order: int
+    is_default: bool
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class SessionPrototypeCreateRequest(Schema):
+    name: str
+    description: str = ''
+    message_to_therapist: str = ''
+    display_order: int = 0
+    is_default: bool = False
+    is_active: bool = True
+
+
+class SessionPrototypeUpdateRequest(Schema):
+    name: str | None = None
+    description: str | None = None
+    message_to_therapist: str | None = None
+    display_order: int | None = None
+    is_default: bool | None = None
+    is_active: bool | None = None
 
 
 class SessionLinkAppointmentRequest(Schema):

@@ -8,7 +8,9 @@ import redis
 from ninja import Router
 from ninja.errors import HttpError
 from django.conf import settings
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db.models import Q, Count
+from django.utils import timezone
 
 from apps.accounts.auth import partner_auth
 from apps.accounts.permissions import require_permission
@@ -51,13 +53,17 @@ def _cached_list_patients(access_token: str, external_admin_id: int) -> list[dic
 
     return patients
 from apps.sessions.schemas import AppointmentSchema
-from .models import Client, ClientStaffAssignment
+from .models import Client, ClientStaffAssignment, TreatmentPlan
 from .schemas import (
     ClientSchema,
     ClientCreateRequest,
     ClientUpdateRequest,
     StaffAssignmentSchema,
     AddStaffAssignmentRequest,
+    TreatmentPlanSchema,
+    TreatmentPlanListSchema,
+    TreatmentPlanGenerateRequest,
+    TreatmentPlanUpdateRequest,
     TelehealthConnectRequest,
     TelehealthConnectionDetailsSchema,
     TelehealthAdmitRequest,
@@ -65,6 +71,145 @@ from .schemas import (
 from apps.integrations.telehealth_client import TelehealthError, get_connection_details, admit_participant
 
 router = Router(auth=partner_auth)
+
+
+def _serialize_treatment_plan(plan: TreatmentPlan) -> dict[str, Any]:
+    return {
+        'id': plan.id,
+        'client_id': plan.client_id,
+        'title': plan.title,
+        'plan_date': plan.plan_date,
+        'date_from': plan.date_from,
+        'date_to': plan.date_to,
+        'status': plan.status,
+        'sections': plan.sections,
+        'source_snapshot': plan.source_snapshot,
+        'finalized_at': plan.finalized_at,
+        'finalized_by_id': plan.finalized_by_id,
+        'created_at': plan.created_at,
+        'updated_at': plan.updated_at,
+    }
+
+
+def _get_treatment_plan_or_404(request, client_id: int, plan_id: int) -> TreatmentPlan:
+    _get_client_or_404(request, client_id)
+    try:
+        return TreatmentPlan.objects.get(id=plan_id, client_id=client_id)
+    except TreatmentPlan.DoesNotExist:
+        raise HttpError(404, 'Treatment plan not found')
+
+
+def _target_status_label(status: str) -> str:
+    return (status or '').replace('_', ' ').title() or 'Not Set'
+
+
+def _json_safe(value: Any) -> Any:
+    return json.loads(json.dumps(value, cls=DjangoJSONEncoder))
+
+
+def _build_treatment_plan_sections(client: Client, report: dict[str, Any]) -> dict[str, Any]:
+    active_programs = [p for p in report.get('programs', []) if p.get('status') == 'active']
+    all_targets = [t for p in report.get('programs', []) for t in p.get('targets', [])]
+    mastered = [t for t in all_targets if t.get('status') == 'mastered']
+    active_targets = [
+        t for t in all_targets
+        if t.get('status') not in {'mastered', 'closed', 'discontinued'}
+    ]
+    improving = [t for t in all_targets if t.get('trend') == 'improving']
+    declining = [t for t in all_targets if t.get('trend') == 'declining']
+    behavior_programs = [
+        p for p in report.get('programs', [])
+        if p.get('category') == 'behavior_reduction'
+    ]
+
+    current_goals = []
+    for program in active_programs:
+        targets = [
+            {
+                'target_name': target.get('target_name', ''),
+                'status': _target_status_label(target.get('status', '')),
+                'avg_pct_correct': target.get('avg_pct_correct'),
+                'total_sessions': target.get('total_sessions', 0),
+                'trend': target.get('trend', 'insufficient_data'),
+            }
+            for target in program.get('targets', [])
+            if target.get('status') not in {'mastered', 'closed', 'discontinued'}
+        ]
+        if targets:
+            current_goals.append({
+                'program_name': program.get('program_name', ''),
+                'treatment_area': program.get('treatment_area', ''),
+                'targets': targets,
+            })
+
+    return {
+        'client_information': {
+            'client_name': client.full_name,
+            'date_of_birth': client.date_of_birth.isoformat() if client.date_of_birth else '',
+            'status': client.status,
+            'intake_date': client.intake_date.isoformat() if client.intake_date else '',
+        },
+        'progress_summary': {
+            'summary': (
+                f"During this review period, {client.full_name} participated in "
+                f"{report.get('total_sessions', 0)} recorded sessions across "
+                f"{report.get('active_programs', 0)} active programs. "
+                f"{len(mastered)} of {report.get('total_targets', 0)} targets are currently mastered."
+            ),
+            'total_sessions': report.get('total_sessions', 0),
+            'active_programs': report.get('active_programs', 0),
+            'mastered_targets': len(mastered),
+            'total_targets': report.get('total_targets', 0),
+            'improving_target_count': len(improving),
+            'declining_target_count': len(declining),
+        },
+        'current_goals': current_goals,
+        'behavior_reduction': {
+            'summary': (
+                'Behavior reduction programs are included below for review.'
+                if behavior_programs else
+                'No active behavior reduction programs were found in the selected period.'
+            ),
+            'programs': [
+                {
+                    'program_name': program.get('program_name', ''),
+                    'targets': [
+                        {
+                            'target_name': target.get('target_name', ''),
+                            'status': _target_status_label(target.get('status', '')),
+                            'trend': target.get('trend', 'insufficient_data'),
+                            'avg_pct_correct': target.get('avg_pct_correct'),
+                        }
+                        for target in program.get('targets', [])
+                    ],
+                }
+                for program in behavior_programs
+            ],
+        },
+        'recommendations': {
+            'items': [
+                'Continue active treatment programs and review targets with insufficient data.',
+                'Prioritize targets showing declining trends for clinical review.',
+                'Consider advancing or closing mastered targets after supervisor review.',
+            ],
+            'targets_needing_review': [
+                {
+                    'target_name': target.get('target_name', ''),
+                    'status': _target_status_label(target.get('status', '')),
+                    'trend': target.get('trend', 'insufficient_data'),
+                }
+                for target in declining[:10]
+            ],
+        },
+        'caregiver_training': {
+            'summary': 'Review generalization opportunities and caregiver implementation priorities for current goals.',
+            'focus_areas': [program.get('program_name', '') for program in active_programs[:5]],
+        },
+        'discharge_criteria': {
+            'summary': 'Discharge or transition criteria should be reviewed by the supervising clinician based on mastery, generalization, and family priorities.',
+            'remaining_active_target_count': len(active_targets),
+        },
+    }
 
 
 def _get_accessible_clients(request):
@@ -310,6 +455,89 @@ def update_client(request, client_id: int, data: ClientUpdateRequest):
         raise HttpError(400, 'discharge_date cannot be before intake_date')
     client.save()
     return client
+
+
+# ---------------------------------------------------------------------------
+# Treatment plans
+# ---------------------------------------------------------------------------
+
+@router.get('/{client_id}/treatment-plans', response=list[TreatmentPlanListSchema])
+def list_treatment_plans(request, client_id: int):
+    require_permission(request, 'client_treatment_plan')
+    _get_client_or_404(request, client_id)
+    return list(TreatmentPlan.objects.filter(client_id=client_id))
+
+
+@router.post('/{client_id}/treatment-plans/generate', response={201: TreatmentPlanSchema})
+def generate_treatment_plan(request, client_id: int, data: TreatmentPlanGenerateRequest):
+    require_permission(request, 'client_treatment_plan')
+    client = _get_client_or_404(request, client_id)
+    today = timezone.localdate()
+    date_to = data.date_to or today
+    date_from = data.date_from or (date_to - timedelta(days=180))
+    if date_from > date_to:
+        raise HttpError(400, 'date_from cannot be after date_to')
+
+    from apps.analytics.services import get_client_progress_report
+
+    report = get_client_progress_report(client.id, date_from, date_to)
+    title = (data.title or f'{client.full_name} Treatment Plan').strip()
+    if not title:
+        raise HttpError(400, 'Treatment plan title is required')
+
+    plan = TreatmentPlan.objects.create(
+        client=client,
+        title=title,
+        plan_date=today,
+        date_from=date_from,
+        date_to=date_to,
+        sections=_build_treatment_plan_sections(client, report),
+        source_snapshot=_json_safe(report),
+        created_by=request.user,
+    )
+    return 201, _serialize_treatment_plan(plan)
+
+
+@router.get('/{client_id}/treatment-plans/{plan_id}', response=TreatmentPlanSchema)
+def get_treatment_plan(request, client_id: int, plan_id: int):
+    require_permission(request, 'client_treatment_plan')
+    return _serialize_treatment_plan(_get_treatment_plan_or_404(request, client_id, plan_id))
+
+
+@router.patch('/{client_id}/treatment-plans/{plan_id}', response=TreatmentPlanSchema)
+def update_treatment_plan(request, client_id: int, plan_id: int, data: TreatmentPlanUpdateRequest):
+    require_permission(request, 'client_treatment_plan')
+    plan = _get_treatment_plan_or_404(request, client_id, plan_id)
+    payload = data.dict(exclude_unset=True)
+    status = payload.pop('status', None)
+    for field, value in payload.items():
+        if field == 'title' and value is not None:
+            value = value.strip()
+            if not value:
+                raise HttpError(400, 'Treatment plan title is required')
+        setattr(plan, field, value)
+    if status is not None:
+        if status not in TreatmentPlan.Status.values:
+            raise HttpError(400, 'Invalid treatment plan status')
+        plan.status = status
+        if status == TreatmentPlan.Status.FINALIZED and not plan.finalized_at:
+            plan.finalized_at = timezone.now()
+            plan.finalized_by = request.user
+        elif status == TreatmentPlan.Status.DRAFT:
+            plan.finalized_at = None
+            plan.finalized_by = None
+    if plan.date_from and plan.date_to and plan.date_from > plan.date_to:
+        raise HttpError(400, 'date_from cannot be after date_to')
+    plan.save()
+    return _serialize_treatment_plan(plan)
+
+
+@router.delete('/{client_id}/treatment-plans/{plan_id}', response={204: None})
+def delete_treatment_plan(request, client_id: int, plan_id: int):
+    require_permission(request, 'client_treatment_plan')
+    plan = _get_treatment_plan_or_404(request, client_id, plan_id)
+    plan.delete()
+    return 204, None
 
 
 # ---------------------------------------------------------------------------

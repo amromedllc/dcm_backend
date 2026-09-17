@@ -61,3 +61,48 @@ class ClientStaffAssignment(OrganizationScopedMixin):
 
     def __str__(self) -> str:
         return f'{self.user_id} → {self.client}'
+
+
+class TreatmentPlan(TenantAwareModel):
+    class Status(models.TextChoices):
+        DRAFT = 'draft', 'Draft'
+        FINALIZED = 'finalized', 'Finalized'
+        ARCHIVED = 'archived', 'Archived'
+
+    client = models.ForeignKey(
+        Client,
+        on_delete=models.CASCADE,
+        related_name='treatment_plans',
+    )
+    title = models.CharField(max_length=220)
+    plan_date = models.DateField(db_index=True)
+    date_from = models.DateField(null=True, blank=True)
+    date_to = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT, db_index=True)
+    sections = models.JSONField(default=dict)
+    source_snapshot = models.JSONField(default=dict, blank=True)
+    finalized_at = models.DateTimeField(null=True, blank=True)
+    finalized_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='finalized_treatment_plans',
+        db_constraint=False,
+    )
+
+    _org_scoped_fk_fields = ('client',)
+
+    class Meta:
+        app_label = 'clients'
+        ordering = ['-plan_date', '-created_at']
+
+    def _derive_organization_id(self) -> int | None:
+        return self.client.organization_id
+
+    @property
+    def client_id_value(self):
+        return self.client_id
+
+    def __str__(self) -> str:
+        return f'{self.title} — {self.client}'

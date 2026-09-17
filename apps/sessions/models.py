@@ -56,6 +56,37 @@ class Appointment(TenantAwareModel):
         return f'{self.external_client_id} | {self.start_time:%Y-%m-%d %H:%M}'
 
 
+class SessionPrototype(TenantAwareModel):
+    """Reusable session name/template shown before starting a recording."""
+
+    name = models.CharField(max_length=160)
+    description = models.TextField(blank=True)
+    message_to_therapist = models.TextField(blank=True)
+    display_order = models.PositiveIntegerField(default=0, db_index=True)
+    is_default = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        app_label = 'dcm_sessions'
+        ordering = ['display_order', 'name']
+        unique_together = [['organization', 'name']]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['organization'],
+                condition=models.Q(is_default=True),
+                name='unique_default_session_prototype_per_org',
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if self.is_default:
+            SessionPrototype.objects.filter(is_default=True).exclude(pk=self.pk).update(is_default=False)
+
+    def __str__(self) -> str:
+        return self.name
+
+
 class SessionRun(TenantAwareModel):
     """
     A single executed session.
@@ -88,6 +119,15 @@ class SessionRun(TenantAwareModel):
         blank=True,
         related_name='session_runs',
     )
+    session_prototype = models.ForeignKey(
+        SessionPrototype,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='session_runs',
+    )
+    session_name = models.CharField(max_length=160, blank=True)
+    message_to_therapist = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN, db_index=True)
     started_at = models.DateTimeField(auto_now_add=True)
     start_latitude = models.FloatField(null=True, blank=True)
@@ -108,7 +148,7 @@ class SessionRun(TenantAwareModel):
     # Immutable snapshot taken at session start — the source of truth for reporting
     program_snapshot = models.JSONField(default=dict)
 
-    _org_scoped_fk_fields = ('lesson',)  # cross-app FK -> programs.Lesson
+    _org_scoped_fk_fields = ('lesson', 'session_prototype')  # cross-app FK -> programs.Lesson
 
     class Meta:
         app_label = 'dcm_sessions'

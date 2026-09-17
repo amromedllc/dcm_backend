@@ -1,7 +1,7 @@
 from django.contrib import admin
 from unfold.admin import ModelAdmin, TabularInline
 from shared.admin import OrganizationScopedAdminMixin
-from .models import Client, ClientStaffAssignment
+from .models import Client, ClientStaffAssignment, TreatmentPlan
 
 
 class StaffAssignmentInline(OrganizationScopedAdminMixin, TabularInline):
@@ -24,3 +24,11 @@ class ClientAdmin(OrganizationScopedAdminMixin, ModelAdmin):
         ('Notes', {'fields': ('internal_notes',)}),
         ('Audit', {'fields': ('created_by', 'created_at', 'updated_at')}),
     )
+
+
+@admin.register(TreatmentPlan)
+class TreatmentPlanAdmin(OrganizationScopedAdminMixin, ModelAdmin):
+    list_display = ['title', 'client', 'status', 'plan_date', 'date_from', 'date_to']
+    list_filter = ['status', 'plan_date']
+    search_fields = ['title', 'client__first_name', 'client__last_name']
+    readonly_fields = ['created_at', 'updated_at', 'finalized_at']
