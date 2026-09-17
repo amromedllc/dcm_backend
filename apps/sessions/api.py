@@ -964,13 +964,22 @@ def link_session_appointment(request, session_id: int, data: SessionLinkAppointm
     require_permission(request, 'appointments_edit')
 
     session = _get_session_or_404(session_id, request)
-    appt = _find_appointment(data.appointment_id)
+    external_lookup = str(data.external_appointment_id or '').strip()
+    appt = (
+        Appointment.objects.filter(external_id=external_lookup).select_related('lesson').first()
+        if external_lookup else _find_appointment(data.appointment_id)
+    )
     if not appt:
         raise HttpError(404, 'Appointment not found')
-    if appt.external_client_id != session.external_client_id:
+    if _canonical_external_client_id(appt.external_client_id) != session.external_client_id:
         raise HttpError(400, "That appointment belongs to a different client than this session")
 
-    session.external_appointment_id = data.appointment_id
+    if appt.external_id and appt.external_id.isdigit():
+        session.external_appointment_id = int(appt.external_id)
+    elif external_lookup.isdigit():
+        session.external_appointment_id = int(external_lookup)
+    else:
+        session.external_appointment_id = data.appointment_id
     session.save(update_fields=['external_appointment_id'])
     return _serialize_session(session)
 

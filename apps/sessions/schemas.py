@@ -154,6 +154,7 @@ class SessionPrototypeUpdateRequest(Schema):
 
 class SessionLinkAppointmentRequest(Schema):
     appointment_id: int
+    external_appointment_id: str | None = None
 
 
 class SessionSubmitRequest(Schema):
