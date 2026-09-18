@@ -65,11 +65,21 @@ class CentralProgramAdmin(_SuperuserOnlyAdminMixin, ModelAdmin):
     search_fields = ['name', 'treatment_area']
     inlines = [CentralTargetInline]
     readonly_fields = ['created_at', 'updated_at', 'created_by']
+    actions = ['move_to_manual_programs_folder']
 
     def save_model(self, request, obj, form, change):
         if not change:
             obj.created_by = request.user
         super().save_model(request, obj, form, change)
+
+    @admin.action(description='Move selected programs to Manual Programs folder')
+    def move_to_manual_programs_folder(self, request, queryset):
+        folder, _ = CentralProgramFolder.objects.get_or_create(
+            name='Manual Programs',
+            defaults={'created_by': request.user},
+        )
+        updated = queryset.update(folder=folder)
+        self.message_user(request, f'Moved {updated} program(s) to Manual Programs.')
 
     def get_urls(self):
         urls = super().get_urls()
@@ -219,7 +229,15 @@ def _block_badge(block: dict) -> str:
 
 
 def _csv_rows(uploaded_file):
-    text = uploaded_file.read().decode('utf-8-sig')
+    raw = uploaded_file.read()
+    for encoding in ('utf-8-sig', 'utf-8', 'cp1252', 'latin-1'):
+        try:
+            text = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        raise ValueError('Could not decode CSV. Save the file as UTF-8 CSV and try again.')
     return list(csv.DictReader(io.StringIO(text)))
 
 
