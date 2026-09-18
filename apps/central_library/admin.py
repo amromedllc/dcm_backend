@@ -12,6 +12,7 @@ from django.http import HttpResponse
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
 from django.urls import path, reverse
+from django.db import transaction
 from unfold.admin import ModelAdmin, TabularInline
 from .models import (
     CentralProgram, CentralTarget, CentralProgramFolder,
@@ -58,6 +59,7 @@ class CentralTargetInline(_SuperuserOnlyAdminMixin, TabularInline):
 
 @admin.register(CentralProgram)
 class CentralProgramAdmin(_SuperuserOnlyAdminMixin, ModelAdmin):
+    change_list_template = 'admin/central_library/centralprogram/change_list.html'
     list_display = ['name', 'folder', 'category', 'phase', 'status', 'treatment_area', 'display_order', 'updated_at']
     list_filter = ['category', 'status', 'folder']
     search_fields = ['name', 'treatment_area']
@@ -68,6 +70,69 @@ class CentralProgramAdmin(_SuperuserOnlyAdminMixin, ModelAdmin):
         if not change:
             obj.created_by = request.user
         super().save_model(request, obj, form, change)
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path('import-csv/', self.admin_site.admin_view(self.import_csv_view), name='central_library_centralprogram_import_csv'),
+            path('sample-csv/', self.admin_site.admin_view(self.sample_csv_view), name='central_library_centralprogram_sample_csv'),
+        ]
+        return custom_urls + urls
+
+    def import_csv_view(self, request):
+        if request.method == 'POST':
+            form = CentralProgramCsvImportForm(request.POST, request.FILES)
+            if form.is_valid():
+                try:
+                    rows = _central_program_rows(form.cleaned_data['file'])
+                    created_programs, created_targets, skipped_programs = _import_central_program_rows(
+                        rows,
+                        folder_name=form.cleaned_data['folder_name'],
+                        replace=form.cleaned_data['replace'],
+                        user=request.user,
+                    )
+                except Exception as exc:
+                    messages.error(request, f'Import failed: {exc}')
+                else:
+                    messages.success(
+                        request,
+                        f'Imported {created_programs} program(s), {created_targets} target(s); '
+                        f'skipped {skipped_programs} existing program(s).',
+                    )
+                    return redirect('admin:central_library_centralprogram_changelist')
+        else:
+            form = CentralProgramCsvImportForm()
+
+        context = {
+            **self.admin_site.each_context(request),
+            'opts': self.model._meta,
+            'form': form,
+            'sample_url': reverse('admin:central_library_centralprogram_sample_csv'),
+            'title': 'Import central programs from CSV',
+        }
+        return TemplateResponse(request, 'admin/central_library/centralprogram/import_csv.html', context)
+
+    def sample_csv_view(self, request):
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename="central_program_import_sample.csv"'
+        writer = csv.writer(response)
+        writer.writerow([
+            'program_name', 'program_category', 'program_phase', 'treatment_area', 'tags',
+            'program_objective', 'program_instructions', 'target_name', 'target_measurement_type',
+            'target_measurement', 'sd_text', 'teaching_instructions', 'prompt_levels', 'sub_items',
+        ])
+        writer.writerow([
+            'Colors', 'skill_acquisition', 'teaching', 'Communication', 'colors',
+            '', 'Will touch the color in an array of 4 colors', 'Red', 'discrete_trial',
+            'percent_correct', 'Touch the red', '', 'Prompt Hierarchy', '',
+        ])
+        return response
+
+    def changelist_view(self, request, extra_context=None):
+        extra_context = extra_context or {}
+        extra_context['import_csv_url'] = reverse('admin:central_library_centralprogram_import_csv')
+        extra_context['sample_csv_url'] = reverse('admin:central_library_centralprogram_sample_csv')
+        return super().changelist_view(request, extra_context=extra_context)
 
 
 @admin.register(CentralProgramFolder)
@@ -103,6 +168,21 @@ class KnowledgeBaseImportForm(forms.Form):
             'overview, audience, module_order, module_active, topic_title, '
             'topic_summary, topic_items, topic_order, topic_active.'
         )
+    )
+
+
+class CentralProgramCsvImportForm(forms.Form):
+    file = forms.FileField(
+        label='CSV file',
+        help_text='Upload a CSV with the columns from docs/program-target-import-template.csv.',
+    )
+    folder_name = forms.CharField(
+        initial='Manual Programs',
+        help_text='Central Library folder to create/use for the imported programs.',
+    )
+    replace = forms.BooleanField(
+        required=False,
+        help_text='Replace programs with the same name in this folder.',
     )
 
 
@@ -188,6 +268,163 @@ def _knowledge_rows(uploaded_file):
     if name.endswith('.xlsx'):
         return _xlsx_rows(uploaded_file)
     raise ValueError('Only .csv and .xlsx uploads are supported.')
+
+
+_PROGRAM_CATEGORY_MAP = {
+    'skill_acquisition': CentralProgram.Category.SKILL_ACQUISITION,
+    'skill acquisition': CentralProgram.Category.SKILL_ACQUISITION,
+    'behavior_reduction': CentralProgram.Category.BEHAVIOR_REDUCTION,
+    'behavior reduction': CentralProgram.Category.BEHAVIOR_REDUCTION,
+    'abc_recording': CentralProgram.Category.ABC_RECORDING,
+    'abc recording': CentralProgram.Category.ABC_RECORDING,
+    'telehealth': CentralProgram.Category.TELEHEALTH,
+}
+
+_PROGRAM_PHASE_MAP = {
+    'baseline': CentralProgram.Phase.BASELINE,
+    'teaching': CentralProgram.Phase.TEACHING,
+    'active': CentralProgram.Phase.TEACHING,
+    'generalizing': CentralProgram.Phase.GENERALIZING,
+    'generalization': CentralProgram.Phase.GENERALIZING,
+    'maintenance': CentralProgram.Phase.MAINTENANCE,
+    'mastered': CentralProgram.Phase.MASTERED,
+    'on_hold': CentralProgram.Phase.ON_HOLD,
+    'on hold': CentralProgram.Phase.ON_HOLD,
+    'hold': CentralProgram.Phase.ON_HOLD,
+}
+
+_TARGET_MEASUREMENT_TYPE_MAP = {
+    'discrete_trial': CentralTarget.MeasurementType.DISCRETE_TRIAL,
+    'discrete trial': CentralTarget.MeasurementType.DISCRETE_TRIAL,
+    'duration': CentralTarget.MeasurementType.DURATION,
+    'rate': CentralTarget.MeasurementType.RATE,
+    'task_analysis': CentralTarget.MeasurementType.TASK_ANALYSIS,
+    'task analysis': CentralTarget.MeasurementType.TASK_ANALYSIS,
+    'set_of_targets': CentralTarget.MeasurementType.SET_OF_TARGETS,
+    'set of targets': CentralTarget.MeasurementType.SET_OF_TARGETS,
+    'shaping': CentralTarget.MeasurementType.SHAPING,
+    'instructions': CentralTarget.MeasurementType.INSTRUCTIONS,
+}
+
+
+def _clean(value):
+    return str(value or '').strip()
+
+
+def _choice(value, mapping, default):
+    return mapping.get(_clean(value).lower(), default)
+
+
+def _pipe_or_comma_list(value):
+    raw = _clean(value)
+    if not raw:
+        return []
+    delimiter = '|' if '|' in raw else ','
+    return [part.strip() for part in raw.split(delimiter) if part.strip()]
+
+
+def _prompt_levels(value):
+    labels = _pipe_or_comma_list(value)
+    if not labels or labels == ['Prompt Hierarchy']:
+        return []
+    return [
+        {
+            'label': label,
+            'score': index,
+            'abbreviation': label[:3].upper(),
+            'is_success': index == len(labels) - 1,
+        }
+        for index, label in enumerate(labels)
+    ]
+
+
+def _central_program_rows(uploaded_file):
+    name = uploaded_file.name.lower()
+    if not name.endswith('.csv'):
+        raise ValueError('Only .csv uploads are supported for Central Program import.')
+    return _csv_rows(uploaded_file)
+
+
+def _group_central_program_rows(rows):
+    programs = {}
+    for row_number, row in enumerate(rows, start=2):
+        program_name = _clean(row.get('program_name'))
+        target_name = _clean(row.get('target_name'))
+        if not program_name and not target_name:
+            continue
+        if not program_name or not target_name:
+            raise ValueError(f'Row {row_number}: program_name and target_name are required.')
+        program = programs.setdefault(program_name, {
+            'name': program_name,
+            'category': _choice(row.get('program_category'), _PROGRAM_CATEGORY_MAP, CentralProgram.Category.SKILL_ACQUISITION),
+            'phase': _choice(row.get('program_phase'), _PROGRAM_PHASE_MAP, CentralProgram.Phase.TEACHING),
+            'treatment_area': _clean(row.get('treatment_area')),
+            'tags': _pipe_or_comma_list(row.get('tags')),
+            'objective': _clean(row.get('program_objective')),
+            'instructions': _clean(row.get('program_instructions')),
+            'targets': [],
+        })
+        if not program['instructions'] and _clean(row.get('program_instructions')):
+            program['instructions'] = _clean(row.get('program_instructions'))
+        program['targets'].append({
+            'name': target_name,
+            'measurement_type': _choice(
+                row.get('target_measurement_type'),
+                _TARGET_MEASUREMENT_TYPE_MAP,
+                CentralTarget.MeasurementType.DISCRETE_TRIAL,
+            ),
+            'measurement': _clean(row.get('target_measurement')),
+            'sub_items': [
+                {'key': item.lower().replace(' ', '_'), 'label': item}
+                for item in _pipe_or_comma_list(row.get('sub_items'))
+            ],
+            'sd_text': _clean(row.get('sd_text')),
+            'teaching_instructions': _clean(row.get('teaching_instructions')),
+            'prompting_levels': _prompt_levels(row.get('prompt_levels')),
+        })
+    return list(programs.values())
+
+
+def _import_central_program_rows(rows, *, folder_name, replace, user):
+    programs = _group_central_program_rows(rows)
+    folder, _ = CentralProgramFolder.objects.get_or_create(
+        name=folder_name,
+        defaults={'created_by': user},
+    )
+    created_programs = 0
+    skipped_programs = 0
+    created_targets = 0
+
+    with transaction.atomic():
+        for index, program_data in enumerate(programs):
+            existing = CentralProgram.objects.filter(folder=folder, name=program_data['name']).first()
+            if existing and not replace:
+                skipped_programs += 1
+                continue
+            if existing:
+                existing.delete()
+            program = CentralProgram.objects.create(
+                name=program_data['name'],
+                category=program_data['category'],
+                phase=program_data['phase'],
+                status=CentralProgram.Status.ACTIVE,
+                treatment_area=program_data['treatment_area'],
+                tags=program_data['tags'],
+                objective=program_data['objective'],
+                instructions=program_data['instructions'],
+                folder=folder,
+                display_order=index * 10,
+                created_by=user,
+            )
+            created_programs += 1
+            for target_index, target_data in enumerate(program_data['targets']):
+                CentralTarget.objects.create(
+                    program=program,
+                    display_order=target_index * 10,
+                    **target_data,
+                )
+                created_targets += 1
+    return created_programs, created_targets, skipped_programs
 
 
 def _import_knowledge_base_rows(rows, user):
