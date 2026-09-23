@@ -153,6 +153,42 @@ class Program(TenantAwareModel):
         return f'{self.name} ({self.external_client_id})'
 
 
+class ProgramPrototype(TenantAwareModel):
+    """Reusable preset for the Create Program form. Picking one pre-fills the
+    same settings staff would otherwise enter by hand; every value stays
+    editable afterwards."""
+    name = models.CharField(max_length=160)
+    description = models.TextField(blank=True)
+    category = models.CharField(
+        max_length=30, choices=Program.Category.choices, default=Program.Category.SKILL_ACQUISITION,
+    )
+    treatment_area = models.CharField(max_length=200, blank=True)
+    tags = models.JSONField(default=list, blank=True)
+    prompting_template = models.ForeignKey(
+        'PromptingTemplate', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    hidden_prompt_level_labels = models.JSONField(default=list, blank=True)
+    workflow_template = models.ForeignKey(
+        'WorkflowTemplate', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    baseline_notes = models.TextField(blank=True)
+    objective = models.TextField(blank=True)
+    instructions_html = models.TextField(blank=True, default='')
+    professional_instructions_html = models.TextField(blank=True, default='')
+    display_order = models.PositiveIntegerField(default=0, db_index=True)
+    is_active = models.BooleanField(default=True)
+
+    _org_scoped_fk_fields = ('prompting_template', 'workflow_template')
+
+    class Meta:
+        app_label = 'programs'
+        ordering = ['display_order', 'name']
+        unique_together = [['organization', 'name']]
+
+    def __str__(self) -> str:
+        return self.name
+
+
 class SubTargetMeasurementType(models.TextChoices):
     """A task-analysis / set-of-targets / shaping step ("step to target") is a
     mini-target. Its collection method is limited to these two — a step is

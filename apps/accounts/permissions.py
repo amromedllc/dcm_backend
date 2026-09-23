@@ -138,6 +138,10 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'settings_session_prototypes_create': True,
         'settings_session_prototypes_edit': True,
         'settings_session_prototypes_delete': True,
+        'settings_program_prototypes_view': True,
+        'settings_program_prototypes_create': True,
+        'settings_program_prototypes_edit': True,
+        'settings_program_prototypes_delete': True,
         # Admin
         'admin_users_view': True,
         'admin_users_edit': True,
@@ -249,6 +253,10 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'settings_session_prototypes_create': False,
         'settings_session_prototypes_edit': False,
         'settings_session_prototypes_delete': False,
+        'settings_program_prototypes_view': False,
+        'settings_program_prototypes_create': False,
+        'settings_program_prototypes_edit': False,
+        'settings_program_prototypes_delete': False,
         # Admin
         'admin_users_view': True,
         'admin_users_edit': True,
@@ -360,6 +368,10 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'settings_session_prototypes_create': False,
         'settings_session_prototypes_edit': False,
         'settings_session_prototypes_delete': False,
+        'settings_program_prototypes_view': False,
+        'settings_program_prototypes_create': False,
+        'settings_program_prototypes_edit': False,
+        'settings_program_prototypes_delete': False,
         # Admin
         'admin_users_view': False,
         'admin_users_edit': False,

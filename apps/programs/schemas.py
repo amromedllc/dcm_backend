@@ -925,3 +925,61 @@ class ChangelogEntryUpdateRequest(Schema):
     release_date: date | None = None
     body: str | None = None
     is_published: bool | None = None
+
+
+# ---------------------------------------------------------------------------
+# Program prototypes
+# ---------------------------------------------------------------------------
+
+class ProgramPrototypeSchema(Schema):
+    id: int
+    name: str
+    description: str = ''
+    category: str
+    treatment_area: str = ''
+    tags: list[str] = []
+    prompting_template_id: int | None = None
+    hidden_prompt_level_labels: list[str] = []
+    workflow_template_id: int | None = None
+    baseline_notes: str = ''
+    objective: str = ''
+    instructions_html: str = ''
+    professional_instructions_html: str = ''
+    display_order: int
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProgramPrototypeRequest(Schema):
+    name: NonEmptyStr
+    description: str = ''
+    category: Program.Category = Program.Category.SKILL_ACQUISITION
+    treatment_area: str = ''
+    tags: list[str] = []
+    prompting_template_id: int | None = None
+    hidden_prompt_level_labels: list[str] = []
+    workflow_template_id: int | None = None
+    baseline_notes: str = ''
+    objective: str = ''
+    instructions_html: str = ''
+    professional_instructions_html: str = ''
+    display_order: int = Field(default=0, ge=0)
+    is_active: bool = True
+
+
+class ProgramPrototypeUpdateRequest(Schema):
+    name: NonEmptyStr | None = None
+    description: str | None = None
+    category: Program.Category | None = None
+    treatment_area: str | None = None
+    tags: list[str] | None = None
+    prompting_template_id: int | None = None
+    hidden_prompt_level_labels: list[str] | None = None
+    workflow_template_id: int | None = None
+    baseline_notes: str | None = None
+    objective: str | None = None
+    instructions_html: str | None = None
+    professional_instructions_html: str | None = None
+    display_order: int | None = Field(default=None, ge=0)
+    is_active: bool | None = None

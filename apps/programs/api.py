@@ -23,7 +23,7 @@ from shared.uploads import (
     IMAGE_CONTENT_TYPES, VIDEO_CONTENT_TYPES, validate_image_upload, validate_media_upload,
 )
 from .models import (
-    Program, ProgramMaterial, Target, PromptingTemplate,
+    Program, ProgramMaterial, ProgramPrototype, Target, PromptingTemplate,
     WorkflowTemplate,
     Lesson, LessonProgram,
     TreatmentArea, ProgramTag, ProgramDataField, TargetStatus,
@@ -33,6 +33,7 @@ from .models import (
     allowed_measurements, default_measurement, TIMER_TARGET_TYPES,
 )
 from .schemas import (
+    ProgramPrototypeSchema, ProgramPrototypeRequest, ProgramPrototypeUpdateRequest,
     ProgramSchema, ProgramListSchema, ProgramCreateRequest, ProgramUpdateRequest, ProgramMaterialSchema,
     TargetSchema, TargetCreateRequest, TargetUpdateRequest,
     BulkUpdateTargetsRequest, BulkUpdateResult, ReorderTargetsRequest,
@@ -3083,6 +3084,63 @@ def delete_program_tag(request, pk: int):
     try:
         _settings_qs(ProgramTag, request).get(id=pk).delete()
     except ProgramTag.DoesNotExist:
+        raise HttpError(404, 'Not found')
+    return 204, None
+
+
+# ---------------------------------------------------------------------------
+# Program Prototypes
+# ---------------------------------------------------------------------------
+
+def _validate_prototype_templates(request, payload: dict) -> None:
+    for field, model in (('prompting_template_id', PromptingTemplate), ('workflow_template_id', WorkflowTemplate)):
+        template_id = payload.get(field)
+        if template_id is not None and not _settings_qs(model, request).filter(id=template_id).exists():
+            raise HttpError(400, f'Unknown {model.__name__}')
+
+
+@router.get('/programs/settings/prototypes', response=list[ProgramPrototypeSchema])
+def list_program_prototypes(request, include_inactive: bool = False):
+    qs = _settings_qs(ProgramPrototype, request)
+    if not include_inactive:
+        qs = qs.filter(is_active=True)
+    return list(qs)
+
+
+@router.post('/programs/settings/prototypes', response={201: ProgramPrototypeSchema})
+def create_program_prototype(request, data: ProgramPrototypeRequest):
+    _require_settings_permission(request, 'settings_program_prototypes_create')
+    _check_unique_name(ProgramPrototype, request, data.name)
+    payload = data.dict()
+    _validate_prototype_templates(request, payload)
+    return 201, ProgramPrototype.objects.create(created_by=request.user, **payload)
+
+
+@router.patch('/programs/settings/prototypes/{pk}', response=ProgramPrototypeSchema)
+def update_program_prototype(request, pk: int, data: ProgramPrototypeUpdateRequest):
+    _require_settings_permission(request, 'settings_program_prototypes_edit')
+    try:
+        obj = _settings_qs(ProgramPrototype, request).get(id=pk)
+    except ProgramPrototype.DoesNotExist:
+        raise HttpError(404, 'Not found')
+    updates = data.dict(exclude_unset=True)
+    if updates.get('name'):
+        _check_unique_name(ProgramPrototype, request, updates['name'], exclude_id=pk)
+    _validate_prototype_templates(request, updates)
+    for field, value in updates.items():
+        if value is None and field not in ('prompting_template_id', 'workflow_template_id'):
+            continue
+        setattr(obj, field, value)
+    obj.save()
+    return obj
+
+
+@router.delete('/programs/settings/prototypes/{pk}', response={204: None})
+def delete_program_prototype(request, pk: int):
+    _require_settings_permission(request, 'settings_program_prototypes_delete')
+    try:
+        _settings_qs(ProgramPrototype, request).get(id=pk).delete()
+    except ProgramPrototype.DoesNotExist:
         raise HttpError(404, 'Not found')
     return 204, None
 
