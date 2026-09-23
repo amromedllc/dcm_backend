@@ -16,7 +16,7 @@ from django.db import transaction
 from unfold.admin import ModelAdmin, TabularInline
 from .models import (
     CentralProgram, CentralTarget, CentralProgramFolder,
-    KnowledgeBaseModule, KnowledgeBaseTopic, KnowledgeBaseImport,
+    KnowledgeBaseModule, KnowledgeBaseTopic, KnowledgeBaseImport, KnowledgeBaseMedia,
 )
 from django.utils.safestring import mark_safe
 from .imports import (
@@ -742,6 +742,19 @@ class KnowledgeBaseImportAdmin(_SuperuserOnlyAdminMixin, ModelAdmin):
         'file', 'original_filename', 'status', 'image_count', 'blocks', 'mapping',
         'target_module', 'created_by', 'created_at', 'updated_at',
     ]
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(KnowledgeBaseMedia)
+class KnowledgeBaseMediaAdmin(_SuperuserOnlyAdminMixin, ModelAdmin):
+    """Audit view for images/video embedded inline in article/topic rich
+    text. Authoring happens via the rich-text editor's upload button; this
+    is read-only history so orphaned uploads can be spotted and removed."""
+    list_display = ['file', 'kind', 'content_type', 'file_size', 'created_by', 'created_at']
+    list_filter = ['kind']
+    readonly_fields = ['file', 'kind', 'content_type', 'file_size', 'created_by', 'created_at']
 
     def has_add_permission(self, request, obj=None):
         return False

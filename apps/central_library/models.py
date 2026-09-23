@@ -20,6 +20,10 @@ def _knowledge_base_topic_video_upload_path(instance, filename):
     return f'central_library/knowledge_base_topic_videos/{instance.pk or "new"}/{uuid.uuid4().hex}/{filename}'
 
 
+def _knowledge_base_media_upload_path(instance, filename):
+    return f'central_library/knowledge_base_media/{uuid.uuid4().hex}/{filename}'
+
+
 class CentralProgramFolder(models.Model):
     """Platform-owned grouping for Central Library programs — same
     "not tenant-scoped, superuser-authored" model as CentralProgram itself.
@@ -259,3 +263,34 @@ class KnowledgeBaseImport(models.Model):
 
     def __str__(self) -> str:
         return f'{self.original_filename} ({self.status})'
+
+
+class KnowledgeBaseMedia(models.Model):
+    """An image or video embedded inline in a Knowledge Base article/topic's
+    rich-text body (as opposed to KnowledgeBaseModule/Topic's single
+    attached `video` field). Superuser-only, like the rest of authoring.
+    Kept as its own row (rather than an anonymous storage write) so orphaned
+    uploads can be audited/cleaned up later."""
+
+    class Kind(models.TextChoices):
+        IMAGE = 'image', 'Image'
+        VIDEO = 'video', 'Video'
+
+    file = models.FileField(upload_to=_knowledge_base_media_upload_path, max_length=500)
+    kind = models.CharField(max_length=10, choices=Kind.choices)
+    content_type = models.CharField(max_length=120, blank=True)
+    file_size = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='+',
+    )
+
+    class Meta:
+        app_label = 'central_library'
+        ordering = ['-created_at']
+
+    def __str__(self) -> str:
+        return f'{self.kind}: {self.file.name}'

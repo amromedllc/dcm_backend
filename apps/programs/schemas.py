@@ -706,6 +706,12 @@ class KnowledgeBaseModuleSchema(Schema):
     topics: list[KnowledgeBaseTopicSchema]
 
 
+class KnowledgeBaseMediaSchema(Schema):
+    url: str
+    kind: str
+    content_type: str
+
+
 class KnowledgeBaseModuleRequest(Schema):
     slug: SlugStr
     title: NonEmptyStr

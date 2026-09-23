@@ -14,7 +14,8 @@ import json
 from django.db import transaction
 from slugify import slugify
 
-from shared.docx_blocks import blocks_to_items, blocks_to_markdown, blocks_to_text
+from shared.docx_blocks import blocks_to_html, blocks_to_items, blocks_to_text
+from shared.html_sanitize import sanitize_kb_html
 
 from .models import KnowledgeBaseImport, KnowledgeBaseModule, KnowledgeBaseTopic
 
@@ -167,7 +168,7 @@ def build_module_payload(mapping: dict, blocks: list[dict], *, slug: str, icon: 
         'title': title[:160],
         'path': blocks_to_text(_resolve(module_map.get('path'), blocks_by_id))[:240],
         'icon': icon,
-        'overview': blocks_to_markdown(_resolve(module_map.get('overview'), blocks_by_id)),
+        'overview': sanitize_kb_html(blocks_to_html(_resolve(module_map.get('overview'), blocks_by_id))),
         'audience': split_list(blocks_to_text(_resolve(module_map.get('audience'), blocks_by_id))),
         'display_order': int_value(display_order),
         'is_active': bool(is_active),
@@ -180,8 +181,11 @@ def build_module_payload(mapping: dict, blocks: list[dict], *, slug: str, icon: 
             continue
         topics.append({
             'title': topic_title[:180],
-            'summary': blocks_to_markdown(_resolve(topic_map.get('summary'), blocks_by_id)),
-            'items': blocks_to_items(_resolve(topic_map.get('items'), blocks_by_id)),
+            'summary': sanitize_kb_html(blocks_to_html(_resolve(topic_map.get('summary'), blocks_by_id))),
+            'items': [
+                sanitize_kb_html(item)
+                for item in blocks_to_items(_resolve(topic_map.get('items'), blocks_by_id))
+            ],
             'display_order': (index + 1) * 10,
         })
 

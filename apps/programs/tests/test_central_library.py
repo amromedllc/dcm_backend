@@ -5,7 +5,7 @@ must land in the *calling* org — including a fresh, org-owned
 PromptingTemplate built from the target's optional `prompting_levels`,
 since PromptingTemplate is tenant-scoped and there is no org to reference.
 """
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django_tenants.utils import schema_context
 from ninja.errors import HttpError
@@ -13,7 +13,7 @@ from ninja.errors import HttpError
 from apps.accounts.models import User
 from apps.central_library.models import (
     CentralProgram, CentralProgramFolder, CentralTarget,
-    KnowledgeBaseModule, KnowledgeBaseTopic,
+    KnowledgeBaseMedia, KnowledgeBaseModule, KnowledgeBaseTopic,
 )
 from apps.programs.api import (
     _clone_central_program,
@@ -25,6 +25,7 @@ from apps.programs.api import (
     superadmin_delete_knowledge_base_video,
     superadmin_list_central_programs,
     superadmin_list_knowledge_base_modules,
+    superadmin_upload_knowledge_base_media,
     superadmin_upload_knowledge_base_topic_video,
     superadmin_upload_knowledge_base_video,
     superadmin_update_central_program,
@@ -175,6 +176,10 @@ class SuperadminCentralProgramApiTests(TestCase):
         self.assertEqual(CentralTarget.objects.get().prompting_levels[0]['label'], 'Independent')
 
 
+@override_settings(STORAGES={
+    'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+})
 class SuperadminKnowledgeBaseApiTests(TestCase):
     def setUp(self):
         self.superadmin = User.objects.create_user(
@@ -312,3 +317,38 @@ class SuperadminKnowledgeBaseApiTests(TestCase):
         topic.refresh_from_db()
         self.assertFalse(topic.video)
         self.assertEqual(result['video_url'], None)
+
+    def test_superadmin_can_upload_inline_image_for_rich_text(self):
+        import io
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new('RGB', (1, 1)).save(buf, format='PNG')
+        upload = SimpleUploadedFile('screenshot.png', buf.getvalue(), content_type='image/png')
+
+        result = superadmin_upload_knowledge_base_media(FakeRequest(self.superadmin), upload)
+
+        self.assertEqual(result['kind'], KnowledgeBaseMedia.Kind.IMAGE)
+        self.assertEqual(result['content_type'], 'image/png')
+        self.assertIn('/media/', result['url'])
+        self.assertEqual(KnowledgeBaseMedia.objects.count(), 1)
+
+    def test_superadmin_can_upload_inline_video_for_rich_text(self):
+        upload = SimpleUploadedFile('clip.mp4', b'fake-video', content_type='video/mp4')
+
+        result = superadmin_upload_knowledge_base_media(FakeRequest(self.superadmin), upload)
+
+        self.assertEqual(result['kind'], KnowledgeBaseMedia.Kind.VIDEO)
+        self.assertIn('/media/', result['url'])
+
+    def test_inline_media_upload_rejects_unsupported_file(self):
+        upload = SimpleUploadedFile('notes.pdf', b'%PDF-fake', content_type='application/pdf')
+
+        with self.assertRaises(HttpError):
+            superadmin_upload_knowledge_base_media(FakeRequest(self.superadmin), upload)
+
+    def test_inline_media_upload_is_superadmin_only(self):
+        upload = SimpleUploadedFile('clip.mp4', b'fake-video', content_type='video/mp4')
+
+        with self.assertRaises(HttpError):
+            superadmin_upload_knowledge_base_media(FakeRequest(self.admin), upload)

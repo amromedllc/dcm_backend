@@ -16,9 +16,12 @@ from apps.accounts.auth import partner_auth
 from apps.accounts.permissions import require_permission
 from apps.central_library.models import (
     CentralProgram, CentralProgramFolder, CentralTarget,
-    KnowledgeBaseModule, KnowledgeBaseTopic,
+    KnowledgeBaseMedia, KnowledgeBaseModule, KnowledgeBaseTopic,
 )
-from shared.uploads import validate_image_upload, validate_media_upload
+from shared.html_sanitize import sanitize_kb_html
+from shared.uploads import (
+    IMAGE_CONTENT_TYPES, VIDEO_CONTENT_TYPES, validate_image_upload, validate_media_upload,
+)
 from .models import (
     Program, ProgramMaterial, Target, PromptingTemplate,
     WorkflowTemplate,
@@ -51,6 +54,7 @@ from .schemas import (
     TargetStatusSchema, TargetStatusRequest, TargetStatusUpdateRequest,
     ProgramModuleSchema, ProgramModuleRequest, ProgramSubmoduleSchema, ProgramSubmoduleRequest,
     SavedTableViewSchema, SavedTableViewCreateRequest,
+    KnowledgeBaseMediaSchema,
     KnowledgeBaseModuleSchema, KnowledgeBaseModuleRequest, KnowledgeBaseModuleUpdateRequest,
     KnowledgeBaseTopicSchema, KnowledgeBaseTopicRequest, KnowledgeBaseTopicUpdateRequest,
 )
@@ -505,7 +509,7 @@ def superadmin_create_knowledge_base_module(request, data: KnowledgeBaseModuleRe
             title=data.title,
             path=data.path,
             icon=data.icon,
-            overview=data.overview,
+            overview=sanitize_kb_html(data.overview),
             audience=data.audience,
             display_order=data.display_order,
             is_active=data.is_active,
@@ -529,6 +533,8 @@ def superadmin_update_knowledge_base_module(request, module_id: int, data: Knowl
         updates = data.dict(exclude_unset=True)
         if 'icon' in updates:
             _validate_knowledge_base_icon(updates['icon'])
+        if 'overview' in updates:
+            updates['overview'] = sanitize_kb_html(updates['overview'])
         for field, value in updates.items():
             setattr(module, field, value)
         module.save()
@@ -581,8 +587,8 @@ def superadmin_create_knowledge_base_topic(request, module_id: int, data: Knowle
         topic = KnowledgeBaseTopic.objects.create(
             module=module,
             title=data.title,
-            summary=data.summary,
-            items=data.items,
+            summary=sanitize_kb_html(data.summary),
+            items=[sanitize_kb_html(item) for item in data.items],
             display_order=data.display_order,
             is_active=data.is_active,
         )
@@ -594,7 +600,12 @@ def superadmin_update_knowledge_base_topic(request, topic_id: int, data: Knowled
     _require_superadmin(request)
     with schema_context(get_public_schema_name()):
         topic = _get_knowledge_base_topic_or_404(topic_id)
-        for field, value in data.dict(exclude_unset=True).items():
+        updates = data.dict(exclude_unset=True)
+        if 'summary' in updates:
+            updates['summary'] = sanitize_kb_html(updates['summary'])
+        if 'items' in updates:
+            updates['items'] = [sanitize_kb_html(item) for item in updates['items']]
+        for field, value in updates.items():
             setattr(topic, field, value)
         topic.save()
         return _serialize_knowledge_base_topic(topic, request)
@@ -636,6 +647,36 @@ def superadmin_delete_knowledge_base_topic(request, topic_id: int):
         topic = _get_knowledge_base_topic_or_404(topic_id)
         topic.delete()
     return 204, None
+
+
+@router.post('/superadmin/knowledge-base/media', response=KnowledgeBaseMediaSchema)
+def superadmin_upload_knowledge_base_media(request, file: UploadedFile = File(...)):
+    """Upload an image or video to embed inline in an article/topic's rich
+    text (distinct from the single attached module/topic `video`)."""
+    _require_superadmin(request)
+    content_type = file.content_type or ''
+    if content_type in IMAGE_CONTENT_TYPES:
+        validate_image_upload(file)
+        kind = KnowledgeBaseMedia.Kind.IMAGE
+    elif content_type in VIDEO_CONTENT_TYPES:
+        _validate_knowledge_base_video_upload(file)
+        kind = KnowledgeBaseMedia.Kind.VIDEO
+    else:
+        raise HttpError(400, 'File must be an image or video')
+
+    with schema_context(get_public_schema_name()):
+        media = KnowledgeBaseMedia.objects.create(
+            file=file,
+            kind=kind,
+            content_type=content_type,
+            file_size=file.size,
+            created_by=request.user,
+        )
+        return {
+            'url': request.build_absolute_uri(media.file.url),
+            'kind': media.kind,
+            'content_type': media.content_type,
+        }
 
 
 PROGRAM_MATERIAL_IMAGE_TYPES = {'image/jpeg', 'image/png'}
