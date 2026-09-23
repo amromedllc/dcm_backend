@@ -13,10 +13,15 @@ from ninja.errors import HttpError
 from apps.accounts.models import User
 from apps.central_library.models import (
     CentralProgram, CentralProgramFolder, CentralTarget,
-    KnowledgeBaseMedia, KnowledgeBaseModule, KnowledgeBaseTopic,
+    ChangelogEntry, KnowledgeBaseMedia, KnowledgeBaseModule, KnowledgeBaseTopic,
 )
 from apps.programs.api import (
     _clone_central_program,
+    list_changelog_entries,
+    superadmin_create_changelog_entry,
+    superadmin_delete_changelog_entry,
+    superadmin_list_changelog_entries,
+    superadmin_update_changelog_entry,
     superadmin_create_central_program,
     superadmin_create_central_target,
     superadmin_create_knowledge_base_module,
@@ -33,6 +38,7 @@ from apps.programs.api import (
 )
 from apps.programs.models import PromptingTemplate
 from apps.programs.schemas import (
+    ChangelogEntryRequest, ChangelogEntryUpdateRequest,
     CentralProgramRequest, CentralProgramUpdateRequest, CentralTargetRequest,
     KnowledgeBaseModuleRequest, KnowledgeBaseModuleUpdateRequest, KnowledgeBaseTopicRequest,
 )
@@ -352,3 +358,62 @@ class SuperadminKnowledgeBaseApiTests(TestCase):
 
         with self.assertRaises(HttpError):
             superadmin_upload_knowledge_base_media(FakeRequest(self.admin), upload)
+
+
+class ChangelogApiTests(TestCase):
+    def setUp(self):
+        self.superadmin = User.objects.create_user(
+            email='super-cl@example.com', password='x', role=User.Role.ADMIN, is_superuser=True,
+        )
+        self.admin = User.objects.create_user(
+            email='org-admin-cl@example.com', password='x', role=User.Role.ADMIN,
+        )
+
+    def _create(self, **overrides):
+        payload = dict(
+            version='v1.0.0', title='First release', release_date='2026-09-22',
+            body='<ul><li>Added thing</li></ul>', is_published=True,
+        )
+        payload.update(overrides)
+        _status, entry = superadmin_create_changelog_entry(
+            FakeRequest(self.superadmin), ChangelogEntryRequest(**payload),
+        )
+        return entry
+
+    def test_create_sanitizes_body(self):
+        entry = self._create(body='<p>Hi</p><script>alert(1)</script>')
+        self.assertNotIn('script', entry['body'])
+        self.assertIn('<p>Hi</p>', entry['body'])
+
+    def test_public_list_hides_drafts_and_orders_newest_first(self):
+        self._create(title='Old', release_date='2026-09-01')
+        self._create(title='New', release_date='2026-09-22')
+        self._create(title='Draft', release_date='2026-09-30', is_published=False)
+
+        titles = [e['title'] for e in list_changelog_entries(FakeRequest(self.admin))]
+
+        self.assertEqual(titles, ['New', 'Old'])
+
+    def test_superadmin_list_includes_drafts(self):
+        self._create(title='Draft', is_published=False)
+        entries = superadmin_list_changelog_entries(FakeRequest(self.superadmin))
+        self.assertEqual(len(entries), 1)
+
+    def test_update_and_delete(self):
+        entry = self._create()
+        updated = superadmin_update_changelog_entry(
+            FakeRequest(self.superadmin), entry['id'],
+            ChangelogEntryUpdateRequest(title='Renamed', is_published=False),
+        )
+        self.assertEqual(updated['title'], 'Renamed')
+        self.assertIs(updated['is_published'], False)
+
+        superadmin_delete_changelog_entry(FakeRequest(self.superadmin), entry['id'])
+        self.assertEqual(ChangelogEntry.objects.count(), 0)
+
+    def test_authoring_is_superadmin_only(self):
+        with self.assertRaises(HttpError):
+            superadmin_create_changelog_entry(
+                FakeRequest(self.admin),
+                ChangelogEntryRequest(title='x', release_date='2026-09-22'),
+            )

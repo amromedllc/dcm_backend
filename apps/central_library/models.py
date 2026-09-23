@@ -294,3 +294,29 @@ class KnowledgeBaseMedia(models.Model):
 
     def __str__(self) -> str:
         return f'{self.kind}: {self.file.name}'
+
+
+class ChangelogEntry(models.Model):
+    """A release note shown on the in-app "What's New" page. Platform-wide
+    (public schema), superuser-authored, like Knowledge Base content.
+    `body` is sanitised rich-text HTML (see shared.html_sanitize)."""
+    version = models.CharField(max_length=40, blank=True)
+    title = models.CharField(max_length=200)
+    release_date = models.DateField(db_index=True)
+    body = models.TextField(blank=True)
+    is_published = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='+',
+    )
+
+    class Meta:
+        app_label = 'central_library'
+        ordering = ['-release_date', '-id']
+
+    def __str__(self) -> str:
+        return f'{self.version} {self.title}'.strip()

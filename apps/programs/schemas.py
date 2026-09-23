@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from ninja import Schema
 from pydantic import Field, field_validator
@@ -900,3 +900,28 @@ class ClientProgramAuditSchema(Schema):
     actor_email: str
     changes: dict
     timestamp: datetime
+
+
+class ChangelogEntrySchema(Schema):
+    id: int
+    version: str
+    title: str
+    release_date: date
+    body: str
+    is_published: bool = True
+
+
+class ChangelogEntryRequest(Schema):
+    version: str = ''
+    title: NonEmptyStr
+    release_date: date
+    body: str = ''
+    is_published: bool = True
+
+
+class ChangelogEntryUpdateRequest(Schema):
+    version: str | None = None
+    title: NonEmptyStr | None = None
+    release_date: date | None = None
+    body: str | None = None
+    is_published: bool | None = None

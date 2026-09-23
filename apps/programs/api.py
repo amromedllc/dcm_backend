@@ -16,7 +16,7 @@ from apps.accounts.auth import partner_auth
 from apps.accounts.permissions import require_permission
 from apps.central_library.models import (
     CentralProgram, CentralProgramFolder, CentralTarget,
-    KnowledgeBaseMedia, KnowledgeBaseModule, KnowledgeBaseTopic,
+    ChangelogEntry, KnowledgeBaseMedia, KnowledgeBaseModule, KnowledgeBaseTopic,
 )
 from shared.html_sanitize import sanitize_kb_html
 from shared.uploads import (
@@ -54,6 +54,7 @@ from .schemas import (
     TargetStatusSchema, TargetStatusRequest, TargetStatusUpdateRequest,
     ProgramModuleSchema, ProgramModuleRequest, ProgramSubmoduleSchema, ProgramSubmoduleRequest,
     SavedTableViewSchema, SavedTableViewCreateRequest,
+    ChangelogEntrySchema, ChangelogEntryRequest, ChangelogEntryUpdateRequest,
     KnowledgeBaseMediaSchema,
     KnowledgeBaseModuleSchema, KnowledgeBaseModuleRequest, KnowledgeBaseModuleUpdateRequest,
     KnowledgeBaseTopicSchema, KnowledgeBaseTopicRequest, KnowledgeBaseTopicUpdateRequest,
@@ -677,6 +678,77 @@ def superadmin_upload_knowledge_base_media(request, file: UploadedFile = File(..
             'kind': media.kind,
             'content_type': media.content_type,
         }
+
+
+def _serialize_changelog_entry(entry: ChangelogEntry) -> dict:
+    return {
+        'id': entry.id,
+        'version': entry.version,
+        'title': entry.title,
+        'release_date': entry.release_date,
+        'body': entry.body,
+        'is_published': entry.is_published,
+    }
+
+
+def _get_changelog_entry_or_404(entry_id: int) -> ChangelogEntry:
+    try:
+        return ChangelogEntry.objects.get(id=entry_id)
+    except ChangelogEntry.DoesNotExist:
+        raise HttpError(404, 'Changelog entry not found')
+
+
+@router.get('/changelog', response=list[ChangelogEntrySchema])
+def list_changelog_entries(request):
+    with schema_context(get_public_schema_name()):
+        entries = ChangelogEntry.objects.filter(is_published=True)
+        return [_serialize_changelog_entry(entry) for entry in entries]
+
+
+@router.get('/superadmin/changelog', response=list[ChangelogEntrySchema])
+def superadmin_list_changelog_entries(request):
+    _require_superadmin(request)
+    with schema_context(get_public_schema_name()):
+        return [_serialize_changelog_entry(entry) for entry in ChangelogEntry.objects.all()]
+
+
+@router.post('/superadmin/changelog', response={201: ChangelogEntrySchema})
+def superadmin_create_changelog_entry(request, data: ChangelogEntryRequest):
+    _require_superadmin(request)
+    with schema_context(get_public_schema_name()):
+        entry = ChangelogEntry.objects.create(
+            version=data.version.strip(),
+            title=data.title,
+            release_date=data.release_date,
+            body=sanitize_kb_html(data.body),
+            is_published=data.is_published,
+            created_by=request.user,
+        )
+        return 201, _serialize_changelog_entry(entry)
+
+
+@router.patch('/superadmin/changelog/{entry_id}', response=ChangelogEntrySchema)
+def superadmin_update_changelog_entry(request, entry_id: int, data: ChangelogEntryUpdateRequest):
+    _require_superadmin(request)
+    with schema_context(get_public_schema_name()):
+        entry = _get_changelog_entry_or_404(entry_id)
+        updates = data.dict(exclude_unset=True)
+        if 'body' in updates:
+            updates['body'] = sanitize_kb_html(updates['body'])
+        if 'version' in updates:
+            updates['version'] = updates['version'].strip()
+        for field, value in updates.items():
+            setattr(entry, field, value)
+        entry.save()
+        return _serialize_changelog_entry(entry)
+
+
+@router.delete('/superadmin/changelog/{entry_id}', response={204: None})
+def superadmin_delete_changelog_entry(request, entry_id: int):
+    _require_superadmin(request)
+    with schema_context(get_public_schema_name()):
+        _get_changelog_entry_or_404(entry_id).delete()
+    return 204, None
 
 
 PROGRAM_MATERIAL_IMAGE_TYPES = {'image/jpeg', 'image/png'}
