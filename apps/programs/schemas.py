@@ -196,6 +196,7 @@ class ProgramSchema(Schema):
     workflow_template_id: int | None = None
     image_url: str | None = None
     display_order: int
+    last_run_at: datetime | None = None
     archived_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -223,6 +224,7 @@ class ProgramListSchema(Schema):
     workflow_template_id: int | None = None
     image_url: str | None = None
     display_order: int
+    last_run_at: datetime | None = None
     target_count: int = 0
     target_status_counts: dict[str, int] = {}
     created_at: datetime
@@ -337,6 +339,7 @@ class TargetSchema(Schema):
     is_visible_to_staff: bool
     module_id: int | None = None
     submodule_id: int | None = None
+    last_run_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

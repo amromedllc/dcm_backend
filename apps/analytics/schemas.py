@@ -223,3 +223,25 @@ class SavedInsightGraphUpdateRequest(Schema):
     roles: list[str] | None = None
     is_default: bool | None = None
     display_order: int | None = None
+
+
+class TargetBaselineSchema(Schema):
+    target_id: int
+    target_name: str
+    sessions_used: int
+    total_trials: int
+    correct_trials: int
+    percent_correct: float
+    first_date: Date
+    last_date: Date
+
+
+class ClientReportDraftSchema(Schema):
+    data: dict[str, Any] | None = None
+    status: str = 'draft'
+    updated_at: datetime | None = None
+    updated_by_name: str | None = None
+
+
+class ClientReportDraftSaveRequest(Schema):
+    data: dict[str, Any]

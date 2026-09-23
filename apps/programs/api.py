@@ -799,6 +799,30 @@ def _serialize_program_material(material: ProgramMaterial, request) -> ProgramMa
     )
 
 
+def _last_run_by_target(target_ids) -> dict:
+    """target id -> most recent time data was collected for it (trial or behavior event)."""
+    target_ids = list(target_ids)
+    if not target_ids:
+        return {}
+    from apps.sessions.models import BehaviorEvent, TrialEvent
+    last: dict = {}
+    for model, field in ((TrialEvent, 'recorded_at'), (BehaviorEvent, 'occurred_at')):
+        rows = (
+            model.objects.filter(target_id__in=target_ids)
+            .values_list('target_id')
+            .annotate(latest=models.Max(field))
+        )
+        for target_id, latest in rows:
+            if latest and (target_id not in last or latest > last[target_id]):
+                last[target_id] = latest
+    return last
+
+
+def _program_last_run(program_target_ids, last_by_target: dict):
+    times = [last_by_target[t] for t in program_target_ids if t in last_by_target]
+    return max(times) if times else None
+
+
 def _serialize_program(program: Program, request=None, include_targets: bool = False) -> dict:
     data = {
         'id': program.id,
@@ -882,13 +906,16 @@ def list_programs(request, client_id: int, category: str | None = None, status: 
     if status:
         qs = qs.filter(phase=status)
     result = []
-    for p in qs.prefetch_related('targets'):
+    programs = list(qs.prefetch_related('targets'))
+    last_by_target = _last_run_by_target(t.id for p in programs for t in p.targets.all())
+    for p in programs:
         targets = list(p.targets.all())
         status_counts: dict[str, int] = {}
         for t in targets:
             status_counts[t.status] = status_counts.get(t.status, 0) + 1
         result.append({
             **_serialize_program(p, request),
+            'last_run_at': _program_last_run((t.id for t in targets), last_by_target),
             'target_count': len(targets),
             'target_status_counts': status_counts,
         })
@@ -926,7 +953,11 @@ def create_program(request, data: ProgramCreateRequest):
 @router.get('/programs/{program_id}', response=ProgramSchema)
 def get_program(request, program_id: int):
     program = _get_program_or_404(request, program_id)
-    return {**_serialize_program(program, request, include_targets=True)}
+    last_by_target = _last_run_by_target(program.targets.values_list('id', flat=True))
+    return {
+        **_serialize_program(program, request, include_targets=True),
+        'last_run_at': _program_last_run(last_by_target.keys(), last_by_target),
+    }
 
 
 @router.patch('/programs/{program_id}', response=ProgramSchema)
@@ -1325,7 +1356,11 @@ def list_targets(request, program_id: int, staff_view: bool = False):
     qs = program.targets.all()
     if staff_view:
         qs = qs.visible_to_staff()
-    return list(qs)
+    targets = list(qs)
+    last_by_target = _last_run_by_target(t.id for t in targets)
+    for target in targets:
+        target.last_run_at = last_by_target.get(target.id)
+    return targets
 
 
 @router.post('/programs/{program_id}/targets', response={201: TargetSchema})

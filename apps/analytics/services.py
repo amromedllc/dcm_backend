@@ -1225,3 +1225,42 @@ def get_client_progress_overview(client_id: int) -> ClientProgressOverview:
         'mastery_events': mastery_events,
         'programs': program_stats,
     }
+
+
+def compute_program_baseline(program_id: int, sessions: int = 3) -> list[dict]:
+    """Per-target baseline from the first `sessions` sessions that collected
+    trial data — % of trials scored as a success, using the same rule the graphs
+    use. Targets with no trial data are omitted."""
+    targets = list(Target.objects.filter(program_id=program_id).order_by('display_order', 'id'))
+    max_scores = _max_scores_for_targets([t.id for t in targets])
+    results: list[dict] = []
+    for target in targets:
+        events = list(
+            TrialEvent.objects.filter(target_id=target.id)
+            .order_by('session_run__started_at', 'recorded_at')
+            .values('session_run_id', 'response_score', 'recorded_at')
+        )
+        if not events:
+            continue
+        first_sessions: list[int] = []
+        for event in events:
+            if event['session_run_id'] not in first_sessions:
+                first_sessions.append(event['session_run_id'])
+        first_sessions = first_sessions[:sessions]
+        used = [e for e in events if e['session_run_id'] in first_sessions]
+        max_score = max_scores.get(target.id)
+        correct = sum(
+            1 for e in used
+            if (e['response_score'] >= max_score if max_score is not None else e['response_score'] > 0)
+        )
+        results.append({
+            'target_id': target.id,
+            'target_name': target.name,
+            'sessions_used': len(first_sessions),
+            'total_trials': len(used),
+            'correct_trials': correct,
+            'percent_correct': round(100 * correct / len(used), 1),
+            'first_date': min(e['recorded_at'] for e in used).date(),
+            'last_date': max(e['recorded_at'] for e in used).date(),
+        })
+    return results

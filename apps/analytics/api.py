@@ -7,7 +7,7 @@ from ninja.errors import HttpError
 from apps.accounts.api import _same_practice_q
 from apps.accounts.auth import partner_auth
 from apps.programs.models import Program, Target, ProgramModule
-from .models import GraphAnnotation, ClientAnnotation, SavedInsightGraph, AssessmentRecord
+from .models import GraphAnnotation, ClientAnnotation, ClientReportDraft, SavedInsightGraph, AssessmentRecord
 from .schemas import (
     TrialDataPointSchema, BehaviorDataPointSchema, ABCDataPointSchema,
     AssessmentRecordSchema, AssessmentRecordCreateRequest, AssessmentDataPointSchema,
@@ -15,10 +15,12 @@ from .schemas import (
     GraphAnnotationSchema, GraphAnnotationCreateRequest, GraphAnnotationUpdateRequest,
     ClientAnnotationSchema, ClientAnnotationCreateRequest, ClientAnnotationUpdateRequest,
     SavedInsightGraphSchema, SavedInsightGraphCreateRequest, SavedInsightGraphUpdateRequest,
+    TargetBaselineSchema, ClientReportDraftSchema, ClientReportDraftSaveRequest,
 )
 from .services import (
     get_trial_data_by_day, get_behavior_data_by_day, get_abc_data_by_day, get_assessment_data, get_program_summary, get_module_summary,
     get_program_mastery_criteria_detail, get_client_progress_report, get_client_progress_overview,
+    compute_program_baseline,
 )
 
 router = Router(auth=partner_auth)
@@ -216,6 +218,14 @@ def client_assessment_data(
 # Program summary — all target cards in one request
 # ---------------------------------------------------------------------------
 
+@router.get('/analytics/programs/{program_id}/baseline', response=list[TargetBaselineSchema])
+def program_baseline(request, program_id: int, sessions: int = 3):
+    """Baseline % correct per target, from each target's first N sessions of data."""
+    from apps.programs.api import _get_program_or_404
+    _get_program_or_404(request, program_id)
+    return compute_program_baseline(program_id, max(1, min(sessions, 20)))
+
+
 @router.get('/analytics/programs/{program_id}/summary', response=ProgramSummarySchema)
 def program_summary(
     request,
@@ -352,6 +362,61 @@ def module_summary(
         'date_to': to,
         'targets': targets,
     }
+
+
+# ---------------------------------------------------------------------------
+# Progress report drafts (server-side copy of the report editor's state)
+# ---------------------------------------------------------------------------
+
+_REPORT_VIEW_PERMISSIONS = (
+    'client_report', 'reports_add_edit', 'reports_view_draft', 'reports_view_review', 'reports_view_archived',
+)
+_REPORT_EDIT_PERMISSIONS = ('client_report', 'reports_add_edit')
+_MAX_REPORT_DRAFT_BYTES = 8 * 1024 * 1024
+
+
+def _require_any_permission(request, permissions) -> None:
+    from apps.accounts.permissions import resolve_permission_organization, user_has_permission
+    organization = resolve_permission_organization(request)
+    if not any(user_has_permission(request.user, organization, p) for p in permissions):
+        raise HttpError(403, 'Insufficient permissions')
+
+
+def _report_draft_payload(draft: ClientReportDraft | None) -> dict:
+    if draft is None:
+        return {'data': None, 'status': 'draft', 'updated_at': None, 'updated_by_name': None}
+    return {
+        'data': draft.data,
+        'status': draft.status,
+        'updated_at': draft.updated_at,
+        'updated_by_name': draft.updated_by.full_name if draft.updated_by_id else None,
+    }
+
+
+@router.get('/analytics/clients/{client_id}/report-draft', response=ClientReportDraftSchema)
+def get_client_report_draft(request, client_id: int):
+    from apps.programs.api import _assert_client_accessible
+    _require_any_permission(request, _REPORT_VIEW_PERMISSIONS)
+    _assert_client_accessible(request, client_id)
+    draft = ClientReportDraft.objects.select_related('updated_by').filter(external_client_id=client_id).first()
+    return _report_draft_payload(draft)
+
+
+@router.put('/analytics/clients/{client_id}/report-draft', response=ClientReportDraftSchema)
+def save_client_report_draft(request, client_id: int, payload: ClientReportDraftSaveRequest):
+    import json
+    from apps.programs.api import _assert_client_accessible
+    _require_any_permission(request, _REPORT_EDIT_PERMISSIONS)
+    _assert_client_accessible(request, client_id)
+    if len(json.dumps(payload.data)) > _MAX_REPORT_DRAFT_BYTES:
+        raise HttpError(413, 'Report is too large to save')
+    status = str(payload.data.get('status') or 'draft')[:20]
+    draft, _created = ClientReportDraft.objects.update_or_create(
+        external_client_id=client_id,
+        defaults={'data': payload.data, 'status': status, 'updated_by': request.user},
+    )
+    draft.refresh_from_db()
+    return _report_draft_payload(draft)
 
 
 # ---------------------------------------------------------------------------

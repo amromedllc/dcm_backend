@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 from shared.models import TenantAwareModel
 
@@ -140,3 +141,24 @@ class AssessmentRecord(TenantAwareModel):
     def __str__(self) -> str:
         label = ' / '.join(part for part in [self.assessment_name, self.domain, self.metric] if part)
         return f'{label}: {self.score} ({self.assessed_on})'
+
+
+class ClientReportDraft(TenantAwareModel):
+    """Server-side copy of a client's progress report (draft, published,
+    locked or archived). The report editor still works from the browser, but
+    saves here so the report survives a cleared browser or another device.
+    `data` is the editor's own JSON, stored as-is."""
+    external_client_id = models.PositiveIntegerField(db_index=True)
+    data = models.JSONField(default=dict)
+    status = models.CharField(max_length=20, default='draft')
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='+',
+        db_constraint=False,
+    )
+
+    class Meta:
+        app_label = 'analytics'
+        unique_together = [['organization', 'external_client_id']]
