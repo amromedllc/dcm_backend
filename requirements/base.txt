@@ -20,3 +20,5 @@ nh3>=0.2,<0.3
 bcrypt>=4.0
 requests>=2.31
 firebase-admin>=6.5,<7.0
+pyotp>=2.9,<3.0
+qrcode>=7.4,<9.0

@@ -36,6 +36,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.STAFF)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
+    # Admin-set: this user must sign in with an authenticator code. Users can
+    # also turn MFA on for themselves (UserMFA.is_active) without this flag.
+    mfa_required = models.BooleanField(default=False)
     # Set when the user authenticates via a linked external PM system — scopes their client/data access
     external_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
     # External system employee pk — set at login for staff/supervisor, null for admin-only logins
@@ -70,6 +73,11 @@ class User(AbstractBaseUser, PermissionsMixin):
                 ),
             ),
         ]
+
+    @property
+    def mfa_enabled(self) -> bool:
+        mfa = getattr(self, 'mfa', None)
+        return bool(mfa and mfa.is_active)
 
     @property
     def full_name(self) -> str:
@@ -243,3 +251,23 @@ class RolePermission(models.Model):
 
     def __str__(self) -> str:
         return f'{self.organization} / {self.role}'
+
+
+class UserMFA(models.Model):
+    """Authenticator-app (TOTP) enrolment for one user. The secret is stored
+    encrypted (see accounts.mfa). A row with is_active=False is a setup that
+    was started but never confirmed with a valid code."""
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='mfa')
+    secret_encrypted = models.TextField()
+    is_active = models.BooleanField(default=False)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    last_used_step = models.BigIntegerField(null=True, blank=True)
+    failed_attempts = models.PositiveIntegerField(default=0)
+    locked_until = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        app_label = 'accounts'
+
+    def __str__(self) -> str:
+        return f'MFA for {self.user_id} ({"active" if self.is_active else "pending"})'
