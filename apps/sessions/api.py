@@ -16,14 +16,13 @@ from apps.programs.measurements import (
 from shared.uploads import validate_media_upload
 from .models import (
     Appointment, SessionRun, TrialEvent, BehaviorEvent, ABCEvent,
-    ABCCategory, ABCItem, SessionMedia, SessionMediaComment, SessionPrototype,
+    ABCCategory, ABCItem, SessionMedia, SessionMediaComment,
 )
 from .schemas import (
     AppointmentSchema, AppointmentCreateRequest, AppointmentUpdateRequest,
     AssignProgramsRequest, AssignedProgramSchema,
     SessionRunSchema, SessionStartRequest, SessionSubmitRequest, SessionRejectRequest,
     SessionLinkAppointmentRequest,
-    SessionPrototypeSchema, SessionPrototypeCreateRequest, SessionPrototypeUpdateRequest,
     SessionSubmitResponse, TargetAdvancedSchema, TargetFadedSchema,
     TrialEventSchema, TrialEventCreateRequest,
     BehaviorEventSchema, BehaviorEventCreateRequest,
@@ -385,7 +384,6 @@ def _serialize_session(
         'appointment_start_time': dcm_appt.start_time if dcm_appt else None,
         'appointment_end_time': dcm_appt.end_time if dcm_appt else None,
         'lesson_id': session.lesson_id,
-        'session_prototype_id': session.session_prototype_id,
         'session_name': session.session_name,
         'message_to_therapist': session.message_to_therapist,
         'status': session.status,
@@ -543,67 +541,6 @@ def my_schedule(request, date: str | None = None):
         from_date=target,
         to_date=target,
     )
-
-
-# ---------------------------------------------------------------------------
-# Session prototypes
-# ---------------------------------------------------------------------------
-
-def _get_session_prototype_or_404(prototype_id: int) -> SessionPrototype:
-    try:
-        return SessionPrototype.objects.get(id=prototype_id)
-    except SessionPrototype.DoesNotExist:
-        raise HttpError(404, 'Session prototype not found')
-
-
-def _clean_session_prototype_payload(payload: dict) -> dict:
-    if 'name' in payload and payload['name'] is not None:
-        payload['name'] = payload['name'].strip()
-        if not payload['name']:
-            raise HttpError(400, 'Session prototype name is required')
-    for field in ('description', 'message_to_therapist'):
-        if field in payload and payload[field] is not None:
-            payload[field] = payload[field].strip()
-    return payload
-
-
-@router.get('/session-prototypes', response=list[SessionPrototypeSchema])
-def list_session_prototypes(request, include_inactive: bool = False):
-    require_permission(
-        request,
-        'settings_session_prototypes_view' if include_inactive else 'session_start',
-    )
-    qs = SessionPrototype.objects.all()
-    if not include_inactive:
-        qs = qs.filter(is_active=True)
-    return list(qs)
-
-
-@router.post('/session-prototypes', response={201: SessionPrototypeSchema})
-def create_session_prototype(request, data: SessionPrototypeCreateRequest):
-    require_permission(request, 'settings_session_prototypes_create')
-    payload = _clean_session_prototype_payload(data.dict())
-    prototype = SessionPrototype.objects.create(created_by=request.user, **payload)
-    return 201, prototype
-
-
-@router.patch('/session-prototypes/{prototype_id}', response=SessionPrototypeSchema)
-def update_session_prototype(request, prototype_id: int, data: SessionPrototypeUpdateRequest):
-    require_permission(request, 'settings_session_prototypes_edit')
-    prototype = _get_session_prototype_or_404(prototype_id)
-    payload = _clean_session_prototype_payload(data.dict(exclude_unset=True))
-    for field, value in payload.items():
-        setattr(prototype, field, value)
-    prototype.save()
-    return prototype
-
-
-@router.delete('/session-prototypes/{prototype_id}', response={204: None})
-def delete_session_prototype(request, prototype_id: int):
-    require_permission(request, 'settings_session_prototypes_delete')
-    prototype = _get_session_prototype_or_404(prototype_id)
-    prototype.delete()
-    return 204, None
 
 
 # ---------------------------------------------------------------------------
@@ -853,13 +790,6 @@ def start_session(request, data: SessionStartRequest):
         external_appointment_id = int(external_lookup)
     elif appt and appt.external_id and appt.external_id.isdigit():
         external_appointment_id = int(appt.external_id)
-    prototype = None
-    if data.session_prototype_id:
-        prototype = _get_session_prototype_or_404(data.session_prototype_id)
-        if not prototype.is_active:
-            raise HttpError(400, 'Session prototype is inactive')
-    elif lesson_id is None:
-        prototype = SessionPrototype.objects.filter(is_default=True, is_active=True).first()
     snapshot = build_program_snapshot(
         client_id=data.client_id,
         lesson_id=lesson_id,
@@ -870,9 +800,8 @@ def start_session(request, data: SessionStartRequest):
         staff=request.user,
         external_appointment_id=external_appointment_id,
         lesson_id=lesson_id,
-        session_prototype=prototype,
-        session_name=prototype.name if prototype else (lesson_obj.name if lesson_obj else ''),
-        message_to_therapist=prototype.message_to_therapist if prototype else (lesson_obj.therapist_message if lesson_obj else ''),
+        session_name=lesson_obj.name if lesson_obj else '',
+        message_to_therapist=lesson_obj.therapist_message if lesson_obj else '',
         program_snapshot=snapshot,
         start_latitude=data.latitude,
         start_longitude=data.longitude,
