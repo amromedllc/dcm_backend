@@ -252,54 +252,55 @@ class _NumberingResolver:
 # Block -> value converters (used by the apply step)
 # --------------------------------------------------------------------------- #
 
-_TAG_TO_MD = [
-    (re.compile(r'</?strong>'), '**'),
-    (re.compile(r'</?em>'), '*'),
-    (re.compile(r'</?u>'), ''),
-]
-_LINK_RE = re.compile(r'<a href="([^"]*)">(.*?)</a>', re.DOTALL)
+def _block_html(block: dict) -> str:
+    return block.get('html') or _html.escape(block.get('text', ''))
 
 
-def _inline_markdown(block: dict) -> str:
-    raw = block.get('html') or _html.escape(block.get('text', ''))
-    raw = _LINK_RE.sub(lambda m: f'[{m.group(2)}]({_html.unescape(m.group(1))})', raw)
-    for pattern, repl in _TAG_TO_MD:
-        raw = pattern.sub(repl, raw)
-    raw = re.sub(r'<[^>]+>', '', raw)
-    return _html.unescape(raw).strip()
+def blocks_to_html(blocks: list[dict]) -> str:
+    """Join blocks into a safe HTML string (for overview / topic summary).
 
-
-def blocks_to_markdown(blocks: list[dict]) -> str:
-    """Join blocks into a Markdown string (for overview / topic summary)."""
-    lines: list[str] = []
-    for block in blocks:
+    Uses the same tag subset as `_inline_html` plus block-level wrapping, so
+    the result renders correctly wherever Knowledge Base HTML is rendered
+    (see shared/html_sanitize.py for the matching allow-list).
+    """
+    out: list[str] = []
+    i = 0
+    n = len(blocks)
+    while i < n:
+        block = blocks[i]
         kind = block.get('kind')
         if kind == 'heading':
-            level = block.get('level') or 2
-            lines.append('#' * min(level + 1, 6) + ' ' + block.get('text', '').strip())
+            level = min((block.get('level') or 2) + 1, 6)
+            out.append(f'<h{level}>{_block_html(block)}</h{level}>')
+            i += 1
         elif kind == 'list_item':
-            indent = '  ' * int(block.get('indent') or 0)
-            marker = '1.' if block.get('list') == 'number' else '-'
-            lines.append(f'{indent}{marker} {_inline_markdown(block)}')
+            tag = 'ol' if block.get('list') == 'number' else 'ul'
+            items: list[str] = []
+            while i < n and blocks[i].get('kind') == 'list_item':
+                items.append(f'<li>{_block_html(blocks[i])}</li>')
+                i += 1
+            out.append(f'<{tag}>' + ''.join(items) + f'</{tag}>')
         elif kind == 'table':
-            for row in block.get('rows', []):
-                lines.append('- ' + ' | '.join(c.strip() for c in row))
+            out.append(block.get('html') or _table_html(block.get('rows', [])))
+            i += 1
         else:
-            lines.append(_inline_markdown(block))
-        lines.append('')
-    return '\n'.join(lines).strip()
+            out.append(f'<p>{_block_html(block)}</p>')
+            i += 1
+    return ''.join(out)
 
 
 def blocks_to_items(blocks: list[dict]) -> list[str]:
-    """Flatten blocks into a list of strings (for a topic's `items`)."""
+    """Flatten blocks into a list of safe HTML strings (for a topic's `items`)."""
     items: list[str] = []
     for block in blocks:
         if block.get('kind') == 'table':
-            items.extend(' | '.join(c.strip() for c in row) for row in block.get('rows', []))
+            items.extend(
+                ' | '.join(_html.escape(c.strip()) for c in row)
+                for row in block.get('rows', [])
+            )
         else:
-            value = _inline_markdown(block)
-            if value:
-                items.append(value)
+            if block.get('text', '').strip():
+                items.append(_block_html(block))
     return items
 
 

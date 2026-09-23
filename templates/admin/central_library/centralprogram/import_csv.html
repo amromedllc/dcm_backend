@@ -1,0 +1,87 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+  <style>
+    .central-import-actions {
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin: 24px 0;
+    }
+
+    .central-import-primary,
+    .central-import-secondary {
+      border: 0;
+      border-radius: 8px;
+      cursor: pointer;
+      display: inline-flex;
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 1;
+      padding: 12px 16px;
+      text-decoration: none;
+    }
+
+    .central-import-primary {
+      background: #2563eb;
+      color: #fff;
+    }
+
+    .central-import-secondary {
+      background: #334155;
+      color: #fff;
+    }
+
+    .central-import-cancel {
+      color: #cbd5e1;
+      font-weight: 600;
+      text-decoration: none;
+    }
+  </style>
+
+  <div id="content-main">
+    <form method="post" enctype="multipart/form-data" novalidate>
+      {% csrf_token %}
+      <fieldset class="module aligned">
+        <div class="form-row">
+          {{ form.file.errors }}
+          <div>
+            {{ form.file.label_tag }}
+            {{ form.file }}
+            <div class="help">{{ form.file.help_text }}</div>
+          </div>
+        </div>
+        <div class="form-row">
+          {{ form.folder_name.errors }}
+          <div>
+            {{ form.folder_name.label_tag }}
+            {{ form.folder_name }}
+            <div class="help">{{ form.folder_name.help_text }}</div>
+          </div>
+        </div>
+        <div class="form-row">
+          {{ form.replace.errors }}
+          <div>
+            {{ form.replace.label_tag }}
+            {{ form.replace }}
+            <div class="help">{{ form.replace.help_text }}</div>
+          </div>
+        </div>
+      </fieldset>
+
+      <div class="central-import-actions">
+        <button type="submit" class="central-import-primary">Import CSV</button>
+        <a href="{{ sample_url }}" class="central-import-secondary">Download sample CSV</a>
+        <a href="{% url 'admin:central_library_centralprogram_changelist' %}" class="central-import-cancel">Cancel</a>
+      </div>
+    </form>
+
+    <div class="module" style="margin-top: 20px; padding: 16px;">
+      <h2>Upload format</h2>
+      <p>Upload a CSV with one row per target. Repeat program columns for each target in the same program.</p>
+      <p>For lists like tags, prompt_levels, and sub_items, separate values with a pipe character, for example: Full Physical|Partial Physical|Independent.</p>
+      <p>Existing programs with the same name in the selected folder are skipped unless Replace is checked.</p>
+    </div>
+  </div>
+{% endblock %}

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from ninja import Schema
 from pydantic import Field, field_validator
@@ -196,6 +196,7 @@ class ProgramSchema(Schema):
     workflow_template_id: int | None = None
     image_url: str | None = None
     display_order: int
+    last_run_at: datetime | None = None
     archived_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -223,6 +224,7 @@ class ProgramListSchema(Schema):
     workflow_template_id: int | None = None
     image_url: str | None = None
     display_order: int
+    last_run_at: datetime | None = None
     target_count: int = 0
     target_status_counts: dict[str, int] = {}
     created_at: datetime
@@ -337,6 +339,7 @@ class TargetSchema(Schema):
     is_visible_to_staff: bool
     module_id: int | None = None
     submodule_id: int | None = None
+    last_run_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -457,6 +460,7 @@ class LessonSchema(Schema):
     id: int
     client_id: int
     name: str
+    therapist_message: str = ''
     lesson_type: str
     is_active: bool
     programs: list[LessonProgramSchema] = []
@@ -467,14 +471,17 @@ class LessonSchema(Schema):
 class LessonCreateRequest(Schema):
     client_id: int
     name: NonEmptyStr
+    therapist_message: str = ''
     lesson_type: Lesson.LessonType = Lesson.LessonType.OPEN
     program_ids: list[int] = []
 
 
 class LessonUpdateRequest(Schema):
     name: NonEmptyStr | None = None
+    therapist_message: str | None = None
     lesson_type: Lesson.LessonType | None = None
     is_active: bool | None = None
+    program_ids: list[int] | None = None
 
 
 class AddProgramToLessonRequest(Schema):
@@ -702,6 +709,12 @@ class KnowledgeBaseModuleSchema(Schema):
     topics: list[KnowledgeBaseTopicSchema]
 
 
+class KnowledgeBaseMediaSchema(Schema):
+    url: str
+    kind: str
+    content_type: str
+
+
 class KnowledgeBaseModuleRequest(Schema):
     slug: SlugStr
     title: NonEmptyStr
@@ -890,3 +903,86 @@ class ClientProgramAuditSchema(Schema):
     actor_email: str
     changes: dict
     timestamp: datetime
+
+
+class ChangelogEntrySchema(Schema):
+    id: int
+    version: str
+    title: str
+    release_date: date
+    body: str
+    is_published: bool = True
+
+
+class ChangelogEntryRequest(Schema):
+    version: str = ''
+    title: NonEmptyStr
+    release_date: date
+    body: str = ''
+    is_published: bool = True
+
+
+class ChangelogEntryUpdateRequest(Schema):
+    version: str | None = None
+    title: NonEmptyStr | None = None
+    release_date: date | None = None
+    body: str | None = None
+    is_published: bool | None = None
+
+
+# ---------------------------------------------------------------------------
+# Program prototypes
+# ---------------------------------------------------------------------------
+
+class ProgramPrototypeSchema(Schema):
+    id: int
+    name: str
+    description: str = ''
+    category: str
+    treatment_area: str = ''
+    tags: list[str] = []
+    prompting_template_id: int | None = None
+    hidden_prompt_level_labels: list[str] = []
+    workflow_template_id: int | None = None
+    baseline_notes: str = ''
+    objective: str = ''
+    instructions_html: str = ''
+    professional_instructions_html: str = ''
+    display_order: int
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProgramPrototypeRequest(Schema):
+    name: NonEmptyStr
+    description: str = ''
+    category: Program.Category = Program.Category.SKILL_ACQUISITION
+    treatment_area: str = ''
+    tags: list[str] = []
+    prompting_template_id: int | None = None
+    hidden_prompt_level_labels: list[str] = []
+    workflow_template_id: int | None = None
+    baseline_notes: str = ''
+    objective: str = ''
+    instructions_html: str = ''
+    professional_instructions_html: str = ''
+    display_order: int = Field(default=0, ge=0)
+    is_active: bool = True
+
+
+class ProgramPrototypeUpdateRequest(Schema):
+    name: NonEmptyStr | None = None
+    description: str | None = None
+    category: Program.Category | None = None
+    treatment_area: str | None = None
+    tags: list[str] | None = None
+    prompting_template_id: int | None = None
+    hidden_prompt_level_labels: list[str] | None = None
+    workflow_template_id: int | None = None
+    baseline_notes: str | None = None
+    objective: str | None = None
+    instructions_html: str | None = None
+    professional_instructions_html: str | None = None
+    display_order: int | None = Field(default=None, ge=0)
+    is_active: bool | None = None

@@ -5,7 +5,7 @@ must land in the *calling* org — including a fresh, org-owned
 PromptingTemplate built from the target's optional `prompting_levels`,
 since PromptingTemplate is tenant-scoped and there is no org to reference.
 """
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django_tenants.utils import schema_context
 from ninja.errors import HttpError
@@ -13,10 +13,15 @@ from ninja.errors import HttpError
 from apps.accounts.models import User
 from apps.central_library.models import (
     CentralProgram, CentralProgramFolder, CentralTarget,
-    KnowledgeBaseModule, KnowledgeBaseTopic,
+    ChangelogEntry, KnowledgeBaseMedia, KnowledgeBaseModule, KnowledgeBaseTopic,
 )
 from apps.programs.api import (
     _clone_central_program,
+    list_changelog_entries,
+    superadmin_create_changelog_entry,
+    superadmin_delete_changelog_entry,
+    superadmin_list_changelog_entries,
+    superadmin_update_changelog_entry,
     superadmin_create_central_program,
     superadmin_create_central_target,
     superadmin_create_knowledge_base_module,
@@ -25,6 +30,7 @@ from apps.programs.api import (
     superadmin_delete_knowledge_base_video,
     superadmin_list_central_programs,
     superadmin_list_knowledge_base_modules,
+    superadmin_upload_knowledge_base_media,
     superadmin_upload_knowledge_base_topic_video,
     superadmin_upload_knowledge_base_video,
     superadmin_update_central_program,
@@ -32,6 +38,7 @@ from apps.programs.api import (
 )
 from apps.programs.models import PromptingTemplate
 from apps.programs.schemas import (
+    ChangelogEntryRequest, ChangelogEntryUpdateRequest,
     CentralProgramRequest, CentralProgramUpdateRequest, CentralTargetRequest,
     KnowledgeBaseModuleRequest, KnowledgeBaseModuleUpdateRequest, KnowledgeBaseTopicRequest,
 )
@@ -175,6 +182,10 @@ class SuperadminCentralProgramApiTests(TestCase):
         self.assertEqual(CentralTarget.objects.get().prompting_levels[0]['label'], 'Independent')
 
 
+@override_settings(STORAGES={
+    'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+})
 class SuperadminKnowledgeBaseApiTests(TestCase):
     def setUp(self):
         self.superadmin = User.objects.create_user(
@@ -312,3 +323,97 @@ class SuperadminKnowledgeBaseApiTests(TestCase):
         topic.refresh_from_db()
         self.assertFalse(topic.video)
         self.assertEqual(result['video_url'], None)
+
+    def test_superadmin_can_upload_inline_image_for_rich_text(self):
+        import io
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new('RGB', (1, 1)).save(buf, format='PNG')
+        upload = SimpleUploadedFile('screenshot.png', buf.getvalue(), content_type='image/png')
+
+        result = superadmin_upload_knowledge_base_media(FakeRequest(self.superadmin), upload)
+
+        self.assertEqual(result['kind'], KnowledgeBaseMedia.Kind.IMAGE)
+        self.assertEqual(result['content_type'], 'image/png')
+        self.assertIn('/media/', result['url'])
+        self.assertEqual(KnowledgeBaseMedia.objects.count(), 1)
+
+    def test_superadmin_can_upload_inline_video_for_rich_text(self):
+        upload = SimpleUploadedFile('clip.mp4', b'fake-video', content_type='video/mp4')
+
+        result = superadmin_upload_knowledge_base_media(FakeRequest(self.superadmin), upload)
+
+        self.assertEqual(result['kind'], KnowledgeBaseMedia.Kind.VIDEO)
+        self.assertIn('/media/', result['url'])
+
+    def test_inline_media_upload_rejects_unsupported_file(self):
+        upload = SimpleUploadedFile('notes.pdf', b'%PDF-fake', content_type='application/pdf')
+
+        with self.assertRaises(HttpError):
+            superadmin_upload_knowledge_base_media(FakeRequest(self.superadmin), upload)
+
+    def test_inline_media_upload_is_superadmin_only(self):
+        upload = SimpleUploadedFile('clip.mp4', b'fake-video', content_type='video/mp4')
+
+        with self.assertRaises(HttpError):
+            superadmin_upload_knowledge_base_media(FakeRequest(self.admin), upload)
+
+
+class ChangelogApiTests(TestCase):
+    def setUp(self):
+        self.superadmin = User.objects.create_user(
+            email='super-cl@example.com', password='x', role=User.Role.ADMIN, is_superuser=True,
+        )
+        self.admin = User.objects.create_user(
+            email='org-admin-cl@example.com', password='x', role=User.Role.ADMIN,
+        )
+
+    def _create(self, **overrides):
+        payload = dict(
+            version='v1.0.0', title='First release', release_date='2026-09-22',
+            body='<ul><li>Added thing</li></ul>', is_published=True,
+        )
+        payload.update(overrides)
+        _status, entry = superadmin_create_changelog_entry(
+            FakeRequest(self.superadmin), ChangelogEntryRequest(**payload),
+        )
+        return entry
+
+    def test_create_sanitizes_body(self):
+        entry = self._create(body='<p>Hi</p><script>alert(1)</script>')
+        self.assertNotIn('script', entry['body'])
+        self.assertIn('<p>Hi</p>', entry['body'])
+
+    def test_public_list_hides_drafts_and_orders_newest_first(self):
+        self._create(title='Old', release_date='2026-09-01')
+        self._create(title='New', release_date='2026-09-22')
+        self._create(title='Draft', release_date='2026-09-30', is_published=False)
+
+        titles = [e['title'] for e in list_changelog_entries(FakeRequest(self.admin))]
+
+        self.assertEqual(titles, ['New', 'Old'])
+
+    def test_superadmin_list_includes_drafts(self):
+        self._create(title='Draft', is_published=False)
+        entries = superadmin_list_changelog_entries(FakeRequest(self.superadmin))
+        self.assertEqual(len(entries), 1)
+
+    def test_update_and_delete(self):
+        entry = self._create()
+        updated = superadmin_update_changelog_entry(
+            FakeRequest(self.superadmin), entry['id'],
+            ChangelogEntryUpdateRequest(title='Renamed', is_published=False),
+        )
+        self.assertEqual(updated['title'], 'Renamed')
+        self.assertIs(updated['is_published'], False)
+
+        superadmin_delete_changelog_entry(FakeRequest(self.superadmin), entry['id'])
+        self.assertEqual(ChangelogEntry.objects.count(), 0)
+
+    def test_authoring_is_superadmin_only(self):
+        with self.assertRaises(HttpError):
+            superadmin_create_changelog_entry(
+                FakeRequest(self.admin),
+                ChangelogEntryRequest(title='x', release_date='2026-09-22'),
+            )

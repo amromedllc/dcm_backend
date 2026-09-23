@@ -91,7 +91,7 @@ def _get_session_or_404(session_id: int, request) -> SessionRun:
     qs = SessionRun.objects.select_related('staff').filter(
         external_client_id__in=_accessible_external_client_ids(request),
     ).order_by('-started_at')
-    if request.user.role == 'staff' and client_id is None:
+    if request.user.role == 'staff':
         qs = qs.filter(staff_id=request.user.id)
     try:
         return qs.get(id=session_id)
@@ -384,6 +384,8 @@ def _serialize_session(
         'appointment_start_time': dcm_appt.start_time if dcm_appt else None,
         'appointment_end_time': dcm_appt.end_time if dcm_appt else None,
         'lesson_id': session.lesson_id,
+        'session_name': session.session_name,
+        'message_to_therapist': session.message_to_therapist,
         'status': session.status,
         'started_at': session.started_at,
         'start_latitude': session.start_latitude,
@@ -646,13 +648,21 @@ def assign_appointment_programs(request, appt_id: int, data: AssignProgramsReque
     by the client (from the live TherapyPMS API list) — the TPMS DB is not used.
     """
     require_permission(request, 'appointments_edit')
+    if not data.program_ids and not data.clear_assignment:
+        raise HttpError(400, 'Select at least one program before saving')
 
     accessible_ids = _accessible_external_client_ids(request)
-    appt = _find_appointment(appt_id)
+    external_lookup = str(data.external_appointment_id or '').strip()
+    appt = (
+        Appointment.objects.filter(external_id=external_lookup).select_related('lesson').first()
+        if external_lookup else _find_appointment(appt_id)
+    )
     if appt and appt.external_client_id not in accessible_ids:
         raise HttpError(404, 'Appointment not found')
 
     if not appt:
+        if data.clear_assignment:
+            raise HttpError(404, 'Appointment not found')
         if not data.client_id:
             raise HttpError(400, 'client_id is required to assign programs to a new appointment')
         if data.client_id not in accessible_ids:
@@ -665,7 +675,7 @@ def assign_appointment_programs(request, appt_id: int, data: AssignProgramsReque
             )
         end = data.end_time or data.start_time
         appt = Appointment.objects.create(
-            external_id=str(appt_id),
+            external_id=external_lookup or str(appt_id),
             external_client_id=data.client_id,
             source=Appointment.Source.SYNCED,
             start_time=data.start_time,
@@ -684,6 +694,14 @@ def assign_appointment_programs(request, appt_id: int, data: AssignProgramsReque
     from django.db import transaction
 
     with transaction.atomic():
+        if data.clear_assignment:
+            if appt.lesson_id:
+                lesson = appt.lesson
+                appt.lesson = None
+                appt.save(update_fields=['lesson'])
+                lesson.delete()
+            return _appt_qs().get(id=appt.id)
+
         if appt.lesson_id:
             lesson = appt.lesson
         else:
@@ -757,10 +775,20 @@ def start_session(request, data: SessionStartRequest):
     """
     if data.client_id not in _accessible_external_client_ids(request):
         raise HttpError(404, 'Client not found')
-    appt = _find_appointment(data.appointment_id) if data.appointment_id else None
+    external_lookup = str(data.external_appointment_id or '').strip()
+    appt = (
+        Appointment.objects.filter(external_id=external_lookup).select_related('lesson').first()
+        if external_lookup else _find_appointment(data.appointment_id)
+    ) if (data.appointment_id or external_lookup) else None
     lesson_id = data.lesson_id or (appt.lesson_id if appt else None)
+    lesson_obj = appt.lesson if appt and appt.lesson_id else None
+    if lesson_id and lesson_obj is None:
+        from apps.programs.models import Lesson
+        lesson_obj = Lesson.objects.filter(id=lesson_id, is_active=True).first()
     external_appointment_id = data.appointment_id
-    if appt and appt.external_id and appt.external_id.isdigit():
+    if external_lookup and external_lookup.isdigit():
+        external_appointment_id = int(external_lookup)
+    elif appt and appt.external_id and appt.external_id.isdigit():
         external_appointment_id = int(appt.external_id)
     snapshot = build_program_snapshot(
         client_id=data.client_id,
@@ -772,6 +800,8 @@ def start_session(request, data: SessionStartRequest):
         staff=request.user,
         external_appointment_id=external_appointment_id,
         lesson_id=lesson_id,
+        session_name=lesson_obj.name if lesson_obj else '',
+        message_to_therapist=lesson_obj.therapist_message if lesson_obj else '',
         program_snapshot=snapshot,
         start_latitude=data.latitude,
         start_longitude=data.longitude,
@@ -863,13 +893,22 @@ def link_session_appointment(request, session_id: int, data: SessionLinkAppointm
     require_permission(request, 'appointments_edit')
 
     session = _get_session_or_404(session_id, request)
-    appt = _find_appointment(data.appointment_id)
+    external_lookup = str(data.external_appointment_id or '').strip()
+    appt = (
+        Appointment.objects.filter(external_id=external_lookup).select_related('lesson').first()
+        if external_lookup else _find_appointment(data.appointment_id)
+    )
     if not appt:
         raise HttpError(404, 'Appointment not found')
-    if appt.external_client_id != session.external_client_id:
+    if _canonical_external_client_id(appt.external_client_id) != session.external_client_id:
         raise HttpError(400, "That appointment belongs to a different client than this session")
 
-    session.external_appointment_id = data.appointment_id
+    if appt.external_id and appt.external_id.isdigit():
+        session.external_appointment_id = int(appt.external_id)
+    elif external_lookup.isdigit():
+        session.external_appointment_id = int(external_lookup)
+    else:
+        session.external_appointment_id = data.appointment_id
     session.save(update_fields=['external_appointment_id'])
     return _serialize_session(session)
 

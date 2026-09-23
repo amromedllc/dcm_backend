@@ -87,7 +87,7 @@ class ApplyMappingTests(TestCase):
         self.assertEqual(defaults['title'], 'Dashboard')
         self.assertEqual(defaults['icon'], 'bar_chart')
         self.assertEqual(defaults['audience'], ['Admin', 'Supervisor', 'Staff'])
-        self.assertIn('**pending reviews**', defaults['overview'])
+        self.assertIn('<strong>pending reviews</strong>', defaults['overview'])
         self.assertEqual(len(topics), 1)
         self.assertEqual(topics[0]['title'], 'What users see')
         self.assertEqual(topics[0]['items'], [

@@ -144,11 +144,6 @@ class Program(TenantAwareModel):
     class Meta:
         app_label = 'programs'
         ordering = ['display_order', 'name']
-        indexes = [
-            models.Index(fields=['organization', 'external_client_id', 'status', 'display_order'], name='program_org_client_status_idx'),
-            models.Index(fields=['organization', 'is_template', 'display_order'], name='program_org_template_ord_idx'),
-            models.Index(fields=['organization', 'folder', 'display_order'], name='program_org_folder_ord_idx'),
-        ]
 
     @property
     def client_id(self):
@@ -156,6 +151,42 @@ class Program(TenantAwareModel):
 
     def __str__(self) -> str:
         return f'{self.name} ({self.external_client_id})'
+
+
+class ProgramPrototype(TenantAwareModel):
+    """Reusable preset for the Create Program form. Picking one pre-fills the
+    same settings staff would otherwise enter by hand; every value stays
+    editable afterwards."""
+    name = models.CharField(max_length=160)
+    description = models.TextField(blank=True)
+    category = models.CharField(
+        max_length=30, choices=Program.Category.choices, default=Program.Category.SKILL_ACQUISITION,
+    )
+    treatment_area = models.CharField(max_length=200, blank=True)
+    tags = models.JSONField(default=list, blank=True)
+    prompting_template = models.ForeignKey(
+        'PromptingTemplate', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    hidden_prompt_level_labels = models.JSONField(default=list, blank=True)
+    workflow_template = models.ForeignKey(
+        'WorkflowTemplate', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    baseline_notes = models.TextField(blank=True)
+    objective = models.TextField(blank=True)
+    instructions_html = models.TextField(blank=True, default='')
+    professional_instructions_html = models.TextField(blank=True, default='')
+    display_order = models.PositiveIntegerField(default=0, db_index=True)
+    is_active = models.BooleanField(default=True)
+
+    _org_scoped_fk_fields = ('prompting_template', 'workflow_template')
+
+    class Meta:
+        app_label = 'programs'
+        ordering = ['display_order', 'name']
+        unique_together = [['organization', 'name']]
+
+    def __str__(self) -> str:
+        return self.name
 
 
 class SubTargetMeasurementType(models.TextChoices):
@@ -361,11 +392,6 @@ class Target(TenantAwareModel):
     class Meta:
         app_label = 'programs'
         ordering = ['display_order', 'id']
-        indexes = [
-            models.Index(fields=['organization', 'program', 'status', 'display_order'], name='target_org_program_status_idx'),
-            models.Index(fields=['organization', 'program', 'module', 'display_order'], name='target_org_program_module_idx'),
-            models.Index(fields=['organization', 'program', 'submodule', 'display_order'], name='target_org_program_submod_idx'),
-        ]
 
     def __str__(self) -> str:
         return f'{self.name} [{self.status}]'
@@ -462,9 +488,6 @@ class TargetSubItem(TenantAwareModel):
         app_label = 'programs'
         ordering = ['display_order', 'id']
         unique_together = [('target', 'key')]
-        indexes = [
-            models.Index(fields=['organization', 'target', 'status', 'display_order'], name='subitem_org_target_status_idx'),
-        ]
 
     def __str__(self) -> str:
         return f'{self.target_id}:{self.label} [{self.status}]'
@@ -650,9 +673,6 @@ class ProgramModule(TenantAwareModel):
     class Meta:
         app_label = 'programs'
         ordering = ['display_order', 'name']
-        indexes = [
-            models.Index(fields=['organization', 'program', 'display_order'], name='module_org_program_ord_idx'),
-        ]
 
     def __str__(self):
         return f'{self.program.name} / {self.name}'
@@ -673,9 +693,6 @@ class ProgramSubmodule(TenantAwareModel):
     class Meta:
         app_label = 'programs'
         ordering = ['display_order', 'name']
-        indexes = [
-            models.Index(fields=['organization', 'module', 'display_order'], name='submodule_org_module_ord_idx'),
-        ]
 
     def __str__(self):
         return f'{self.module.name} / {self.name}'
@@ -790,6 +807,7 @@ class Lesson(TenantAwareModel):
 
     external_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     name = models.CharField(max_length=200)
+    therapist_message = models.TextField(blank=True)
     lesson_type = models.CharField(max_length=25, choices=LessonType.choices, default=LessonType.OPEN)
     is_active = models.BooleanField(default=True)
 

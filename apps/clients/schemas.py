@@ -70,3 +70,46 @@ class StaffAssignmentSchema(Schema):
 class AddStaffAssignmentRequest(Schema):
     user_id: int
     is_primary: bool = False
+
+
+class TreatmentPlanSchema(Schema):
+    id: int
+    client_id: int
+    title: str
+    plan_date: date
+    date_from: date | None = None
+    date_to: date | None = None
+    status: str
+    sections: dict
+    source_snapshot: dict
+    finalized_at: datetime | None = None
+    finalized_by_id: int | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class TreatmentPlanListSchema(Schema):
+    id: int
+    client_id: int
+    title: str
+    plan_date: date
+    date_from: date | None = None
+    date_to: date | None = None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class TreatmentPlanGenerateRequest(Schema):
+    title: str | None = None
+    date_from: date | None = None
+    date_to: date | None = None
+
+
+class TreatmentPlanUpdateRequest(Schema):
+    title: str | None = None
+    plan_date: date | None = None
+    date_from: date | None = None
+    date_to: date | None = None
+    status: str | None = None
+    sections: dict | None = None

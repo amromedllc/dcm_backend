@@ -9,11 +9,19 @@ from ninja.errors import HttpError
 from django.db import transaction
 from django.db.models import Q
 
-from .models import User
+from . import mfa
+from .models import User, UserMFA
 from .auth import create_access_token, create_refresh_token, decode_token, jwt_auth, jwt_auth_any_role, token_tenant_mismatch
 from .permissions import get_user_permissions, require_permission, resolve_permission_organization
 from .schemas import (
     LoginRequest,
+    LoginResponse,
+    MfaCodeRequest,
+    MfaRemoveRequest,
+    MfaSetupResponse,
+    MfaStatusSchema,
+    MfaTokenCodeRequest,
+    MfaTokenRequest,
     TokenResponse,
     RefreshRequest,
     AccessTokenResponse,
@@ -69,7 +77,7 @@ def _issue_tokens(user: User, tenant_id: int) -> TokenResponse:
     )
 
 
-@router.post('/login', response=TokenResponse, auth=None)
+@router.post('/login', response=LoginResponse, auth=None)
 def login(request, data: LoginRequest):
     """
     Authenticate exclusively via TherapyPMS HTTP APIs (encrypt → login).
@@ -103,15 +111,105 @@ def login(request, data: LoginRequest):
     except TpmsAuthError as exc:
         superuser_tokens = _superadmin_local_auth(request, tenant, data.email, data.password)
         if superuser_tokens is not None:
-            return superuser_tokens
+            return _mfa_gate(tenant, superuser_tokens)
         message = str(exc) or 'Invalid email or password'
         if 'unavailable' in message.lower() or 'invalid response' in message.lower():
             raise HttpError(502, message) from exc
         raise HttpError(401, 'Invalid email or password') from exc
 
     if account_type_of(payload) in _CLIENT_ACCOUNT_TYPES:
-        return _tpms_caregiver_auth(request, tenant, data.email, payload)
-    return _tpms_staff_auth(request, tenant, data.email, payload)
+        return _mfa_gate(tenant, _tpms_caregiver_auth(request, tenant, data.email, payload))
+    return _mfa_gate(tenant, _tpms_staff_auth(request, tenant, data.email, payload))
+
+
+def _mfa_gate(tenant, tokens: TokenResponse):
+    """Hold back the tokens if this account must (or chose to) use MFA — the
+    client gets a short-lived challenge token instead and finishes signing in
+    through /mfa/verify or the /mfa/setup/* endpoints."""
+    user = User.objects.select_related('mfa').get(id=tokens.user_id)
+    if not mfa.needs_mfa(user):
+        return tokens
+    return LoginResponse(
+        mfa_required=True,
+        mfa_setup_required=not user.mfa_enabled,
+        mfa_token=mfa.create_mfa_token(user, tenant.pk),
+    )
+
+
+@router.post('/mfa/verify', response=TokenResponse, auth=None)
+def mfa_verify(request, data: MfaTokenCodeRequest):
+    tenant = getattr(request, 'tenant', None)
+    user, org_id = mfa.user_from_mfa_token(data.mfa_token, getattr(tenant, 'pk', None))
+    mfa.check_code(user, data.code)
+    return _issue_tokens(user, org_id)
+
+
+@router.post('/mfa/setup/start', response=MfaSetupResponse, auth=None)
+def mfa_login_setup_start(request, data: MfaTokenRequest):
+    tenant = getattr(request, 'tenant', None)
+    user, _org_id = mfa.user_from_mfa_token(data.mfa_token, getattr(tenant, 'pk', None))
+    return mfa.start_setup(user)
+
+
+@router.post('/mfa/setup/confirm', response=TokenResponse, auth=None)
+def mfa_login_setup_confirm(request, data: MfaTokenCodeRequest):
+    tenant = getattr(request, 'tenant', None)
+    user, org_id = mfa.user_from_mfa_token(data.mfa_token, getattr(tenant, 'pk', None))
+    mfa.check_code(user, data.code, activate=True)
+    return _issue_tokens(user, org_id)
+
+
+def _mfa_status(user: User) -> MfaStatusSchema:
+    fresh = User.objects.select_related('mfa').get(id=user.id)
+    return MfaStatusSchema(enabled=fresh.mfa_enabled, required=fresh.mfa_required)
+
+
+@router.get('/account/mfa', response=MfaStatusSchema, auth=jwt_auth_any_role)
+def get_my_mfa(request):
+    return _mfa_status(request.user)
+
+
+@router.post('/account/mfa/setup/start', response=MfaSetupResponse, auth=jwt_auth_any_role)
+def start_my_mfa_setup(request):
+    return mfa.start_setup(request.user)
+
+
+@router.post('/account/mfa/setup/confirm', response=MfaStatusSchema, auth=jwt_auth_any_role)
+def confirm_my_mfa_setup(request, data: MfaCodeRequest):
+    mfa.check_code(request.user, data.code, activate=True)
+    return _mfa_status(request.user)
+
+
+@router.post('/account/mfa/disable', response={204: None}, auth=jwt_auth_any_role)
+def disable_my_mfa(request, data: MfaCodeRequest):
+    if request.user.mfa_required:
+        raise HttpError(400, 'Your organization requires MFA, so it cannot be turned off.')
+    mfa.check_code(request.user, data.code)
+    UserMFA.objects.filter(user=request.user).delete()
+    return 204, None
+
+
+def _verify_actor_password(user: User, password: str) -> bool:
+    if user.is_superuser and user.has_usable_password() and user.check_password(password):
+        return True
+    try:
+        tpms_authenticate_raw(user.email, password)
+        return True
+    except TpmsAuthError:
+        return False
+
+
+@router.post('/users/{user_id}/mfa/remove', response={204: None}, auth=jwt_auth)
+def remove_user_mfa(request, user_id: int, data: MfaRemoveRequest):
+    require_permission(request, 'admin_users_edit')
+    try:
+        user = User.objects.get(_same_practice_q(request.user), id=user_id)
+    except User.DoesNotExist:
+        raise HttpError(404, 'User not found')
+    if not _verify_actor_password(request.user, data.password):
+        raise HttpError(403, 'Incorrect password')
+    UserMFA.objects.filter(user=user).delete()
+    return 204, None
 
 
 def _superadmin_local_auth(request, tenant, email: str, password: str) -> TokenResponse | None:
@@ -585,6 +683,7 @@ def list_users(request):
     return list(
         User.objects.filter(_same_practice_q(request.user), is_active=True)
         .exclude(role=User.Role.CAREGIVER)
+        .select_related('mfa')
         .order_by('last_name', 'first_name')
     )
 
@@ -601,7 +700,7 @@ def list_admin_staffs(request, include_inactive: bool = False):
     if request.user.external_admin_id is None:
         return _list_native_staffs(request, include_inactive)
 
-    qs = User.objects.filter(external_admin_id=request.user.external_admin_id).exclude(role=User.Role.CAREGIVER)
+    qs = User.objects.filter(external_admin_id=request.user.external_admin_id).exclude(role=User.Role.CAREGIVER).select_related('mfa')
     if not include_inactive:
         qs = qs.filter(is_active=True)
     return [
@@ -616,6 +715,8 @@ def list_admin_staffs(request, include_inactive: bool = False):
             employee_type=u.role,
             is_active=u.is_active,
             dcm_user_id=u.id,
+            mfa_required=u.mfa_required,
+            mfa_enabled=u.mfa_enabled,
         )
         for u in qs.order_by('last_name', 'first_name')
     ]
@@ -626,7 +727,7 @@ def _list_native_staffs(request, include_inactive: bool) -> list[StaffSchema]:
     bound to this admin's Organization instead of TPMS employees."""
     if request.user.organization_id is None:
         return []
-    qs = User.objects.filter(organization_id=request.user.organization_id)
+    qs = User.objects.filter(organization_id=request.user.organization_id).select_related('mfa')
     if not include_inactive:
         qs = qs.filter(is_active=True)
     return [
@@ -641,6 +742,8 @@ def _list_native_staffs(request, include_inactive: bool) -> list[StaffSchema]:
             employee_type=u.role,
             is_active=u.is_active,
             dcm_user_id=u.id,
+            mfa_required=u.mfa_required,
+            mfa_enabled=u.mfa_enabled,
         )
         for u in qs.order_by('last_name', 'first_name')
     ]

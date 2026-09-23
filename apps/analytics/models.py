@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 from shared.models import TenantAwareModel
 
@@ -51,10 +52,6 @@ class GraphAnnotation(TenantAwareModel):
     class Meta:
         app_label = 'analytics'
         ordering = ['date']
-        indexes = [
-            models.Index(fields=['organization', 'program', 'date'], name='graph_org_program_date_idx'),
-            models.Index(fields=['organization', 'target', 'date'], name='graph_org_target_date_idx'),
-        ]
 
     def __str__(self) -> str:
         return f'{self.annotation_type} — {self.label} ({self.date})'
@@ -77,9 +74,6 @@ class ClientAnnotation(TenantAwareModel):
     class Meta:
         app_label = 'analytics'
         ordering = ['date']
-        indexes = [
-            models.Index(fields=['organization', 'external_client_id', 'date'], name='clientann_org_client_date_idx'),
-        ]
 
     def __str__(self) -> str:
         return f'{self.label} ({self.date})'
@@ -122,10 +116,6 @@ class SavedInsightGraph(TenantAwareModel):
     class Meta:
         app_label = 'analytics'
         ordering = ['display_order', 'name']
-        indexes = [
-            models.Index(fields=['organization', 'program', 'display_order'], name='insight_org_program_ord_idx'),
-            models.Index(fields=['organization', 'external_client_id', 'display_order'], name='insight_org_client_ord_idx'),
-        ]
 
     def __str__(self) -> str:
         scope = f'program:{self.program_id}' if self.program_id else f'client:{self.external_client_id}'
@@ -147,11 +137,28 @@ class AssessmentRecord(TenantAwareModel):
     class Meta:
         app_label = 'analytics'
         ordering = ['assessed_on', 'assessment_name', 'domain', 'metric']
-        indexes = [
-            models.Index(fields=['organization', 'external_client_id', 'assessed_on'], name='assess_org_client_date_idx'),
-            models.Index(fields=['organization', 'external_client_id', 'assessment_name', 'assessed_on'], name='assess_org_name_date_idx'),
-        ]
 
     def __str__(self) -> str:
         label = ' / '.join(part for part in [self.assessment_name, self.domain, self.metric] if part)
         return f'{label}: {self.score} ({self.assessed_on})'
+
+
+class ClientReportDraft(TenantAwareModel):
+    """Server-side copy of a client's progress report (draft, published,
+    locked or archived). The report editor still works from the browser, but
+    saves here so the report survives a cleared browser or another device.
+    `data` is the editor's own JSON, stored as-is."""
+    external_client_id = models.PositiveIntegerField(db_index=True)
+    data = models.JSONField(default=dict)
+    status = models.CharField(max_length=20, default='draft')
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='+',
+        db_constraint=False,
+    )
+
+    class Meta:
+        app_label = 'analytics'
+        unique_together = [['organization', 'external_client_id']]

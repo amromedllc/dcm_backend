@@ -3,7 +3,6 @@ from types import SimpleNamespace
 
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import models
-from django.db.models import Prefetch
 from django_tenants.utils import get_public_schema_name, schema_context
 from ninja import Router, File, Form
 from ninja.errors import HttpError
@@ -17,11 +16,14 @@ from apps.accounts.auth import partner_auth
 from apps.accounts.permissions import require_permission
 from apps.central_library.models import (
     CentralProgram, CentralProgramFolder, CentralTarget,
-    KnowledgeBaseModule, KnowledgeBaseTopic,
+    ChangelogEntry, KnowledgeBaseMedia, KnowledgeBaseModule, KnowledgeBaseTopic,
 )
-from shared.uploads import validate_image_upload, validate_media_upload
+from shared.html_sanitize import sanitize_kb_html
+from shared.uploads import (
+    IMAGE_CONTENT_TYPES, VIDEO_CONTENT_TYPES, validate_image_upload, validate_media_upload,
+)
 from .models import (
-    Program, ProgramMaterial, Target, PromptingTemplate,
+    Program, ProgramMaterial, ProgramPrototype, Target, PromptingTemplate,
     WorkflowTemplate,
     Lesson, LessonProgram,
     TreatmentArea, ProgramTag, ProgramDataField, TargetStatus,
@@ -31,6 +33,7 @@ from .models import (
     allowed_measurements, default_measurement, TIMER_TARGET_TYPES,
 )
 from .schemas import (
+    ProgramPrototypeSchema, ProgramPrototypeRequest, ProgramPrototypeUpdateRequest,
     ProgramSchema, ProgramListSchema, ProgramCreateRequest, ProgramUpdateRequest, ProgramMaterialSchema,
     TargetSchema, TargetCreateRequest, TargetUpdateRequest,
     BulkUpdateTargetsRequest, BulkUpdateResult, ReorderTargetsRequest,
@@ -52,6 +55,8 @@ from .schemas import (
     TargetStatusSchema, TargetStatusRequest, TargetStatusUpdateRequest,
     ProgramModuleSchema, ProgramModuleRequest, ProgramSubmoduleSchema, ProgramSubmoduleRequest,
     SavedTableViewSchema, SavedTableViewCreateRequest,
+    ChangelogEntrySchema, ChangelogEntryRequest, ChangelogEntryUpdateRequest,
+    KnowledgeBaseMediaSchema,
     KnowledgeBaseModuleSchema, KnowledgeBaseModuleRequest, KnowledgeBaseModuleUpdateRequest,
     KnowledgeBaseTopicSchema, KnowledgeBaseTopicRequest, KnowledgeBaseTopicUpdateRequest,
 )
@@ -127,6 +132,19 @@ def _get_lesson_or_404(request, lesson_id: int) -> Lesson:
     if lesson.external_client_id not in _accessible_external_client_ids(request):
         raise HttpError(404, 'Lesson not found')
     return lesson
+
+
+def _validate_lesson_program_ids(request, client_id: int, program_ids: list[int]) -> list[int]:
+    if len(set(program_ids)) != len(program_ids):
+        raise HttpError(400, 'A playlist cannot contain the same program more than once')
+    programs = Program.objects.filter(
+        id__in=program_ids,
+        external_client_id=client_id,
+        external_client_id__in=_accessible_external_client_ids(request),
+    )
+    if set(programs.values_list('id', flat=True)) != set(program_ids):
+        raise HttpError(400, 'One or more selected programs are not available for this client')
+    return program_ids
 
 
 def _require_settings_permission(request, permission: str):
@@ -493,7 +511,7 @@ def superadmin_create_knowledge_base_module(request, data: KnowledgeBaseModuleRe
             title=data.title,
             path=data.path,
             icon=data.icon,
-            overview=data.overview,
+            overview=sanitize_kb_html(data.overview),
             audience=data.audience,
             display_order=data.display_order,
             is_active=data.is_active,
@@ -517,6 +535,8 @@ def superadmin_update_knowledge_base_module(request, module_id: int, data: Knowl
         updates = data.dict(exclude_unset=True)
         if 'icon' in updates:
             _validate_knowledge_base_icon(updates['icon'])
+        if 'overview' in updates:
+            updates['overview'] = sanitize_kb_html(updates['overview'])
         for field, value in updates.items():
             setattr(module, field, value)
         module.save()
@@ -569,8 +589,8 @@ def superadmin_create_knowledge_base_topic(request, module_id: int, data: Knowle
         topic = KnowledgeBaseTopic.objects.create(
             module=module,
             title=data.title,
-            summary=data.summary,
-            items=data.items,
+            summary=sanitize_kb_html(data.summary),
+            items=[sanitize_kb_html(item) for item in data.items],
             display_order=data.display_order,
             is_active=data.is_active,
         )
@@ -582,7 +602,12 @@ def superadmin_update_knowledge_base_topic(request, topic_id: int, data: Knowled
     _require_superadmin(request)
     with schema_context(get_public_schema_name()):
         topic = _get_knowledge_base_topic_or_404(topic_id)
-        for field, value in data.dict(exclude_unset=True).items():
+        updates = data.dict(exclude_unset=True)
+        if 'summary' in updates:
+            updates['summary'] = sanitize_kb_html(updates['summary'])
+        if 'items' in updates:
+            updates['items'] = [sanitize_kb_html(item) for item in updates['items']]
+        for field, value in updates.items():
             setattr(topic, field, value)
         topic.save()
         return _serialize_knowledge_base_topic(topic, request)
@@ -623,6 +648,107 @@ def superadmin_delete_knowledge_base_topic(request, topic_id: int):
     with schema_context(get_public_schema_name()):
         topic = _get_knowledge_base_topic_or_404(topic_id)
         topic.delete()
+    return 204, None
+
+
+@router.post('/superadmin/knowledge-base/media', response=KnowledgeBaseMediaSchema)
+def superadmin_upload_knowledge_base_media(request, file: UploadedFile = File(...)):
+    """Upload an image or video to embed inline in an article/topic's rich
+    text (distinct from the single attached module/topic `video`)."""
+    _require_superadmin(request)
+    content_type = file.content_type or ''
+    if content_type in IMAGE_CONTENT_TYPES:
+        validate_image_upload(file)
+        kind = KnowledgeBaseMedia.Kind.IMAGE
+    elif content_type in VIDEO_CONTENT_TYPES:
+        _validate_knowledge_base_video_upload(file)
+        kind = KnowledgeBaseMedia.Kind.VIDEO
+    else:
+        raise HttpError(400, 'File must be an image or video')
+
+    with schema_context(get_public_schema_name()):
+        media = KnowledgeBaseMedia.objects.create(
+            file=file,
+            kind=kind,
+            content_type=content_type,
+            file_size=file.size,
+            created_by=request.user,
+        )
+        return {
+            'url': request.build_absolute_uri(media.file.url),
+            'kind': media.kind,
+            'content_type': media.content_type,
+        }
+
+
+def _serialize_changelog_entry(entry: ChangelogEntry) -> dict:
+    return {
+        'id': entry.id,
+        'version': entry.version,
+        'title': entry.title,
+        'release_date': entry.release_date,
+        'body': entry.body,
+        'is_published': entry.is_published,
+    }
+
+
+def _get_changelog_entry_or_404(entry_id: int) -> ChangelogEntry:
+    try:
+        return ChangelogEntry.objects.get(id=entry_id)
+    except ChangelogEntry.DoesNotExist:
+        raise HttpError(404, 'Changelog entry not found')
+
+
+@router.get('/changelog', response=list[ChangelogEntrySchema])
+def list_changelog_entries(request):
+    with schema_context(get_public_schema_name()):
+        entries = ChangelogEntry.objects.filter(is_published=True)
+        return [_serialize_changelog_entry(entry) for entry in entries]
+
+
+@router.get('/superadmin/changelog', response=list[ChangelogEntrySchema])
+def superadmin_list_changelog_entries(request):
+    _require_superadmin(request)
+    with schema_context(get_public_schema_name()):
+        return [_serialize_changelog_entry(entry) for entry in ChangelogEntry.objects.all()]
+
+
+@router.post('/superadmin/changelog', response={201: ChangelogEntrySchema})
+def superadmin_create_changelog_entry(request, data: ChangelogEntryRequest):
+    _require_superadmin(request)
+    with schema_context(get_public_schema_name()):
+        entry = ChangelogEntry.objects.create(
+            version=data.version.strip(),
+            title=data.title,
+            release_date=data.release_date,
+            body=sanitize_kb_html(data.body),
+            is_published=data.is_published,
+            created_by=request.user,
+        )
+        return 201, _serialize_changelog_entry(entry)
+
+
+@router.patch('/superadmin/changelog/{entry_id}', response=ChangelogEntrySchema)
+def superadmin_update_changelog_entry(request, entry_id: int, data: ChangelogEntryUpdateRequest):
+    _require_superadmin(request)
+    with schema_context(get_public_schema_name()):
+        entry = _get_changelog_entry_or_404(entry_id)
+        updates = data.dict(exclude_unset=True)
+        if 'body' in updates:
+            updates['body'] = sanitize_kb_html(updates['body'])
+        if 'version' in updates:
+            updates['version'] = updates['version'].strip()
+        for field, value in updates.items():
+            setattr(entry, field, value)
+        entry.save()
+        return _serialize_changelog_entry(entry)
+
+
+@router.delete('/superadmin/changelog/{entry_id}', response={204: None})
+def superadmin_delete_changelog_entry(request, entry_id: int):
+    _require_superadmin(request)
+    with schema_context(get_public_schema_name()):
+        _get_changelog_entry_or_404(entry_id).delete()
     return 204, None
 
 
@@ -671,6 +797,30 @@ def _serialize_program_material(material: ProgramMaterial, request) -> ProgramMa
         uploaded_by=material.created_by.email if material.created_by_id else None,
         created_at=material.created_at,
     )
+
+
+def _last_run_by_target(target_ids) -> dict:
+    """target id -> most recent time data was collected for it (trial or behavior event)."""
+    target_ids = list(target_ids)
+    if not target_ids:
+        return {}
+    from apps.sessions.models import BehaviorEvent, TrialEvent
+    last: dict = {}
+    for model, field in ((TrialEvent, 'recorded_at'), (BehaviorEvent, 'occurred_at')):
+        rows = (
+            model.objects.filter(target_id__in=target_ids)
+            .values_list('target_id')
+            .annotate(latest=models.Max(field))
+        )
+        for target_id, latest in rows:
+            if latest and (target_id not in last or latest > last[target_id]):
+                last[target_id] = latest
+    return last
+
+
+def _program_last_run(program_target_ids, last_by_target: dict):
+    times = [last_by_target[t] for t in program_target_ids if t in last_by_target]
+    return max(times) if times else None
 
 
 def _serialize_program(program: Program, request=None, include_targets: bool = False) -> dict:
@@ -745,14 +895,7 @@ def _optimized_program_image_url(request, image_field) -> str | None:
 # ---------------------------------------------------------------------------
 
 @router.get('/programs', response=list[ProgramListSchema])
-def list_programs(
-    request,
-    client_id: int,
-    category: str | None = None,
-    status: str | None = None,
-    limit: int | None = None,
-    offset: int = 0,
-):
+def list_programs(request, client_id: int, category: str | None = None, status: str | None = None):
     qs = Program.objects.filter(
         external_client_id=client_id,
         external_client_id__in=_accessible_external_client_ids(request),
@@ -762,23 +905,17 @@ def list_programs(
         qs = qs.filter(category=category)
     if status:
         qs = qs.filter(phase=status)
-    if offset < 0:
-        offset = 0
-    if limit is not None:
-        limit = max(0, min(limit, 100))
-        qs = qs[offset:offset + limit]
-    elif offset:
-        qs = qs[offset:]
-
     result = []
-    targets_prefetch = Prefetch('targets', queryset=Target.objects.only('id', 'program_id', 'status'))
-    for p in qs.prefetch_related(targets_prefetch):
+    programs = list(qs.prefetch_related('targets'))
+    last_by_target = _last_run_by_target(t.id for p in programs for t in p.targets.all())
+    for p in programs:
         targets = list(p.targets.all())
         status_counts: dict[str, int] = {}
         for t in targets:
             status_counts[t.status] = status_counts.get(t.status, 0) + 1
         result.append({
             **_serialize_program(p, request),
+            'last_run_at': _program_last_run((t.id for t in targets), last_by_target),
             'target_count': len(targets),
             'target_status_counts': status_counts,
         })
@@ -816,7 +953,11 @@ def create_program(request, data: ProgramCreateRequest):
 @router.get('/programs/{program_id}', response=ProgramSchema)
 def get_program(request, program_id: int):
     program = _get_program_or_404(request, program_id)
-    return {**_serialize_program(program, request, include_targets=True)}
+    last_by_target = _last_run_by_target(program.targets.values_list('id', flat=True))
+    return {
+        **_serialize_program(program, request, include_targets=True),
+        'last_run_at': _program_last_run(last_by_target.keys(), last_by_target),
+    }
 
 
 @router.patch('/programs/{program_id}', response=ProgramSchema)
@@ -1215,7 +1356,11 @@ def list_targets(request, program_id: int, staff_view: bool = False):
     qs = program.targets.all()
     if staff_view:
         qs = qs.visible_to_staff()
-    return list(qs)
+    targets = list(qs)
+    last_by_target = _last_run_by_target(t.id for t in targets)
+    for target in targets:
+        target.last_run_at = last_by_target.get(target.id)
+    return targets
 
 
 @router.post('/programs/{program_id}/targets', response={201: TargetSchema})
@@ -1712,6 +1857,7 @@ def _serialize_lesson(lesson: Lesson) -> dict:
         'id': lesson.id,
         'client_id': lesson.external_client_id,
         'name': lesson.name,
+        'therapist_message': lesson.therapist_message,
         'lesson_type': lesson.lesson_type,
         'is_active': lesson.is_active,
         'programs': programs,
@@ -1719,6 +1865,14 @@ def _serialize_lesson(lesson: Lesson) -> dict:
         'updated_at': lesson.updated_at,
     }
 
+
+"""
+Session Playlist API is paused for now.
+
+These endpoints exposed reusable playlist/template management in the client
+Sessions page, but users confused playlists with actual submitted/open session
+records. Keep the underlying Lesson model because appointment program
+assignment depends on it; only the standalone playlist API is disabled.
 
 @router.get('/lessons', response=list[LessonSchema])
 def list_lessons(request, client_id: int):
@@ -1734,13 +1888,17 @@ def list_lessons(request, client_id: int):
 def create_lesson(request, data: LessonCreateRequest):
     _require_supervisor(request)
     _assert_client_accessible(request, data.client_id)
+    if not data.program_ids:
+        raise HttpError(400, 'Select at least one program for the playlist')
+    program_ids = _validate_lesson_program_ids(request, data.client_id, data.program_ids)
     lesson = Lesson.objects.create(
         external_client_id=data.client_id,
         name=data.name,
+        therapist_message=data.therapist_message,
         lesson_type=data.lesson_type,
         created_by=request.user,
     )
-    for order, program_id in enumerate(data.program_ids):
+    for order, program_id in enumerate(program_ids):
         LessonProgram.objects.create(lesson=lesson, program_id=program_id, display_order=order)
     return 201, _serialize_lesson(lesson)
 
@@ -1754,16 +1912,36 @@ def get_lesson(request, lesson_id: int):
 def update_lesson(request, lesson_id: int, data: LessonUpdateRequest):
     _require_supervisor(request)
     lesson = _get_lesson_or_404(request, lesson_id)
-    for field, value in data.dict(exclude_none=True).items():
+    payload = data.dict(exclude_none=True)
+    program_ids = payload.pop('program_ids', None)
+    if program_ids is not None and not program_ids:
+        raise HttpError(400, 'Select at least one program for the playlist')
+    if program_ids is not None:
+        program_ids = _validate_lesson_program_ids(request, lesson.external_client_id, program_ids)
+    for field, value in payload.items():
         setattr(lesson, field, value)
     lesson.save()
+    if program_ids is not None:
+        LessonProgram.objects.filter(lesson=lesson).delete()
+        for order, program_id in enumerate(program_ids):
+            LessonProgram.objects.create(lesson=lesson, program_id=program_id, display_order=order)
     return _serialize_lesson(lesson)
+
+
+@router.delete('/lessons/{lesson_id}', response={204: None})
+def delete_lesson(request, lesson_id: int):
+    _require_supervisor(request)
+    lesson = _get_lesson_or_404(request, lesson_id)
+    lesson.is_active = False
+    lesson.save(update_fields=['is_active'])
+    return 204, None
 
 
 @router.post('/lessons/{lesson_id}/programs', response={201: LessonProgramSchema})
 def add_program_to_lesson(request, lesson_id: int, data: AddProgramToLessonRequest):
     _require_supervisor(request)
     lesson = _get_lesson_or_404(request, lesson_id)
+    _validate_lesson_program_ids(request, lesson.external_client_id, [data.program_id])
     lp, _ = LessonProgram.objects.get_or_create(
         lesson=lesson,
         program_id=data.program_id,
@@ -1783,6 +1961,7 @@ def remove_program_from_lesson(request, lesson_id: int, program_id: int):
     _get_lesson_or_404(request, lesson_id)
     LessonProgram.objects.filter(lesson_id=lesson_id, program_id=program_id).delete()
     return 204, None
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -2940,6 +3119,63 @@ def delete_program_tag(request, pk: int):
     try:
         _settings_qs(ProgramTag, request).get(id=pk).delete()
     except ProgramTag.DoesNotExist:
+        raise HttpError(404, 'Not found')
+    return 204, None
+
+
+# ---------------------------------------------------------------------------
+# Program Prototypes
+# ---------------------------------------------------------------------------
+
+def _validate_prototype_templates(request, payload: dict) -> None:
+    for field, model in (('prompting_template_id', PromptingTemplate), ('workflow_template_id', WorkflowTemplate)):
+        template_id = payload.get(field)
+        if template_id is not None and not _settings_qs(model, request).filter(id=template_id).exists():
+            raise HttpError(400, f'Unknown {model.__name__}')
+
+
+@router.get('/programs/settings/prototypes', response=list[ProgramPrototypeSchema])
+def list_program_prototypes(request, include_inactive: bool = False):
+    qs = _settings_qs(ProgramPrototype, request)
+    if not include_inactive:
+        qs = qs.filter(is_active=True)
+    return list(qs)
+
+
+@router.post('/programs/settings/prototypes', response={201: ProgramPrototypeSchema})
+def create_program_prototype(request, data: ProgramPrototypeRequest):
+    _require_settings_permission(request, 'settings_program_prototypes_create')
+    _check_unique_name(ProgramPrototype, request, data.name)
+    payload = data.dict()
+    _validate_prototype_templates(request, payload)
+    return 201, ProgramPrototype.objects.create(created_by=request.user, **payload)
+
+
+@router.patch('/programs/settings/prototypes/{pk}', response=ProgramPrototypeSchema)
+def update_program_prototype(request, pk: int, data: ProgramPrototypeUpdateRequest):
+    _require_settings_permission(request, 'settings_program_prototypes_edit')
+    try:
+        obj = _settings_qs(ProgramPrototype, request).get(id=pk)
+    except ProgramPrototype.DoesNotExist:
+        raise HttpError(404, 'Not found')
+    updates = data.dict(exclude_unset=True)
+    if updates.get('name'):
+        _check_unique_name(ProgramPrototype, request, updates['name'], exclude_id=pk)
+    _validate_prototype_templates(request, updates)
+    for field, value in updates.items():
+        if value is None and field not in ('prompting_template_id', 'workflow_template_id'):
+            continue
+        setattr(obj, field, value)
+    obj.save()
+    return obj
+
+
+@router.delete('/programs/settings/prototypes/{pk}', response={204: None})
+def delete_program_prototype(request, pk: int):
+    _require_settings_permission(request, 'settings_program_prototypes_delete')
+    try:
+        _settings_qs(ProgramPrototype, request).get(id=pk).delete()
+    except ProgramPrototype.DoesNotExist:
         raise HttpError(404, 'Not found')
     return 204, None
 

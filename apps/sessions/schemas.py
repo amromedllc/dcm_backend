@@ -36,6 +36,8 @@ class AppointmentSchema(Schema):
 class AssignProgramsRequest(Schema):
     program_ids: list[int]
     client_id: int | None = None
+    external_appointment_id: str | None = None
+    clear_assignment: bool = False
     start_time: datetime | None = None
     end_time: datetime | None = None
     service_type: str | None = None
@@ -92,6 +94,8 @@ class SessionRunSchema(Schema):
     appointment_start_time: datetime | None = None
     appointment_end_time: datetime | None = None
     lesson_id: int | None
+    session_name: str = ''
+    message_to_therapist: str = ''
     status: str
     started_at: datetime
     start_latitude: float | None = None
@@ -110,6 +114,7 @@ class SessionRunSchema(Schema):
 class SessionStartRequest(Schema):
     client_id: int
     appointment_id: int | None = None
+    external_appointment_id: str | None = None
     lesson_id: int | None = None
     latitude: float | None = None
     longitude: float | None = None
@@ -117,6 +122,7 @@ class SessionStartRequest(Schema):
 
 class SessionLinkAppointmentRequest(Schema):
     appointment_id: int
+    external_appointment_id: str | None = None
 
 
 class SessionSubmitRequest(Schema):

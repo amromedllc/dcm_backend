@@ -20,6 +20,10 @@ def _knowledge_base_topic_video_upload_path(instance, filename):
     return f'central_library/knowledge_base_topic_videos/{instance.pk or "new"}/{uuid.uuid4().hex}/{filename}'
 
 
+def _knowledge_base_media_upload_path(instance, filename):
+    return f'central_library/knowledge_base_media/{uuid.uuid4().hex}/{filename}'
+
+
 class CentralProgramFolder(models.Model):
     """Platform-owned grouping for Central Library programs — same
     "not tenant-scoped, superuser-authored" model as CentralProgram itself.
@@ -103,10 +107,6 @@ class CentralProgram(models.Model):
     class Meta:
         app_label = 'central_library'
         ordering = ['display_order', 'name']
-        indexes = [
-            models.Index(fields=['status', 'display_order', 'name'], name='central_prog_status_ord_idx'),
-            models.Index(fields=['folder', 'display_order'], name='central_prog_folder_ord_idx'),
-        ]
 
     def __str__(self) -> str:
         return self.name
@@ -144,9 +144,6 @@ class CentralTarget(models.Model):
     class Meta:
         app_label = 'central_library'
         ordering = ['display_order', 'id']
-        indexes = [
-            models.Index(fields=['program', 'display_order'], name='central_target_prog_ord_idx'),
-        ]
 
     def __str__(self) -> str:
         return self.name
@@ -196,9 +193,6 @@ class KnowledgeBaseModule(models.Model):
     class Meta:
         app_label = 'central_library'
         ordering = ['display_order', 'title']
-        indexes = [
-            models.Index(fields=['is_active', 'display_order', 'title'], name='kb_module_active_ord_idx'),
-        ]
 
     def __str__(self) -> str:
         return self.title
@@ -220,9 +214,6 @@ class KnowledgeBaseTopic(models.Model):
     class Meta:
         app_label = 'central_library'
         ordering = ['display_order', 'title']
-        indexes = [
-            models.Index(fields=['module', 'is_active', 'display_order'], name='kb_topic_module_active_idx'),
-        ]
 
     def __str__(self) -> str:
         return f'{self.module.title}: {self.title}'
@@ -272,3 +263,60 @@ class KnowledgeBaseImport(models.Model):
 
     def __str__(self) -> str:
         return f'{self.original_filename} ({self.status})'
+
+
+class KnowledgeBaseMedia(models.Model):
+    """An image or video embedded inline in a Knowledge Base article/topic's
+    rich-text body (as opposed to KnowledgeBaseModule/Topic's single
+    attached `video` field). Superuser-only, like the rest of authoring.
+    Kept as its own row (rather than an anonymous storage write) so orphaned
+    uploads can be audited/cleaned up later."""
+
+    class Kind(models.TextChoices):
+        IMAGE = 'image', 'Image'
+        VIDEO = 'video', 'Video'
+
+    file = models.FileField(upload_to=_knowledge_base_media_upload_path, max_length=500)
+    kind = models.CharField(max_length=10, choices=Kind.choices)
+    content_type = models.CharField(max_length=120, blank=True)
+    file_size = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='+',
+    )
+
+    class Meta:
+        app_label = 'central_library'
+        ordering = ['-created_at']
+
+    def __str__(self) -> str:
+        return f'{self.kind}: {self.file.name}'
+
+
+class ChangelogEntry(models.Model):
+    """A release note shown on the in-app "What's New" page. Platform-wide
+    (public schema), superuser-authored, like Knowledge Base content.
+    `body` is sanitised rich-text HTML (see shared.html_sanitize)."""
+    version = models.CharField(max_length=40, blank=True)
+    title = models.CharField(max_length=200)
+    release_date = models.DateField(db_index=True)
+    body = models.TextField(blank=True)
+    is_published = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='+',
+    )
+
+    class Meta:
+        app_label = 'central_library'
+        ordering = ['-release_date', '-id']
+
+    def __str__(self) -> str:
+        return f'{self.version} {self.title}'.strip()
