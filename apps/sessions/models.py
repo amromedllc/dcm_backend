@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.utils import timezone
 from django.db import models
 from shared.models import OrganizationScopedMixin, TenantAwareModel
 
@@ -72,6 +73,10 @@ class SessionRun(TenantAwareModel):
         APPROVED = 'approved', 'Approved'
         REJECTED = 'rejected', 'Rejected'
 
+    class EntryMethod(models.TextChoices):
+        LIVE = 'live', 'Recorded live'
+        MANUAL = 'manual', 'Entered manually'
+
     external_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     external_appointment_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     staff = models.ForeignKey(
@@ -91,7 +96,8 @@ class SessionRun(TenantAwareModel):
     session_name = models.CharField(max_length=160, blank=True)
     message_to_therapist = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN, db_index=True)
-    started_at = models.DateTimeField(auto_now_add=True)
+    entry_method = models.CharField(max_length=10, choices=EntryMethod.choices, default=EntryMethod.LIVE, db_index=True)
+    started_at = models.DateTimeField(default=timezone.now)
     start_latitude = models.FloatField(null=True, blank=True)
     start_longitude = models.FloatField(null=True, blank=True)
     ended_at = models.DateTimeField(null=True, blank=True)

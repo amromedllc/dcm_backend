@@ -245,3 +245,13 @@ class ClientReportDraftSchema(Schema):
 
 class ClientReportDraftSaveRequest(Schema):
     data: dict[str, Any]
+
+
+class DurationOccurrenceSchema(Schema):
+    session_id: int
+    session_label: str = ''
+    started_at: datetime
+    target_id: int
+    target_name: str
+    index: int
+    duration_seconds: int

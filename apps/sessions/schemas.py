@@ -97,6 +97,7 @@ class SessionRunSchema(Schema):
     session_name: str = ''
     message_to_therapist: str = ''
     status: str
+    entry_method: str = 'live'
     started_at: datetime
     start_latitude: float | None = None
     start_longitude: float | None = None
@@ -118,6 +119,10 @@ class SessionStartRequest(Schema):
     lesson_id: int | None = None
     latitude: float | None = None
     longitude: float | None = None
+    # Manual entry: a session typed in after the fact, with its own window.
+    manual: bool = False
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
 
 
 class SessionLinkAppointmentRequest(Schema):
@@ -358,3 +363,14 @@ class SessionSyncResult(Schema):
     behaviors_created: int
     abc_created: int
     submitted: bool
+
+
+class SessionEditImpactSchema(Schema):
+    """An automatic target change that was triggered when this session was submitted."""
+    kind: str  # 'status' | 'prompt_level'
+    target_id: int
+    target_name: str
+    from_value: str
+    to_value: str
+    current_value: str | None = None
+    changed_at: datetime

@@ -673,6 +673,25 @@ def get_program_mastery_criteria(program_id: int) -> tuple[int | None, bool]:
 # Program summary — powers the target card grid on the program detail page
 # ---------------------------------------------------------------------------
 
+def _behavior_activity_by_target(target_ids: list[int], date_from: date, date_to: date) -> dict[int, dict]:
+    """Timed / counted behavior events per target: how many, in which sessions, on which dates.
+
+    Duration, frequency and rate targets record behavior events instead of scored trials, so
+    summaries use this for targets that have no trials in the period."""
+    stats: dict[int, dict] = defaultdict(lambda: {'events': 0, 'sessions': set(), 'dates': []})
+    for row in (
+        BehaviorEvent.objects
+        .filter(target_id__in=target_ids, occurred_at__date__gte=date_from, occurred_at__date__lte=date_to)
+        .values('target_id', 'session_run_id', 'occurred_at__date')
+    ):
+        entry = stats[row['target_id']]
+        entry['events'] += 1
+        if row['session_run_id'] is not None:
+            entry['sessions'].add(row['session_run_id'])
+        entry['dates'].append(row['occurred_at__date'])
+    return stats
+
+
 def get_program_summary(program_id: int, date_from: date, date_to: date) -> list[TargetSummary]:
     """
     Returns one summary record per target: status, total trials, avg accuracy, trend.
@@ -698,6 +717,8 @@ def get_program_summary(program_id: int, date_from: date, date_to: date) -> list
         )
         .values('recorded_at__date', 'target_id', 'response_score', 'session_run_id', 'sub_item_key')
     )
+
+    behavior_stats = _behavior_activity_by_target(target_ids, date_from, date_to)
 
     # Per-target aggregation
     child_series = _sub_item_series(target_ids)
@@ -734,6 +755,7 @@ def get_program_summary(program_id: int, date_from: date, date_to: date) -> list
             continue
         data = per_target.get(tid)
         if not data or data['totals'] == 0:
+            activity = behavior_stats.get(tid)
             result.append({
                 'target_id': tid,
                 'target_name': target.name,
@@ -743,10 +765,10 @@ def get_program_summary(program_id: int, date_from: date, date_to: date) -> list
                 'module_name': target.module.name if target.module_id else None,
                 'submodule_id': target.submodule_id,
                 'submodule_name': target.submodule.name if target.submodule_id else None,
-                'total_trials': 0,
-                'total_sessions': 0,
+                'total_trials': activity['events'] if activity else 0,
+                'total_sessions': len(activity['sessions']) if activity else 0,
                 'avg_pct_correct': 0.0,
-                'last_session_date': None,
+                'last_session_date': max(activity['dates']) if activity and activity['dates'] else None,
                 'trend': 'insufficient_data',
             })
             continue
@@ -1017,6 +1039,8 @@ def get_client_progress_report(
         if is_correct:
             per_target[tid]['daily_pct'][day]['correct'] += 1
 
+    behavior_stats = _behavior_activity_by_target(target_ids, date_from, date_to)
+
     # ── 4. Build per-program report ──────────────────────────────────────────
     mastered_targets = 0
     total_targets = len(all_targets)
@@ -1037,6 +1061,7 @@ def get_client_progress_report(
 
             data = per_target.get(tid)
             if not data or data['totals'] == 0:
+                activity = behavior_stats.get(tid)
                 target_summaries.append({
                     'target_id': tid,
                     'target_name': target.name,
@@ -1046,10 +1071,10 @@ def get_client_progress_report(
                     'module_name': target.module.name if target.module_id else None,
                     'submodule_id': target.submodule_id,
                     'submodule_name': target.submodule.name if target.submodule_id else None,
-                    'total_trials': 0,
-                    'total_sessions': 0,
+                    'total_trials': activity['events'] if activity else 0,
+                    'total_sessions': len(activity['sessions']) if activity else 0,
                     'avg_pct_correct': 0.0,
-                    'last_session_date': None,
+                    'last_session_date': max(activity['dates']) if activity and activity['dates'] else None,
                     'trend': 'insufficient_data',
                 })
                 continue
@@ -1264,3 +1289,41 @@ def compute_program_baseline(program_id: int, sessions: int = 3) -> list[dict]:
             'last_date': max(e['recorded_at'] for e in used).date(),
         })
     return results
+
+
+def get_duration_occurrences(target_ids: list[int], date_from: date, date_to: date) -> list[dict]:
+    """Every individual timed occurrence (one BehaviorEvent with a duration),
+    numbered 1..N within its session and target. Powers the "All Trials"
+    duration view, which shows each occurrence rather than a daily summary."""
+    if not target_ids:
+        return []
+    events = (
+        BehaviorEvent.objects
+        .filter(
+            target_id__in=target_ids,
+            duration_seconds__isnull=False,
+            session_run__isnull=False,
+            occurred_at__date__gte=date_from,
+            occurred_at__date__lte=date_to,
+        )
+        .order_by('session_run__started_at', 'session_run_id', 'target_id', 'occurred_at', 'id')
+        .values(
+            'session_run_id', 'session_run__started_at', 'session_run__session_name',
+            'target_id', 'target_name', 'duration_seconds',
+        )
+    )
+    counters: dict[tuple[int, int], int] = defaultdict(int)
+    result: list[dict] = []
+    for event in events:
+        key = (event['session_run_id'], event['target_id'])
+        counters[key] += 1
+        result.append({
+            'session_id': event['session_run_id'],
+            'session_label': event['session_run__session_name'] or '',
+            'started_at': event['session_run__started_at'],
+            'target_id': event['target_id'],
+            'target_name': event['target_name'],
+            'index': counters[key],
+            'duration_seconds': event['duration_seconds'],
+        })
+    return result

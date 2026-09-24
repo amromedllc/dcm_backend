@@ -69,6 +69,8 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'sessions_edit': True,
         'sessions_delete': True,
         'session_start': True,
+        'sessions_manual_entry': True,
+        'sessions_edit_data': True,
         'session_approve': True,
         # Notes
         'notes_view': True,
@@ -180,6 +182,8 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'sessions_edit': True,
         'sessions_delete': True,
         'session_start': True,
+        'sessions_manual_entry': True,
+        'sessions_edit_data': True,
         'session_approve': True,
         # Notes
         'notes_view': True,
@@ -291,6 +295,8 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'sessions_edit': True,
         'sessions_delete': False,
         'session_start': True,
+        'sessions_manual_entry': True,
+        'sessions_edit_data': False,
         'session_approve': False,
         # Notes
         'notes_view': True,

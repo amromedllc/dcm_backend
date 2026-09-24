@@ -1,4 +1,4 @@
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 import logging
 
 from django.db.models import Count
@@ -8,7 +8,7 @@ from ninja.files import UploadedFile
 from ninja.errors import HttpError
 
 from apps.accounts.auth import partner_auth
-from apps.accounts.permissions import require_permission
+from apps.accounts.permissions import require_permission, resolve_permission_organization, user_has_permission
 from apps.programs.measurements import (
     aggregate_measurement, MEASUREMENT_LABELS,
     DURATION_MEASUREMENTS, RATE_MEASUREMENTS, BEHAVIOR_STYLE_MEASUREMENTS,
@@ -19,6 +19,7 @@ from .models import (
     ABCCategory, ABCItem, SessionMedia, SessionMediaComment,
 )
 from .schemas import (
+    SessionEditImpactSchema,
     AppointmentSchema, AppointmentCreateRequest, AppointmentUpdateRequest,
     AssignProgramsRequest, AssignedProgramSchema,
     SessionRunSchema, SessionStartRequest, SessionSubmitRequest, SessionRejectRequest,
@@ -37,6 +38,112 @@ from .schemas import (
 from .services import build_program_snapshot, submit_session, approve_session, reject_session
 
 router = Router(auth=partner_auth)
+
+
+def _require_session_start(request) -> None:
+    """Recording actions (start, add/remove data, submit, upload) need the
+    session_start privilege, matching what the web app already hides."""
+    require_permission(request, 'session_start')
+
+
+def _require_recording_access(request, session_id: int) -> SessionRun:
+    """Load a session and check the caller may add or change its data:
+    manually entered sessions need sessions_manual_entry, live ones session_start."""
+    session = _get_session_or_404(session_id, request)
+    require_permission(
+        request,
+        'sessions_manual_entry' if session.entry_method == SessionRun.EntryMethod.MANUAL else 'session_start',
+    )
+    return session
+
+
+def _session_for_data_change(request, session_id: int, reason: str = ''):
+    """Load a session for adding or removing recorded data.
+
+    Open sessions follow the recording privileges (session_start, or
+    sessions_manual_entry for manual ones). A session that is already
+    submitted, approved or rejected can only be changed by someone with
+    sessions_edit_data, who must give a reason. Returns (session, closed)."""
+    session = _get_session_or_404(session_id, request)
+    if session.status == SessionRun.Status.OPEN:
+        require_permission(
+            request,
+            'sessions_manual_entry' if session.entry_method == SessionRun.EntryMethod.MANUAL else 'session_start',
+        )
+        return session, False
+    require_permission(request, 'sessions_edit_data')
+    if not (reason or '').strip():
+        raise HttpError(400, 'Give a reason for changing a completed session')
+    return session, True
+
+
+def _record_closed_session_edit(request, session: SessionRun, change: str, reason: str) -> None:
+    """Audit-log a change to a completed session. A change by someone who
+    cannot approve sessions sends it back for review (approved -> submitted).
+    Automatic target advancement and prompt fading are NOT re-run."""
+    from apps.audit.models import AuditLog
+    from shared.tenancy import current_org_id_or_none
+
+    status_before = session.status
+    if (
+        session.status == SessionRun.Status.APPROVED
+        and not user_has_permission(request.user, resolve_permission_organization(request), 'session_approve')
+    ):
+        session.status = SessionRun.Status.SUBMITTED
+        session.reviewed_by = None
+        session.reviewed_at = None
+        session.save(update_fields=['status', 'reviewed_by', 'reviewed_at'])
+
+    AuditLog.objects.create(
+        organization_id=current_org_id_or_none() or session.organization_id,
+        actor_id=request.user.id,
+        actor_email=request.user.email,
+        actor_role=request.user.role,
+        action=AuditLog.Action.UPDATE,
+        model='SessionRun',
+        object_id=str(session.id),
+        object_repr=str(session)[:200],
+        changes={
+            'edited_after_completion': True,
+            'change': change,
+            'reason': reason.strip(),
+            'status_before': status_before,
+            'status_after': session.status,
+        },
+    )
+
+
+MANUAL_MAX_BACKDATE = timedelta(days=365)
+MANUAL_MAX_LENGTH = timedelta(hours=24)
+
+
+def _validate_manual_window(started_at, ended_at):
+    """Start/end for a session entered after the fact: both required, timezone
+    aware, in order, not in the future, at most 24h long and within a year."""
+    if started_at is None or ended_at is None:
+        raise HttpError(400, 'A manual session needs a start time and an end time')
+    if started_at.tzinfo is None or ended_at.tzinfo is None:
+        raise HttpError(400, 'Session times must include a timezone')
+    now = timezone.now()
+    if ended_at > now + timedelta(minutes=5):
+        raise HttpError(400, 'A manual session cannot end in the future')
+    if ended_at <= started_at:
+        raise HttpError(400, 'The end time must be after the start time')
+    if ended_at - started_at > MANUAL_MAX_LENGTH:
+        raise HttpError(400, 'A manual session cannot be longer than 24 hours')
+    if started_at < now - MANUAL_MAX_BACKDATE:
+        raise HttpError(400, 'A manual session cannot start more than a year ago')
+    return started_at, ended_at
+
+
+def _clamp_to_manual_window(session: SessionRun, value: datetime) -> datetime:
+    """Events in a manual session are stamped inside the session's own window,
+    whatever time the browser was when they were typed in."""
+    if session.entry_method != SessionRun.EntryMethod.MANUAL or session.ended_at is None:
+        return value
+    return min(max(value, session.started_at), session.ended_at)
+
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_ABC_CATEGORIES = [
@@ -387,6 +494,7 @@ def _serialize_session(
         'session_name': session.session_name,
         'message_to_therapist': session.message_to_therapist,
         'status': session.status,
+        'entry_method': session.entry_method,
         'started_at': session.started_at,
         'start_latitude': session.start_latitude,
         'start_longitude': session.start_longitude,
@@ -773,6 +881,12 @@ def start_session(request, data: SessionStartRequest):
     are normalized to their TPMS ids before storage so they match what the
     caregiver portal (which only ever sees TPMS ids) looks sessions up by.
     """
+    manual_started = manual_ended = None
+    if data.manual:
+        require_permission(request, 'sessions_manual_entry')
+        manual_started, manual_ended = _validate_manual_window(data.started_at, data.ended_at)
+    else:
+        _require_session_start(request)
     if data.client_id not in _accessible_external_client_ids(request):
         raise HttpError(404, 'Client not found')
     external_lookup = str(data.external_appointment_id or '').strip()
@@ -800,6 +914,11 @@ def start_session(request, data: SessionStartRequest):
         staff=request.user,
         external_appointment_id=external_appointment_id,
         lesson_id=lesson_id,
+        **({
+            'entry_method': SessionRun.EntryMethod.MANUAL,
+            'started_at': manual_started,
+            'ended_at': manual_ended,
+        } if data.manual else {}),
         session_name=lesson_obj.name if lesson_obj else '',
         message_to_therapist=lesson_obj.therapist_message if lesson_obj else '',
         program_snapshot=snapshot,
@@ -916,7 +1035,7 @@ def link_session_appointment(request, session_id: int, data: SessionLinkAppointm
 @router.delete('/sessions/{session_id}', response={204: None})
 def delete_session(request, session_id: int):
     """Discard an open session that has no recorded data yet."""
-    session = _get_session_or_404(session_id, request)
+    session = _require_recording_access(request, session_id)
     if session.status != SessionRun.Status.OPEN:
         raise HttpError(409, 'Only open sessions can be deleted')
     session.delete()
@@ -934,23 +1053,27 @@ def list_trials(request, session_id: int):
 
 
 @router.post('/sessions/{session_id}/trials', response={201: TrialEventSchema})
-def add_trial(request, session_id: int, data: TrialEventCreateRequest):
-    session = _get_session_or_404(session_id, request)
-    if not session.is_editable:
-        raise HttpError(409, f'Session is {session.status} — cannot add trials')
-    trial = TrialEvent.objects.create(session_run_id=session_id, **data.dict())
+def add_trial(request, session_id: int, data: TrialEventCreateRequest, reason: str = ''):
+    session, closed = _session_for_data_change(request, session_id, reason)
+    payload = data.dict()
+    payload['recorded_at'] = _clamp_to_manual_window(session, payload['recorded_at'])
+    trial = TrialEvent.objects.create(session_run_id=session_id, **payload)
+    if closed:
+        _record_closed_session_edit(request, session, f"Added trial {payload['trial_number']} for {payload['target_name']}", reason)
     return 201, trial
 
 
 @router.delete('/sessions/{session_id}/trials/{trial_id}', response={204: None})
-def delete_trial(request, session_id: int, trial_id: int):
-    session = _get_session_or_404(session_id, request)
-    if not session.is_editable:
-        raise HttpError(409, f'Session is {session.status} — cannot delete trials')
+def delete_trial(request, session_id: int, trial_id: int, reason: str = ''):
+    session, closed = _session_for_data_change(request, session_id, reason)
     try:
-        TrialEvent.objects.get(id=trial_id, session_run_id=session_id).delete()
+        trial = TrialEvent.objects.get(id=trial_id, session_run_id=session_id)
     except TrialEvent.DoesNotExist:
         raise HttpError(404, 'Trial not found')
+    description = f'Deleted trial {trial.trial_number} for {trial.target_name} (score {trial.response_score})'
+    trial.delete()
+    if closed:
+        _record_closed_session_edit(request, session, description, reason)
     return 204, None
 
 
@@ -986,23 +1109,26 @@ def list_behaviors(request, session_id: int):
 
 
 @router.post('/sessions/{session_id}/behaviors', response={201: BehaviorEventSchema})
-def add_behavior(request, session_id: int, data: BehaviorEventCreateRequest):
-    session = _get_session_or_404(session_id, request)
-    if not session.is_editable:
-        raise HttpError(409, f'Session is {session.status} — cannot add behavior events')
-    event, _ = _get_or_create_behavior(session_id, data)
+def add_behavior(request, session_id: int, data: BehaviorEventCreateRequest, reason: str = ''):
+    session, closed = _session_for_data_change(request, session_id, reason)
+    data.occurred_at = _clamp_to_manual_window(session, data.occurred_at)
+    event, created = _get_or_create_behavior(session_id, data)
+    if closed and created:
+        _record_closed_session_edit(request, session, f'Added behavior event for {event.target_name}', reason)
     return 201, event
 
 
 @router.delete('/sessions/{session_id}/behaviors/{event_id}', response={204: None})
-def delete_behavior(request, session_id: int, event_id: int):
-    session = _get_session_or_404(session_id, request)
-    if not session.is_editable:
-        raise HttpError(409, f'Session is {session.status} — cannot delete behavior events')
+def delete_behavior(request, session_id: int, event_id: int, reason: str = ''):
+    session, closed = _session_for_data_change(request, session_id, reason)
     try:
-        BehaviorEvent.objects.get(id=event_id, session_run_id=session_id).delete()
+        event = BehaviorEvent.objects.get(id=event_id, session_run_id=session_id)
     except BehaviorEvent.DoesNotExist:
         raise HttpError(404, 'Behavior event not found')
+    description = f'Deleted behavior event for {event.target_name}'
+    event.delete()
+    if closed:
+        _record_closed_session_edit(request, session, description, reason)
     return 204, None
 
 
@@ -1146,24 +1272,69 @@ def list_abc(request, session_id: int):
 
 
 @router.post('/sessions/{session_id}/abc', response={201: ABCEventSchema})
-def add_abc(request, session_id: int, data: ABCEventCreateRequest):
-    session = _get_session_or_404(session_id, request)
-    if not session.is_editable:
-        raise HttpError(409, f'Session is {session.status} — cannot add ABC events')
-    event, _ = _get_or_create_abc(session_id, data, external_client_id=session.external_client_id)
+def add_abc(request, session_id: int, data: ABCEventCreateRequest, reason: str = ''):
+    session, closed = _session_for_data_change(request, session_id, reason)
+    data.occurred_at = _clamp_to_manual_window(session, data.occurred_at)
+    event, created = _get_or_create_abc(session_id, data, external_client_id=session.external_client_id)
+    if closed and created:
+        _record_closed_session_edit(request, session, 'Added ABC event', reason)
     return 201, _serialize_abc(event)
 
 
 @router.delete('/sessions/{session_id}/abc/{event_id}', response={204: None})
-def delete_abc(request, session_id: int, event_id: int):
-    session = _get_session_or_404(session_id, request)
-    if not session.is_editable:
-        raise HttpError(409, f'Session is {session.status} — cannot delete ABC events')
+def delete_abc(request, session_id: int, event_id: int, reason: str = ''):
+    session, closed = _session_for_data_change(request, session_id, reason)
     try:
-        ABCEvent.objects.get(id=event_id, session_run_id=session_id).delete()
+        event = ABCEvent.objects.get(id=event_id, session_run_id=session_id)
     except ABCEvent.DoesNotExist:
         raise HttpError(404, 'ABC event not found')
+    event.delete()
+    if closed:
+        _record_closed_session_edit(request, session, 'Deleted ABC event', reason)
     return 204, None
+
+
+@router.get('/sessions/{session_id}/edit-impact', response=list[SessionEditImpactSchema])
+def session_edit_impact(request, session_id: int):
+    """Automatic target changes (mastery advancement, prompt fading) that were
+    triggered when this session was submitted. Corrected data does not undo
+    them, so whoever edits a completed session is shown this list to review."""
+    session = _get_session_or_404(session_id, request)
+    require_permission(request, 'sessions_edit_data')
+    from apps.programs.models import TargetPromptLevelChange, TargetStatusChange
+
+    impacts: list[dict] = []
+    status_changes = (
+        TargetStatusChange.objects
+        .filter(session_run_id=session.id, trigger=TargetStatusChange.Trigger.AUTO_MASTERY)
+        .select_related('target')
+    )
+    for change in status_changes:
+        impacts.append({
+            'kind': 'status',
+            'target_id': change.target_id,
+            'target_name': change.target.name,
+            'from_value': change.from_status,
+            'to_value': change.to_status,
+            'current_value': change.target.status,
+            'changed_at': change.created_at,
+        })
+    level_changes = (
+        TargetPromptLevelChange.objects
+        .filter(session_run_id=session.id, trigger=TargetPromptLevelChange.Trigger.AUTO_FADING)
+        .select_related('target')
+    )
+    for change in level_changes:
+        impacts.append({
+            'kind': 'prompt_level',
+            'target_id': change.target_id,
+            'target_name': change.target.name,
+            'from_value': change.from_level_label,
+            'to_value': change.to_level_label,
+            'current_value': None,
+            'changed_at': change.created_at,
+        })
+    return sorted(impacts, key=lambda item: (item['target_name'], item['changed_at']))
 
 
 # ---------------------------------------------------------------------------
@@ -1172,8 +1343,8 @@ def delete_abc(request, session_id: int, event_id: int):
 
 @router.post('/sessions/{session_id}/submit', response=SessionSubmitResponse)
 def submit(request, session_id: int, data: SessionSubmitRequest):
-    session = _get_session_or_404(session_id, request)
-    if data.ended_at:
+    session = _require_recording_access(request, session_id)
+    if data.ended_at and session.entry_method != SessionRun.EntryMethod.MANUAL:
         session.ended_at = data.ended_at
     advanced, faded = submit_session(session, request.user)
     return {
@@ -1228,7 +1399,7 @@ def sync_session(request, session_id: int, data: SessionSyncPayload):
     behaviors/abc dedupe on (session, client_event_id) when the mobile queue
     sends one — see _get_or_create_behavior/_get_or_create_abc.
     """
-    session = _get_session_or_404(session_id, request)
+    session = _require_recording_access(request, session_id)
     if not session.is_editable:
         raise HttpError(409, f'Session is {session.status} — sync not allowed')
 
@@ -1332,7 +1503,7 @@ def upload_session_media(
     caption: str = Form(''),
     duration_seconds: int | None = Form(None),
 ):
-    session = _get_session_or_404(session_id, request)
+    session = _require_recording_access(request, session_id)
     if media_type not in SessionMedia.MediaType.values:
         raise HttpError(400, f'media_type must be one of {SessionMedia.MediaType.values}')
     validate_media_upload(file, media_type)
