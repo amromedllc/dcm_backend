@@ -16,11 +16,12 @@ from .schemas import (
     ClientAnnotationSchema, ClientAnnotationCreateRequest, ClientAnnotationUpdateRequest,
     SavedInsightGraphSchema, SavedInsightGraphCreateRequest, SavedInsightGraphUpdateRequest,
     TargetBaselineSchema, ClientReportDraftSchema, ClientReportDraftSaveRequest,
+    DurationOccurrenceSchema,
 )
 from .services import (
     get_trial_data_by_day, get_behavior_data_by_day, get_abc_data_by_day, get_assessment_data, get_program_summary, get_module_summary,
     get_program_mastery_criteria_detail, get_client_progress_report, get_client_progress_overview,
-    compute_program_baseline,
+    compute_program_baseline, get_duration_occurrences,
 )
 
 router = Router(auth=partner_auth)
@@ -142,6 +143,21 @@ def program_behavior_data(
         Target.objects.filter(program_id=program_id).values_list('id', flat=True)
     )
     return get_behavior_data_by_day(target_ids, frm, to)
+
+
+@router.get('/analytics/programs/{program_id}/duration-occurrences', response=list[DurationOccurrenceSchema])
+def program_duration_occurrences(
+    request,
+    program_id: int,
+    date_from: date | None = None,
+    date_to: date | None = None,
+):
+    """Each timed occurrence per session and target — the "All Trials" duration view."""
+    from apps.programs.api import _get_program_or_404
+    _get_program_or_404(request, program_id)
+    frm, to = _resolve_dates(date_from, date_to)
+    target_ids = list(Target.objects.filter(program_id=program_id).values_list('id', flat=True))
+    return get_duration_occurrences(target_ids, frm, to)
 
 
 @router.get('/analytics/clients/{client_id}/abc', response=list[ABCDataPointSchema])
