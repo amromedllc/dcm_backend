@@ -13,9 +13,12 @@ from .schemas import (
     LessonNoteSchema, LessonNoteListSchema, NoteCreateRequest, NoteUpdateRequest,
     NoteRejectRequest, NoteSignatureSchema, SignNoteRequest,
     NoteTemplateSchema, NoteTemplateCreateRequest, NoteTemplateUpdateRequest,
+    NoteTemplateDraftRequest, NoteTemplateDraftSchema,
     ReviewQueueItem,
     NoteAssignmentSchema, NoteAssignmentCreateRequest,
 )
+from shared.ai_client import AIError
+from .template_draft import generate_template_draft
 from .services import submit_note, approve_note, reject_note, resolve_template_tokens, apply_session_autofill
 
 router = Router(auth=partner_auth)
@@ -96,6 +99,24 @@ def create_note_template(request, data: NoteTemplateCreateRequest):
     _require_template_manager(request, 'create')
     template = NoteTemplate.objects.create(created_by=request.user, **data.dict())
     return 201, template
+
+
+@router.post('/templates/notes/ai-draft', response=NoteTemplateDraftSchema)
+def draft_note_template_with_ai(request, data: NoteTemplateDraftRequest):
+    """Draft a note template from a library program. Nothing is saved: the template form
+    fills in and the person reviews it. Only library programs are accepted, so no client
+    information can reach the model."""
+    _require_template_manager(request, 'create')
+    from apps.programs.api import _org_qs
+    from apps.programs.models import Program
+    try:
+        program = _org_qs(request).prefetch_related('targets').get(id=data.program_id)
+    except Program.DoesNotExist:
+        raise HttpError(404, 'Program not found')
+    try:
+        return generate_template_draft(program, data.instruction)
+    except AIError as exc:
+        raise HttpError(exc.status, str(exc)) from exc
 
 
 @router.get('/templates/notes/{template_id}', response=NoteTemplateSchema)
@@ -182,6 +203,24 @@ def list_notes(
             'updated_at': note.updated_at,
         })
     return result
+
+
+@router.get('/notes/preview-tokens')
+def preview_note_tokens(request, template_id: int, client_id: int, note_date: date, session_run_id: int | None = None, appointment_id: int | None = None):
+    """Resolve a template's dynamic details (client, session, programs, user...) for a note that
+    hasn't been created yet, so the New Note form can show real values instead of [Label] badges."""
+    require_permission(request, 'notes_create')
+    from apps.sessions.models import SessionRun
+    try:
+        template = NoteTemplate.objects.get(id=template_id)
+    except NoteTemplate.DoesNotExist:
+        raise HttpError(404, 'Template not found')
+    session = SessionRun.objects.filter(id=session_run_id).first() if session_run_id else None
+    draft = LessonNote(
+        template=template, external_client_id=client_id, staff=request.user,
+        note_date=note_date, session_run=session,
+    )
+    return {'dynamic_fields': resolve_template_tokens(draft, appointment_id)}
 
 
 @router.post('/notes', response={201: LessonNoteSchema})

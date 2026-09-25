@@ -84,8 +84,49 @@ def resolve_program_tokens(session) -> dict[str, str]:
     return out
 
 
-def resolve_template_tokens(note: LessonNote) -> dict[str, str]:
-    """Resolve the ``[data-dynamic-field]`` tokens a 'forms' template embeds in
+def _session_notes(session) -> str:
+    """Everything the therapist wrote down during a session: their message, plus any per-trial,
+    behavior and ABC notes (one line each, labelled with the target)."""
+    from apps.sessions.models import ABCEvent, BehaviorEvent, TrialEvent
+
+    lines = [session.message_to_therapist.strip()] if (session.message_to_therapist or '').strip() else []
+    for target_name, note in TrialEvent.objects.filter(session_run=session).exclude(staff_notes='').order_by('recorded_at').values_list('target_name', 'staff_notes'):
+        lines.append(f'{target_name}: {note.strip()}')
+    for target_name, note in BehaviorEvent.objects.filter(session_run=session).exclude(notes='').order_by('occurred_at').values_list('target_name', 'notes'):
+        lines.append(f'{target_name}: {note.strip()}')
+    for note in ABCEvent.objects.filter(session_run=session).exclude(notes='').order_by('occurred_at').values_list('notes', flat=True):
+        lines.append(f'ABC: {note.strip()}')
+    return '\n'.join(lines)
+
+
+def _same_day_session(note: LessonNote):
+    """For a note that isn't linked to a session: the author's latest session with this client on the
+    note's date, so the session tokens still fill in. Never picks another staff member's session."""
+    from apps.sessions.models import SessionRun
+
+    if note.external_client_id is None or not note.staff_id:
+        return None
+    return (
+        SessionRun.objects.filter(
+            external_client_id=note.external_client_id, staff_id=note.staff_id, started_at__date=note.note_date,
+        ).order_by('-started_at').first()
+    )
+
+
+def _same_day_appointment(note: LessonNote):
+    from apps.sessions.models import Appointment
+
+    if note.external_client_id is None or not note.staff_id:
+        return None
+    return (
+        Appointment.objects.filter(
+            external_client_id=note.external_client_id, staff_id=note.staff_id, start_time__date=note.note_date,
+        ).order_by('start_time').first()
+    )
+
+
+def resolve_template_tokens(note: LessonNote, appointment_id: int | None = None) -> dict[str, str]:
+    """Resolve the ``[data-dynamic-field]`` tokens a template (notes or forms) embeds in
     its ``body_template`` into concrete strings for one note.
 
     Keys mirror the frontend's ``DYNAMIC_FIELDS_GROUPS`` (web templates page).
@@ -96,12 +137,7 @@ def resolve_template_tokens(note: LessonNote) -> dict[str, str]:
     from apps.clients.models import Client
     from apps.sessions.models import Appointment
 
-    if not (
-        note.template_id
-        and note.template
-        and note.template.template_type == 'forms'
-        and note.template.body_template
-    ):
+    if not (note.template_id and note.template and note.template.body_template):
         return {}
 
     out: dict[str, str] = {}
@@ -145,11 +181,12 @@ def resolve_template_tokens(note: LessonNote) -> dict[str, str]:
         put('user.last_name', staff.last_name)
 
     # ── Session ─────────────────────────────────────────────────────────────
-    session = note.session_run
+    session = note.session_run or _same_day_session(note)
     if session:
         put('session.date', fmt_date(session.started_at) or note.note_date.isoformat())
         put('session.start_time', fmt_time(session.started_at))
         put('session.end_time', fmt_time(session.ended_at))
+        put('session.notes', _session_notes(session))
     else:
         put('session.date', note.note_date.isoformat())
 
@@ -158,16 +195,19 @@ def resolve_template_tokens(note: LessonNote) -> dict[str, str]:
         out.update(resolve_program_tokens(session))
 
     # ── Appointment ─────────────────────────────────────────────────────────
-    appt_id = session.external_appointment_id if session else None
+    appt_id = (session.external_appointment_id if session else None) or appointment_id
+    appt = None
     if appt_id is not None:
         appt = (
             Appointment.objects.filter(id=appt_id).first()
             or Appointment.objects.filter(external_id=str(appt_id)).first()
         )
-        if appt:
-            put('appointment.id', appt.external_id or appt.id)
-            put('appointment.date', fmt_date(appt.start_time))
-            put('appointment.time', fmt_time(appt.start_time))
+    if appt is None:
+        appt = _same_day_appointment(note)
+    if appt:
+        put('appointment.id', appt.external_id or appt.id)
+        put('appointment.date', fmt_date(appt.start_time))
+        put('appointment.time', fmt_time(appt.start_time))
 
     return out
 
