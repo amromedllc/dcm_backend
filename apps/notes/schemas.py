@@ -16,6 +16,8 @@ class NoteTemplateFieldSchema(Schema):
     required: bool = False
     placeholder: str = ''
     options: list[str] = []           # for select / multiselect
+    # Fill this field automatically from the session's recorded program data when the note is created.
+    auto_fill: Literal['', 'program.names', 'program.targets_results', 'program.targets_advanced', 'program.prompt_changes'] = ''
 
 
 class NoteTemplateSchema(Schema):

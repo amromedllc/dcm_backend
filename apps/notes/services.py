@@ -5,6 +5,85 @@ from shared.audit import log_note_status_change
 from .models import LessonNote, NoteTemplate
 
 
+def _label(value: str) -> str:
+    return (value or '').replace('_', ' ').strip().title()
+
+
+def _hms(total_seconds: int) -> str:
+    return f'{total_seconds // 3600}:{(total_seconds % 3600) // 60:02d}:{total_seconds % 60:02d}'
+
+
+def resolve_program_tokens(session) -> dict[str, str]:
+    """Values for the ``program.*`` tokens, built from what was recorded in one session.
+
+    Multi-line values use newlines (one entry per line). Anything with no data is omitted so the
+    note falls back to the ``[Label]`` placeholder."""
+    from apps.analytics.services import _max_scores_for_targets
+    from apps.programs.models import Target, TargetPromptLevelChange, TargetStatusChange
+    from apps.sessions.models import BehaviorEvent, TrialEvent
+
+    out: dict[str, str] = {}
+
+    trials = list(TrialEvent.objects.filter(session_run=session).values('target_id', 'response_score'))
+    behaviors = list(
+        BehaviorEvent.objects.filter(session_run=session).values('target_id', 'duration_seconds', 'frequency_count')
+    )
+    target_ids = sorted({row['target_id'] for row in trials} | {row['target_id'] for row in behaviors})
+    targets = {
+        t.id: t for t in Target.objects.filter(id__in=target_ids).select_related('program').order_by('program__name', 'display_order', 'id')
+    }
+    max_scores = _max_scores_for_targets(target_ids) if target_ids else {}
+
+    lines: list[str] = []
+    program_names: list[str] = []
+    for target in targets.values():
+        program_name = target.program.name
+        if program_name not in program_names:
+            program_names.append(program_name)
+        own_trials = [row['response_score'] for row in trials if row['target_id'] == target.id]
+        own_events = [row for row in behaviors if row['target_id'] == target.id]
+        if own_trials:
+            top = max_scores.get(target.id)
+            correct = sum(1 for score in own_trials if (score >= top if top is not None else score > 0))
+            result = f'{round(correct / len(own_trials) * 100)}% correct ({correct} of {len(own_trials)} trials)'
+        elif own_events:
+            timed = [row['duration_seconds'] for row in own_events if row['duration_seconds'] is not None]
+            if timed:
+                result = f'{len(timed)} timed occurrence{"s" if len(timed) != 1 else ""}, total {_hms(sum(timed))}'
+            else:
+                count = sum(row['frequency_count'] or 1 for row in own_events)
+                result = f'{count} occurrence{"s" if count != 1 else ""}'
+        else:
+            continue
+        lines.append(f'{program_name} — {target.name}: {result}')
+
+    if not program_names:
+        program_names = [p.get('name', '') for p in (session.program_snapshot or {}).get('programs', []) if p.get('name')]
+    if program_names:
+        out['program.names'] = ', '.join(program_names)
+    if lines:
+        out['program.targets_results'] = '\n'.join(lines)
+
+    advanced = [
+        f'{change.target.name}: {_label(change.from_status)} → {_label(change.to_status)}'
+        for change in TargetStatusChange.objects.filter(
+            session_run_id=session.id, trigger=TargetStatusChange.Trigger.AUTO_MASTERY,
+        ).select_related('target')
+    ]
+    if advanced:
+        out['program.targets_advanced'] = '\n'.join(advanced)
+
+    faded = [
+        f'{change.target.name}: {change.from_level_label} → {change.to_level_label}'
+        for change in TargetPromptLevelChange.objects.filter(
+            session_run_id=session.id, trigger=TargetPromptLevelChange.Trigger.AUTO_FADING,
+        ).select_related('target')
+    ]
+    if faded:
+        out['program.prompt_changes'] = '\n'.join(faded)
+    return out
+
+
 def resolve_template_tokens(note: LessonNote) -> dict[str, str]:
     """Resolve the ``[data-dynamic-field]`` tokens a 'forms' template embeds in
     its ``body_template`` into concrete strings for one note.
@@ -74,6 +153,10 @@ def resolve_template_tokens(note: LessonNote) -> dict[str, str]:
     else:
         put('session.date', note.note_date.isoformat())
 
+    # ── Programs (what was recorded in this session) ────────────────────────
+    if session:
+        out.update(resolve_program_tokens(session))
+
     # ── Appointment ─────────────────────────────────────────────────────────
     appt_id = session.external_appointment_id if session else None
     if appt_id is not None:
@@ -87,6 +170,37 @@ def resolve_template_tokens(note: LessonNote) -> dict[str, str]:
             put('appointment.time', fmt_time(appt.start_time))
 
     return out
+
+
+def apply_session_autofill(note: LessonNote, *, overwrite: bool) -> bool:
+    """Fill a note's fields marked ``auto_fill`` from its session's recorded program data.
+
+    On creation (``overwrite=False``) only empty fields are filled, so anything the author already
+    typed stays. A refill (``overwrite=True``) replaces those fields with fresh session data.
+    Returns True if the body changed."""
+    template = note.template
+    session = note.session_run
+    if not (template and session and template.template_type == 'notes'):
+        return False
+    wanted = {f['key']: f['auto_fill'] for f in template.fields if f.get('auto_fill')}
+    if not wanted:
+        return False
+    values = resolve_program_tokens(session)
+    body = dict(note.body or {})
+    changed = False
+    for key, token in wanted.items():
+        value = values.get(token)
+        if not value:
+            continue
+        if not overwrite and body.get(key):
+            continue
+        if body.get(key) != value:
+            body[key] = value
+            changed = True
+    if changed:
+        note.body = body
+        note.save(update_fields=['body', 'updated_at'])
+    return changed
 
 
 def _validate_required_fields(note: LessonNote) -> None:

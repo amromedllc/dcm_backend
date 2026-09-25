@@ -16,12 +16,12 @@ from .schemas import (
     ClientAnnotationSchema, ClientAnnotationCreateRequest, ClientAnnotationUpdateRequest,
     SavedInsightGraphSchema, SavedInsightGraphCreateRequest, SavedInsightGraphUpdateRequest,
     TargetBaselineSchema, ClientReportDraftSchema, ClientReportDraftSaveRequest,
-    DurationOccurrenceSchema,
+    DurationOccurrenceSchema, AssessmentProgramSummarySchema,
 )
 from .services import (
     get_trial_data_by_day, get_behavior_data_by_day, get_abc_data_by_day, get_assessment_data, get_program_summary, get_module_summary,
     get_program_mastery_criteria_detail, get_client_progress_report, get_client_progress_overview,
-    compute_program_baseline, get_duration_occurrences,
+    compute_program_baseline, get_duration_occurrences, get_assessment_summary,
 )
 
 router = Router(auth=partner_auth)
@@ -143,6 +143,14 @@ def program_behavior_data(
         Target.objects.filter(program_id=program_id).values_list('id', flat=True)
     )
     return get_behavior_data_by_day(target_ids, frm, to)
+
+
+@router.get('/analytics/programs/{program_id}/assessment-summary', response=AssessmentProgramSummarySchema)
+def program_assessment_summary(request, program_id: int):
+    """Per-area scores for an assessment program: latest score, change since the previous administration."""
+    from apps.programs.api import _get_program_or_404
+    _get_program_or_404(request, program_id)
+    return get_assessment_summary(program_id)
 
 
 @router.get('/analytics/programs/{program_id}/duration-occurrences', response=list[DurationOccurrenceSchema])

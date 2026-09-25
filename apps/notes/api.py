@@ -16,7 +16,7 @@ from .schemas import (
     ReviewQueueItem,
     NoteAssignmentSchema, NoteAssignmentCreateRequest,
 )
-from .services import submit_note, approve_note, reject_note, resolve_template_tokens
+from .services import submit_note, approve_note, reject_note, resolve_template_tokens, apply_session_autofill
 
 router = Router(auth=partner_auth)
 
@@ -198,8 +198,23 @@ def create_note(request, data: NoteCreateRequest):
     )
     if assignment_id:
         NoteAssignment.objects.filter(id=assignment_id).update(note=note)
+    apply_session_autofill(note, overwrite=False)
     note = LessonNote.objects.prefetch_related('signatures').get(id=note.id)
     return 201, _serialize_note(note)
+
+
+@router.post('/notes/{note_id}/refill-from-session', response=LessonNoteSchema)
+def refill_note_from_session(request, note_id: int):
+    """Re-fill the note's auto-fill fields from the session's current data (for example after the
+    session's data was corrected). Replaces whatever is in those fields."""
+    require_permission(request, 'notes_edit')
+    note = _get_note_or_404(note_id)
+    _assert_note_access(note, request)
+    if not note.is_editable:
+        raise HttpError(409, f'Note is {note.status} and cannot be edited')
+    apply_session_autofill(note, overwrite=True)
+    note = LessonNote.objects.prefetch_related('signatures').get(id=note.id)
+    return _serialize_note(note)
 
 
 @router.get('/notes/{note_id}', response=LessonNoteSchema)

@@ -535,6 +535,8 @@ class OrgProgramCreateRequest(Schema):
     custom_field_values: dict[str, Any] = {}
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
+    hidden_prompt_level_labels: list[str] = []
+    baseline_notes: str = ''
     display_order: int = Field(default=0, ge=0)
 
 
@@ -986,3 +988,45 @@ class ProgramPrototypeUpdateRequest(Schema):
     professional_instructions_html: str | None = None
     display_order: int | None = Field(default=None, ge=0)
     is_active: bool | None = None
+
+
+# ---------------------------------------------------------------------------
+# AI-drafted assessments
+# ---------------------------------------------------------------------------
+
+class AssessmentDraftRequest(Schema):
+    description: str
+
+
+class AssessmentDraftAreaSchema(Schema):
+    name: str
+    skills: list[str]
+
+
+class AssessmentDraftSchema(Schema):
+    name: str
+    objective: str = ''
+    areas: list[AssessmentDraftAreaSchema]
+
+
+# ---------------------------------------------------------------------------
+# AI-drafted programs
+# ---------------------------------------------------------------------------
+
+class ProgramDraftRequest(Schema):
+    description: str
+
+
+class ProgramDraftTargetSchema(Schema):
+    name: str
+    measurement_type: str
+
+
+class ProgramDraftSchema(Schema):
+    name: str
+    category: str
+    treatment_area: str = ''
+    tags: list[str] = []
+    objective: str = ''
+    instructions_html: str = ''
+    targets: list[ProgramDraftTargetSchema] = []

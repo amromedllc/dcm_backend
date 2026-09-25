@@ -75,6 +75,8 @@ class Program(TenantAwareModel):
         BEHAVIOR_REDUCTION = 'behavior_reduction', 'Behavior Reduction'
         ABC_RECORDING = 'abc_recording', 'ABC Recording'
         TELEHEALTH = 'telehealth', 'Telehealth'
+        # A skills assessment (domains = modules, skills = targets, scored in sessions).
+        ASSESSMENT = 'assessment', 'Assessment'
         # Info-only — background/behavior-plan/emergency notes, videos, materials
         # for staff reference. Structurally cannot hold targets (see
         # create_target/update_program in api.py) — there is nothing to collect

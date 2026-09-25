@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import zlib
@@ -53,8 +54,9 @@ def _cached_list_patients(access_token: str, external_admin_id: int) -> list[dic
 
     return patients
 from apps.sessions.schemas import AppointmentSchema
-from .models import Client, ClientStaffAssignment, TreatmentPlan
+from .models import Client, ClientStaffAssignment, TreatmentPlan, TreatmentPlanSignature
 from .schemas import (
+    SignTreatmentPlanRequest,
     ClientSchema,
     ClientCreateRequest,
     ClientUpdateRequest,
@@ -74,6 +76,7 @@ router = Router(auth=partner_auth)
 
 
 def _serialize_treatment_plan(plan: TreatmentPlan) -> dict[str, Any]:
+    signatures = list(plan.signatures.all())
     return {
         'id': plan.id,
         'client_id': plan.client_id,
@@ -86,6 +89,18 @@ def _serialize_treatment_plan(plan: TreatmentPlan) -> dict[str, Any]:
         'source_snapshot': plan.source_snapshot,
         'finalized_at': plan.finalized_at,
         'finalized_by_id': plan.finalized_by_id,
+        'is_signed': bool(signatures),
+        'signatures': [
+            {
+                'id': sig.id,
+                'signer_id': sig.signer_id,
+                'signer_name': sig.signer_name,
+                'signer_role': sig.signer_role,
+                'signature_data': sig.signature_data,
+                'signed_at': sig.signed_at,
+            }
+            for sig in signatures
+        ],
         'created_at': plan.created_at,
         'updated_at': plan.updated_at,
     }
@@ -509,6 +524,10 @@ def update_treatment_plan(request, client_id: int, plan_id: int, data: Treatment
     require_permission(request, 'client_treatment_plan')
     plan = _get_treatment_plan_or_404(request, client_id, plan_id)
     payload = data.dict(exclude_unset=True)
+    if plan.is_signed:
+        only_archiving = set(payload) <= {'status'} and payload.get('status') == TreatmentPlan.Status.ARCHIVED
+        if not only_archiving:
+            raise HttpError(409, 'This plan has been signed and can no longer be changed. Archive it and create a new plan instead.')
     status = payload.pop('status', None)
     for field, value in payload.items():
         if field == 'title' and value is not None:
@@ -532,10 +551,53 @@ def update_treatment_plan(request, client_id: int, plan_id: int, data: Treatment
     return _serialize_treatment_plan(plan)
 
 
+def _treatment_plan_content_hash(plan: TreatmentPlan) -> str:
+    content = {
+        'title': plan.title,
+        'plan_date': plan.plan_date.isoformat() if plan.plan_date else None,
+        'date_from': plan.date_from.isoformat() if plan.date_from else None,
+        'date_to': plan.date_to.isoformat() if plan.date_to else None,
+        'sections': plan.sections,
+    }
+    return hashlib.sha256(json.dumps(content, sort_keys=True, cls=DjangoJSONEncoder).encode()).hexdigest()
+
+
+@router.post('/{client_id}/treatment-plans/{plan_id}/sign', response={201: TreatmentPlanSchema})
+def sign_treatment_plan(request, client_id: int, plan_id: int, data: SignTreatmentPlanRequest):
+    """Clinician sign-off. The plan must be finalized; once signed it is locked."""
+    require_permission(request, 'client_treatment_plan')
+    if request.user.role not in ('admin', 'supervisor'):
+        raise HttpError(403, 'Only a supervisor or administrator can sign a treatment plan')
+    plan = _get_treatment_plan_or_404(request, client_id, plan_id)
+    if plan.status != TreatmentPlan.Status.FINALIZED:
+        raise HttpError(409, 'Finalize the treatment plan before signing it')
+    if not data.attested:
+        raise HttpError(400, 'Confirm that you have reviewed the plan before signing')
+    typed_name = data.signature_data.strip()
+    if not typed_name:
+        raise HttpError(400, 'Type your full name to sign')
+    if plan.signatures.filter(signer_id=request.user.id).exists():
+        raise HttpError(409, 'You have already signed this plan')
+
+    raw_ip = request.META.get('REMOTE_ADDR', '') if hasattr(request, 'META') else ''
+    TreatmentPlanSignature.objects.create(
+        plan=plan,
+        signer_id=request.user.id,
+        signer_name=request.user.full_name,
+        signer_role=request.user.role,
+        signature_data=typed_name[:200],
+        content_hash=_treatment_plan_content_hash(plan),
+        ip_address_hash=hashlib.sha256(raw_ip.encode()).hexdigest() if raw_ip else '',
+    )
+    return 201, _serialize_treatment_plan(plan)
+
+
 @router.delete('/{client_id}/treatment-plans/{plan_id}', response={204: None})
 def delete_treatment_plan(request, client_id: int, plan_id: int):
     require_permission(request, 'client_treatment_plan')
     plan = _get_treatment_plan_or_404(request, client_id, plan_id)
+    if plan.is_signed:
+        raise HttpError(409, 'A signed plan cannot be deleted. Archive it instead.')
     plan.delete()
     return 204, None
 

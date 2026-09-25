@@ -2,7 +2,7 @@ import os
 from types import SimpleNamespace
 
 from django.core.exceptions import ObjectDoesNotExist
-from django.db import models
+from django.db import models, transaction
 from django_tenants.utils import get_public_schema_name, schema_context
 from ninja import Router, File, Form
 from ninja.errors import HttpError
@@ -18,7 +18,10 @@ from apps.central_library.models import (
     CentralProgram, CentralProgramFolder, CentralTarget,
     ChangelogEntry, KnowledgeBaseMedia, KnowledgeBaseModule, KnowledgeBaseTopic,
 )
+from shared.ai_client import AIError
 from shared.html_sanitize import sanitize_kb_html
+from .assessment_draft import generate_assessment_draft, normalize_assessment_draft
+from .program_draft import generate_program_draft
 from shared.uploads import (
     IMAGE_CONTENT_TYPES, VIDEO_CONTENT_TYPES, validate_image_upload, validate_media_upload,
 )
@@ -34,6 +37,7 @@ from .models import (
 )
 from .schemas import (
     ProgramPrototypeSchema, ProgramPrototypeRequest, ProgramPrototypeUpdateRequest,
+    AssessmentDraftRequest, AssessmentDraftSchema, ProgramDraftRequest, ProgramDraftSchema,
     ProgramSchema, ProgramListSchema, ProgramCreateRequest, ProgramUpdateRequest, ProgramMaterialSchema,
     TargetSchema, TargetCreateRequest, TargetUpdateRequest,
     BulkUpdateTargetsRequest, BulkUpdateResult, ReorderTargetsRequest,
@@ -2045,8 +2049,120 @@ def create_org_program(request, data: OrgProgramCreateRequest):
         custom_field_values=data.custom_field_values,
         prompting_template_id=data.prompting_template_id,
         workflow_template_id=data.workflow_template_id,
+        hidden_prompt_level_labels=data.hidden_prompt_level_labels,
+        baseline_notes=data.baseline_notes,
         display_order=data.display_order,
         created_by=request.user,
+    )
+    return 201, _serialize_org_program(program, request, include_targets=True)
+
+
+ASSESSMENT_STARTER_NAME = 'Skills Assessment (Starter)'
+ASSESSMENT_STARTER_AREAS = ['Language', 'Social', 'Play', 'Daily Living', 'Motor']
+ASSESSMENT_RATING_TEMPLATE_NAME = 'Assessment Rating (0–2)'
+ASSESSMENT_RATING_LEVELS = [
+    {'label': 'Not present', 'score': 0, 'weight': 0, 'color': '#e74c3c', 'abbreviation': '0', 'is_success': False, 'exclude_from_fading': False},
+    {'label': 'Emerging', 'score': 1, 'weight': 1, 'color': '#f59e0b', 'abbreviation': '1', 'is_success': False, 'exclude_from_fading': False},
+    {'label': 'Present', 'score': 2, 'weight': 2, 'color': '#10b981', 'abbreviation': '2', 'is_success': True, 'exclude_from_fading': False},
+]
+
+
+def _assessment_rating_template(request) -> PromptingTemplate:
+    rating = _settings_qs(PromptingTemplate, request).filter(name=ASSESSMENT_RATING_TEMPLATE_NAME).first()
+    if rating is None:
+        rating = PromptingTemplate.objects.create(
+            name=ASSESSMENT_RATING_TEMPLATE_NAME,
+            description='Scores a skill as not present (0), emerging (1) or present (2).',
+            levels=ASSESSMENT_RATING_LEVELS,
+            outcome_measurement=PromptingTemplate.OutcomeMeasurement.RATING_SCALE,
+            created_by=request.user,
+        )
+    return rating
+
+
+def _create_assessment_program(request, name: str, objective: str, areas: list[tuple[str, list[str]]]) -> Program:
+    """An org-library assessment program: each area is a module, each skill a target scored 0–2."""
+    rating = _assessment_rating_template(request)
+    default_status = _settings_qs(TargetStatus, request, include_org_defaults=True).filter(is_default=True).first()
+    status = default_status.key if default_status else 'waiting'
+    with transaction.atomic():
+        program = Program.objects.create(
+            is_template=True,
+            external_client_id=None,
+            name=name,
+            category=Program.Category.ASSESSMENT,
+            phase=Program.Phase.ACTIVE,
+            objective=objective,
+            prompting_template=rating,
+            created_by=request.user,
+        )
+        for area_index, (area_name, skills) in enumerate(areas):
+            module = ProgramModule.objects.create(
+                program=program, name=area_name, display_order=area_index * 10, created_by=request.user,
+            )
+            for skill_index, skill_name in enumerate(skills, start=1):
+                Target.objects.create(
+                    program=program,
+                    module=module,
+                    name=skill_name,
+                    measurement_type='discrete_trial',
+                    measurement=default_measurement('discrete_trial'),
+                    status=status,
+                    prompting_template=rating,
+                    display_order=area_index * 100 + skill_index,
+                    created_by=request.user,
+                )
+    return program
+
+
+@router.post('/org-programs/assessment-starter', response={200: OrgProgramSchema, 201: OrgProgramSchema})
+def create_assessment_starter(request):
+    """A blank, editable skills-assessment program for the program library: five
+    common areas as modules, placeholder skills as targets, scored 0–2 with a
+    rating scale. It contains no content from any published assessment. Safe to
+    call twice — an existing starter is returned instead of creating another."""
+    require_permission(request, 'org_programs_create')
+    existing = (
+        Program.objects
+        .filter(_same_practice_q(request.user, 'created_by__'), is_template=True,
+                name=ASSESSMENT_STARTER_NAME, archived_at__isnull=True)
+        .first()
+    )
+    if existing:
+        return 200, _serialize_org_program(existing, request, include_targets=True)
+    program = _create_assessment_program(
+        request,
+        ASSESSMENT_STARTER_NAME,
+        'Replace the placeholder skills with your own, then copy this program to a client to score it.',
+        [
+            (area, [f'{area}: skill {n} (replace with your own)' for n in range(1, 4)])
+            for area in ASSESSMENT_STARTER_AREAS
+        ],
+    )
+    return 201, _serialize_org_program(program, request, include_targets=True)
+
+
+@router.post('/org-programs/assessment-draft', response=AssessmentDraftSchema)
+def draft_assessment_with_ai(request, data: AssessmentDraftRequest):
+    """Ask the AI for a draft assessment from a short description. Nothing is saved:
+    the draft goes back to the person to review and edit first."""
+    require_permission(request, 'org_programs_create')
+    try:
+        return generate_assessment_draft(data.description)
+    except AIError as exc:
+        raise HttpError(exc.status, str(exc)) from exc
+
+
+@router.post('/org-programs/assessment-from-draft', response={201: OrgProgramSchema})
+def create_assessment_from_draft(request, data: AssessmentDraftSchema):
+    """Save a reviewed (and possibly edited) draft as an assessment program in the library."""
+    require_permission(request, 'org_programs_create')
+    try:
+        clean = normalize_assessment_draft(data.dict())
+    except AIError as exc:
+        raise HttpError(400, str(exc)) from exc
+    program = _create_assessment_program(
+        request, clean['name'], clean['objective'], [(area['name'], area['skills']) for area in clean['areas']],
     )
     return 201, _serialize_org_program(program, request, include_targets=True)
 
@@ -3178,6 +3294,27 @@ def delete_program_prototype(request, pk: int):
     except ProgramPrototype.DoesNotExist:
         raise HttpError(404, 'Not found')
     return 204, None
+
+
+# ---------------------------------------------------------------------------
+# AI program draft
+# ---------------------------------------------------------------------------
+
+@router.post('/programs/settings/ai-draft', response=ProgramDraftSchema)
+def draft_program_with_ai(request, data: ProgramDraftRequest):
+    """Draft a program from a short description. Nothing is saved: the form fills in and
+    the person reviews it. The model only sees the description and this organization's
+    treatment-area and tag names."""
+    from apps.accounts.permissions import resolve_permission_organization, user_has_permission
+    organization = resolve_permission_organization(request)
+    if not any(user_has_permission(request.user, organization, p) for p in ('client_programs_create', 'org_programs_create')):
+        raise HttpError(403, 'Insufficient permissions')
+    areas = list(_settings_qs(TreatmentArea, request).filter(is_active=True).values_list('name', flat=True))
+    tags = list(_settings_qs(ProgramTag, request).filter(is_active=True).values_list('name', flat=True))
+    try:
+        return generate_program_draft(data.description, areas, tags)
+    except AIError as exc:
+        raise HttpError(exc.status, str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
