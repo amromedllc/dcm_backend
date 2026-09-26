@@ -73,6 +73,46 @@ def _require_supervisor(request):
         raise HttpError(403, 'Supervisor or admin access required')
 
 
+# Menu-permission gates for client programs. The permission matrix (Admin → Privileges) is the single source
+# of truth: the frontend hides buttons from it, and these make the API refuse the same requests.
+_PROGRAM_READ_PERMISSIONS = (
+    'client_programs', 'client_sessions', 'session_start', 'client_progress', 'client_history', 'client_report',
+)
+
+
+def _require_client_programs(request, action: str) -> None:
+    """action: 'create' | 'edit' | 'delete' — for endpoints that only ever concern a client's programs."""
+    require_permission(request, f'client_programs_{action}')
+
+
+def _require_program_write(request, action: str) -> None:
+    """Early gate for endpoints on an existing program: either kind of programs permission. The exact one
+    (client_programs_* or org_programs_*) is enforced by _check_program_write once the program is loaded."""
+    _require_any_permission(request, (f'client_programs_{action}', f'org_programs_{action}'))
+
+
+def _check_program_write(request, program: Program, action: str) -> None:
+    """Library (template) programs need org_programs_<action>; a client's programs need client_programs_<action>."""
+    require_permission(request, f"{'org' if program.is_template else 'client'}_programs_{action}")
+
+
+def _require_any_permission(request, permissions: tuple[str, ...]) -> None:
+    from apps.accounts.permissions import resolve_permission_organization, user_has_permission
+    organization = resolve_permission_organization(request)
+    if not any(user_has_permission(request.user, organization, p) for p in permissions):
+        raise HttpError(403, 'Insufficient permissions')
+
+
+def _require_program_read(request) -> None:
+    """Reading a client's programs and targets: the Programs menu, or the screens that run or report on them."""
+    _require_any_permission(request, _PROGRAM_READ_PERMISSIONS)
+
+
+def _require_org_program_read(request) -> None:
+    """Program Library: its own menu, or anyone who can add programs to a client (the 'From Library' picker)."""
+    _require_any_permission(request, ('org_programs_view', 'org_programs_create', 'org_programs_edit', 'client_programs_create'))
+
+
 def _accessible_external_client_ids(request) -> set[int]:
     from apps.clients.api import _get_accessible_clients
 
@@ -919,6 +959,7 @@ def _optimized_program_image_url(request, image_field) -> str | None:
 
 @router.get('/programs', response=list[ProgramListSchema])
 def list_programs(request, client_id: int, category: str | None = None, status: str | None = None, include_archived: bool = False):
+    _require_program_read(request)
     qs = Program.objects.filter(
         external_client_id=client_id,
         external_client_id__in=_accessible_external_client_ids(request),
@@ -948,7 +989,7 @@ def list_programs(request, client_id: int, category: str | None = None, status: 
 
 @router.post('/programs', response={201: ProgramSchema})
 def create_program(request, data: ProgramCreateRequest):
-    _require_supervisor(request)
+    _require_client_programs(request, 'create')
     _assert_client_accessible(request, data.client_id)
     _validate_treatment_area_and_tags(request, data.treatment_area, data.tags)
     _validate_template_refs(request, data.prompting_template_id, data.workflow_template_id)
@@ -982,6 +1023,7 @@ def create_program(request, data: ProgramCreateRequest):
 
 @router.get('/programs/{program_id}', response=ProgramSchema)
 def get_program(request, program_id: int):
+    _require_program_read(request)
     program = _get_program_or_404(request, program_id)
     last_by_target = _last_run_by_target(program.targets.values_list('id', flat=True))
     return {
@@ -992,8 +1034,9 @@ def get_program(request, program_id: int):
 
 @router.patch('/programs/{program_id}', response=ProgramSchema)
 def update_program(request, program_id: int, data: ProgramUpdateRequest):
-    _require_supervisor(request)
+    _require_program_write(request, 'edit')
     program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     updates = data.dict(exclude_none=True)
     _validate_template_refs(request, updates.get('prompting_template_id'), updates.get('workflow_template_id'))
     if updates.get('category') == Program.Category.INSTRUCTIONS_ONLY and program.targets.exists():
@@ -1027,8 +1070,9 @@ def update_program(request, program_id: int, data: ProgramUpdateRequest):
 
 @router.post('/programs/{program_id}/image', response=ProgramSchema)
 def upload_program_image(request, program_id: int, file: UploadedFile = File(...)):
-    _require_supervisor(request)
+    _require_program_write(request, 'edit')
     program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     validate_image_upload(file)
     program.image = file
     program.save(update_fields=['image'])
@@ -1037,6 +1081,7 @@ def upload_program_image(request, program_id: int, file: UploadedFile = File(...
 
 @router.get('/programs/{program_id}/materials', response=list[ProgramMaterialSchema])
 def list_program_materials(request, program_id: int):
+    _require_program_read(request)
     program = _get_program_or_404(request, program_id)
     return [
         _serialize_program_material(material, request)
@@ -1051,8 +1096,9 @@ def upload_program_material(
     file: UploadedFile = File(...),
     title: str = Form(''),
 ):
-    _require_supervisor(request)
+    _require_program_write(request, 'edit')
     program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     material_type = _program_material_type_for(file)
     material = ProgramMaterial.objects.create(
         program=program,
@@ -1068,20 +1114,22 @@ def upload_program_material(
 
 @router.delete('/program-materials/{material_id}', response={204: None})
 def delete_program_material(request, material_id: int):
-    _require_supervisor(request)
+    _require_program_write(request, 'edit')
     try:
         material = ProgramMaterial.objects.select_related('program').get(id=material_id)
     except ProgramMaterial.DoesNotExist:
         raise HttpError(404, 'Learning material not found')
-    _get_program_or_404(request, material.program_id)
+    program = _get_program_or_404(request, material.program_id)
+    _check_program_write(request, program, 'edit')
     material.delete()
     return 204, None
 
 
 @router.delete('/programs/{program_id}', response={204: None})
 def archive_program(request, program_id: int):
-    _require_supervisor(request)
+    _require_program_write(request, 'delete')
     program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'delete')
     program.status = Program.Status.ARCHIVED
     program.archived_at = timezone.now()
     program.save(update_fields=['status', 'archived_at'])
@@ -1092,8 +1140,9 @@ def archive_program(request, program_id: int):
 def delete_program_permanently(request, program_id: int):
     """Permanently delete a program that has already been archived. Refused when any of its targets has
     recorded session data: that is clinical record data and must not silently disappear."""
-    _require_supervisor(request)
+    _require_program_write(request, 'delete')
     program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'delete')
     if program.archived_at is None:
         raise HttpError(400, 'Archive the program first — only archived programs can be permanently deleted')
     if _last_run_by_target(program.targets.values_list('id', flat=True)):
@@ -1401,6 +1450,7 @@ def _validate_target_status(request, status: str) -> None:
 
 @router.get('/programs/{program_id}/targets', response=list[TargetSchema])
 def list_targets(request, program_id: int, staff_view: bool = False):
+    _require_program_read(request)
     program = _get_program_or_404(request, program_id)
     qs = program.targets.all()
     if staff_view:
@@ -1455,8 +1505,9 @@ def _build_target(request, program: Program, data: TargetCreateRequest) -> Targe
 
 @router.post('/programs/{program_id}/targets', response={201: TargetSchema})
 def create_target(request, program_id: int, data: TargetCreateRequest):
-    _require_supervisor(request)
+    _require_program_write(request, 'edit')
     program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     if program.category == Program.Category.INSTRUCTIONS_ONLY:
         raise HttpError(400, 'Instructions Only programs cannot have targets — they store reference information only')
     return 201, _build_target(request, program, data)
@@ -1464,13 +1515,15 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
 
 @router.get('/targets/{target_id}', response=TargetSchema)
 def get_target(request, target_id: int):
+    _require_program_read(request)
     return _get_target_or_404(request, target_id)
 
 
 @router.patch('/targets/{target_id}', response=TargetSchema)
 def update_target(request, target_id: int, data: TargetUpdateRequest):
-    _require_supervisor(request)
+    _require_program_write(request, 'edit')
     target = _get_target_or_404(request, target_id)
+    _check_program_write(request, target.program, 'edit')
     updates = data.dict(exclude_none=True)
     _validate_template_refs(request, updates.get('prompting_template_id'), updates.get('workflow_template_id'))
     old_status = target.status
@@ -1554,14 +1607,16 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
 
 @router.delete('/targets/{target_id}', response={204: None})
 def delete_target(request, target_id: int):
-    _require_supervisor(request)
+    _require_program_write(request, 'edit')
     target = _get_target_or_404(request, target_id)
+    _check_program_write(request, target.program, 'edit')
     target.delete()
     return 204, None
 
 
 @router.get('/targets/{target_id}/history', response=list[TargetStatusChangeSchema])
 def target_history(request, target_id: int):
+    _require_program_read(request)
     _get_target_or_404(request, target_id)
     qs = (
         TargetStatusChange.objects
@@ -1592,6 +1647,7 @@ def target_history(request, target_id: int):
 
 @router.get('/clients/{client_id}/target-history', response=list[ClientTargetStatusChangeSchema])
 def client_target_history(request, client_id: int):
+    _require_program_read(request)
     _assert_client_accessible(request, client_id)
     qs = (
         TargetStatusChange.objects
@@ -1623,6 +1679,7 @@ def client_target_history(request, client_id: int):
 
 @router.get('/targets/{target_id}/prompt-level-history', response=list[TargetPromptLevelChangeSchema])
 def target_prompt_level_history(request, target_id: int):
+    _require_program_read(request)
     _get_target_or_404(request, target_id)
     qs = (
         TargetPromptLevelChange.objects
@@ -1655,6 +1712,7 @@ def target_prompt_level_history(request, target_id: int):
 
 @router.get('/clients/{client_id}/program-audit', response=list[ClientProgramAuditSchema])
 def client_program_audit(request, client_id: int):
+    _require_supervisor(request)
     _assert_client_accessible(request, client_id)
     if request.user.role not in ('admin', 'supervisor'):
         raise HttpError(403, 'Supervisor or admin access required')
@@ -1700,8 +1758,9 @@ _BULK_UPDATE_FK_MODELS = {
 @router.post('/programs/{program_id}/targets/bulk-update', response=BulkUpdateResult)
 def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest):
     """Update specific fields across multiple targets without touching unspecified fields."""
-    _require_supervisor(request)
+    _require_program_write(request, 'edit')
     program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     updates = data.dict(exclude={'target_ids'}, exclude_none=True)
     if not updates:
         raise HttpError(400, 'No fields to update were provided')
@@ -1772,8 +1831,9 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
 @router.post('/programs/{program_id}/targets/reorder', response={200: None})
 def reorder_targets(request, program_id: int, data: ReorderTargetsRequest):
     """Set display_order on targets based on the submitted ordered list of IDs."""
-    _require_supervisor(request)
-    _get_program_or_404(request, program_id)
+    _require_program_write(request, 'edit')
+    program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     for order, target_id in enumerate(data.ordered_ids):
         Target.objects.filter(id=target_id, program_id=program_id).update(display_order=order)
     return 200, None
@@ -2069,6 +2129,7 @@ def list_org_programs(
     request, category: str | None = None, status: str | None = None,
     folder_id: int | None = None, unfiled: bool = False,
 ):
+    _require_org_program_read(request)
     # Readable by anyone authenticated — used by Program Library and the
     # client "From Library" picker. Mutations are gated separately.
     qs = _org_qs(request).filter(archived_at__isnull=True)
@@ -2249,6 +2310,7 @@ def _serialize_program_folder(folder: ProgramFolder) -> dict:
 
 @router.get('/org-programs/folders', response=list[ProgramFolderSchema])
 def list_program_folders(request):
+    _require_org_program_read(request)
     return [_serialize_program_folder(f) for f in _settings_qs(ProgramFolder, request)]
 
 
@@ -2302,6 +2364,7 @@ def set_org_program_folder(request, program_id: int, data: SetProgramFolderReque
 
 @router.get('/org-programs/{program_id}', response=OrgProgramSchema)
 def get_org_program(request, program_id: int):
+    _require_org_program_read(request)
     try:
         program = _org_qs(request).prefetch_related('targets').get(id=program_id)
     except Program.DoesNotExist:
@@ -2478,7 +2541,7 @@ def assign_org_program_to_client(request, program_id: int, data: AssignOrgProgra
 @router.post('/programs/{program_id}/copy', response={201: ProgramSchema})
 def copy_program_to_client(request, program_id: int, data: AssignOrgProgramRequest):
     """Copy any client program to another client."""
-    _require_supervisor(request)
+    _require_client_programs(request, 'create')
     _assert_client_accessible(request, data.client_id)
     source = _get_program_or_404(request, program_id)
     if source.is_template:
@@ -3096,14 +3159,16 @@ def _serialize_module(module: ProgramModule) -> dict:
 
 @router.get('/programs/{program_id}/modules', response=list[ProgramModuleSchema])
 def list_modules(request, program_id: int):
+    _require_program_read(request)
     _get_program_or_404(request, program_id)
     return [_serialize_module(m) for m in ProgramModule.objects.filter(program_id=program_id).prefetch_related('submodules')]
 
 
 @router.post('/programs/{program_id}/modules', response={201: ProgramModuleSchema})
 def create_module(request, program_id: int, data: ProgramModuleRequest):
-    _require_supervisor(request)
+    _require_program_write(request, 'edit')
     program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     module = ProgramModule.objects.create(
         program=program,
         name=data.name,
@@ -3115,8 +3180,9 @@ def create_module(request, program_id: int, data: ProgramModuleRequest):
 
 @router.patch('/programs/{program_id}/modules/{module_id}', response=ProgramModuleSchema)
 def update_module(request, program_id: int, module_id: int, data: ProgramModuleRequest):
-    _require_supervisor(request)
-    _get_program_or_404(request, program_id)
+    _require_program_write(request, 'edit')
+    program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     try:
         module = ProgramModule.objects.prefetch_related('submodules').get(id=module_id, program_id=program_id)
     except ProgramModule.DoesNotExist:
@@ -3129,8 +3195,9 @@ def update_module(request, program_id: int, module_id: int, data: ProgramModuleR
 
 @router.delete('/programs/{program_id}/modules/{module_id}', response={204: None})
 def delete_module(request, program_id: int, module_id: int):
-    _require_supervisor(request)
-    _get_program_or_404(request, program_id)
+    _require_program_write(request, 'edit')
+    program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     try:
         ProgramModule.objects.get(id=module_id, program_id=program_id).delete()
     except ProgramModule.DoesNotExist:
@@ -3140,8 +3207,9 @@ def delete_module(request, program_id: int, module_id: int):
 
 @router.post('/programs/{program_id}/modules/reorder', response={200: None})
 def reorder_modules(request, program_id: int, data: ReorderModulesRequest):
-    _require_supervisor(request)
-    _get_program_or_404(request, program_id)
+    _require_program_write(request, 'edit')
+    program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     for order, module_id in enumerate(data.ordered_ids):
         ProgramModule.objects.filter(id=module_id, program_id=program_id).update(display_order=order)
     return 200, None
@@ -3149,8 +3217,9 @@ def reorder_modules(request, program_id: int, data: ReorderModulesRequest):
 
 @router.post('/programs/{program_id}/modules/{module_id}/submodules', response={201: ProgramSubmoduleSchema})
 def create_submodule(request, program_id: int, module_id: int, data: ProgramSubmoduleRequest):
-    _require_supervisor(request)
-    _get_program_or_404(request, program_id)
+    _require_program_write(request, 'edit')
+    program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     try:
         module = ProgramModule.objects.get(id=module_id, program_id=program_id)
     except ProgramModule.DoesNotExist:
@@ -3173,8 +3242,9 @@ def create_submodule(request, program_id: int, module_id: int, data: ProgramSubm
 
 @router.patch('/programs/{program_id}/modules/{module_id}/submodules/{submodule_id}', response=ProgramSubmoduleSchema)
 def update_submodule(request, program_id: int, module_id: int, submodule_id: int, data: ProgramSubmoduleRequest):
-    _require_supervisor(request)
-    _get_program_or_404(request, program_id)
+    _require_program_write(request, 'edit')
+    program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     try:
         submodule = ProgramSubmodule.objects.get(id=submodule_id, module_id=module_id)
     except ProgramSubmodule.DoesNotExist:
@@ -3194,8 +3264,9 @@ def update_submodule(request, program_id: int, module_id: int, submodule_id: int
 
 @router.delete('/programs/{program_id}/modules/{module_id}/submodules/{submodule_id}', response={204: None})
 def delete_submodule(request, program_id: int, module_id: int, submodule_id: int):
-    _require_supervisor(request)
-    _get_program_or_404(request, program_id)
+    _require_program_write(request, 'edit')
+    program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     try:
         ProgramSubmodule.objects.get(id=submodule_id, module_id=module_id).delete()
     except ProgramSubmodule.DoesNotExist:
@@ -3205,8 +3276,9 @@ def delete_submodule(request, program_id: int, module_id: int, submodule_id: int
 
 @router.post('/programs/{program_id}/modules/{module_id}/submodules/reorder', response={200: None})
 def reorder_submodules(request, program_id: int, module_id: int, data: ReorderSubmodulesRequest):
-    _require_supervisor(request)
-    _get_program_or_404(request, program_id)
+    _require_program_write(request, 'edit')
+    program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     for order, submodule_id in enumerate(data.ordered_ids):
         ProgramSubmodule.objects.filter(id=submodule_id, module_id=module_id).update(display_order=order)
     return 200, None

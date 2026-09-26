@@ -122,7 +122,11 @@ def _serialize_note_status(session_run_id: int, note) -> dict:
 
 @router.get('/docuseal/session-notes/{session_run_id}', response=SessionNoteStatusSchema)
 def get_session_note_status(request, session_run_id: int):
+    from apps.accounts.permissions import resolve_permission_organization, user_has_permission
     from apps.notes.models import LessonNote
+    organization = resolve_permission_organization(request)
+    if not any(user_has_permission(request.user, organization, p) for p in ('client_notes', 'notes_view', 'notes_create')):
+        raise HttpError(403, 'Insufficient permissions')
     note = LessonNote.objects.filter(session_run_id=session_run_id).first()
     return _serialize_note_status(session_run_id, note)
 
@@ -130,6 +134,7 @@ def get_session_note_status(request, session_run_id: int):
 @router.post('/docuseal/session-notes/{session_run_id}', response=SessionNoteStatusSchema)
 def start_session_note(request, session_run_id: int, data: SessionNoteStartRequest):
     """Creates (or re-fetches) the DocuSeal submission for this session's note."""
+    require_permission(request, 'notes_create')
     session_run, note = _get_or_create_note(session_run_id)
 
     if note.docuseal_template_id == data.template_id and note.docuseal_slug:

@@ -37,6 +37,23 @@ def _require_template_manager(request, action: str = 'view'):
     require_permission(request, f'templates_{action}')
 
 
+def _require_any_permission(request, permissions: tuple[str, ...]) -> None:
+    from apps.accounts.permissions import resolve_permission_organization, user_has_permission
+    organization = resolve_permission_organization(request)
+    if not any(user_has_permission(request.user, organization, p) for p in permissions):
+        raise HttpError(403, 'Insufficient permissions')
+
+
+def _require_notes_read(request) -> None:
+    """Viewing notes: the client Notes tab, the notes list permission, or the review queue."""
+    _require_any_permission(request, ('client_notes', 'notes_view', 'review_queue_view'))
+
+
+def _require_template_read(request) -> None:
+    """Reading note templates: the Templates menu, or anyone who fills in notes."""
+    _require_any_permission(request, ('templates_view', 'notes_view', 'client_notes', 'notes_create', 'notes_edit'))
+
+
 def _get_note_or_404(note_id: int) -> LessonNote:
     try:
         return LessonNote.objects.select_related('template').prefetch_related('signatures').get(id=note_id)
@@ -91,6 +108,7 @@ def _serialize_note(note: LessonNote) -> dict:
 
 @router.get('/templates/notes', response=list[NoteTemplateSchema])
 def list_note_templates(request):
+    _require_template_read(request)
     return list(NoteTemplate.objects.filter(is_active=True))
 
 
@@ -121,6 +139,7 @@ def draft_note_template_with_ai(request, data: NoteTemplateDraftRequest):
 
 @router.get('/templates/notes/{template_id}', response=NoteTemplateSchema)
 def get_note_template(request, template_id: int):
+    _require_template_read(request)
     try:
         return NoteTemplate.objects.get(id=template_id)
     except NoteTemplate.DoesNotExist:
@@ -164,6 +183,7 @@ def list_notes(
     date_from: date | None = None,
     date_to: date | None = None,
 ):
+    _require_notes_read(request)
     qs = LessonNote.objects.all()
 
     if request.user.role == 'staff':
@@ -258,6 +278,7 @@ def refill_note_from_session(request, note_id: int):
 
 @router.get('/notes/{note_id}', response=LessonNoteSchema)
 def get_note(request, note_id: int):
+    _require_notes_read(request)
     note = _get_note_or_404(note_id)
     _assert_note_access(note, request)
     return _serialize_note(note)
@@ -294,6 +315,7 @@ def delete_note(request, note_id: int):
 
 @router.post('/notes/{note_id}/submit', response=LessonNoteSchema)
 def submit(request, note_id: int):
+    require_permission(request, 'note_submit')
     note = _get_note_or_404(note_id)
     _assert_note_access(note, request)
     submit_note(note, request.user)
@@ -328,6 +350,7 @@ def reject(request, note_id: int, data: NoteRejectRequest):
 
 @router.get('/notes/{note_id}/signatures', response=list[NoteSignatureSchema])
 def list_signatures(request, note_id: int):
+    _require_notes_read(request)
     note = _get_note_or_404(note_id)
     _assert_note_access(note, request)
     return list(note.signatures.all())
@@ -442,6 +465,7 @@ def _serialize_assignment(a: NoteAssignment) -> dict:
 
 @router.get('/notes/assignments', response=list[NoteAssignmentSchema])
 def list_assignments(request, appointment_id: int):
+    _require_notes_read(request)
     qs = (
         NoteAssignment.objects
         .filter(external_appointment_id=appointment_id)
