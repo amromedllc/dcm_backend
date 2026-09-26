@@ -1088,6 +1088,24 @@ def archive_program(request, program_id: int):
     return 204, None
 
 
+@router.delete('/programs/{program_id}/permanent', response={204: None})
+def delete_program_permanently(request, program_id: int):
+    """Permanently delete a program that has already been archived. Refused when any of its targets has
+    recorded session data: that is clinical record data and must not silently disappear."""
+    _require_supervisor(request)
+    program = _get_program_or_404(request, program_id)
+    if program.archived_at is None:
+        raise HttpError(400, 'Archive the program first — only archived programs can be permanently deleted')
+    if _last_run_by_target(program.targets.values_list('id', flat=True)):
+        raise HttpError(409, 'This program has recorded session data, so it cannot be permanently deleted. Leave it archived.')
+    try:
+        with transaction.atomic():
+            program.delete()
+    except models.ProtectedError:
+        raise HttpError(409, 'This program is still in use and cannot be permanently deleted. Leave it archived.')
+    return 204, None
+
+
 # ---------------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------------

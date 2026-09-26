@@ -88,3 +88,36 @@ class ProgramListSchemaTests(SimpleTestCase):
         # every archived program shows up as active.
         from apps.programs.schemas import ProgramListSchema
         self.assertIn('archived_at', ProgramListSchema.model_fields)
+
+
+class PermanentDeleteTests(SimpleTestCase):
+    def _program(self, archived: bool):
+        program = mock.MagicMock()
+        program.archived_at = '2026-01-01' if archived else None
+        return program
+
+    def _call(self, program, has_data=False):
+        with mock.patch.object(programs_api, '_require_supervisor'), \
+             mock.patch.object(programs_api, '_get_program_or_404', return_value=program), \
+             mock.patch.object(programs_api, '_last_run_by_target', return_value={1: 'x'} if has_data else {}):
+            return programs_api.delete_program_permanently(mock.MagicMock(), 1)
+
+    def test_must_be_archived_first(self):
+        program = self._program(archived=False)
+        with self.assertRaises(HttpError) as ctx:
+            self._call(program)
+        self.assertEqual(ctx.exception.status_code, 400)
+        program.delete.assert_not_called()
+
+    def test_program_with_recorded_data_is_refused(self):
+        program = self._program(archived=True)
+        with self.assertRaises(HttpError) as ctx:
+            self._call(program, has_data=True)
+        self.assertEqual(ctx.exception.status_code, 409)
+        program.delete.assert_not_called()
+
+    def test_archived_program_without_data_is_deleted(self):
+        program = self._program(archived=True)
+        with mock.patch.object(programs_api.transaction, 'atomic'):
+            self.assertEqual(self._call(program), (204, None))
+        program.delete.assert_called_once()
