@@ -200,6 +200,15 @@ def _validate_treatment_area_and_tags(request, treatment_area: str | None, tags:
             raise HttpError(400, f'Unknown tag(s): {", ".join(invalid)}')
 
 
+def _validate_template_refs(request, prompting_template_id: int | None, workflow_template_id: int | None) -> None:
+    """A prompt-level or workflow template id must exist in this organization — otherwise a stale or
+    foreign id would either fail at the database (a 500) or link to another organization's template."""
+    if prompting_template_id and not _settings_qs(PromptingTemplate, request).filter(id=prompting_template_id).exists():
+        raise HttpError(400, 'Unknown prompt level template')
+    if workflow_template_id and not _settings_qs(WorkflowTemplate, request).filter(id=workflow_template_id).exists():
+        raise HttpError(400, 'Unknown workflow template')
+
+
 def _check_unique_name(model, request, name: str, *, exclude_id: int | None = None) -> None:
     """Pre-check for the (practice, name) uniqueness constraint on settings
     entities — gives a clean 409 instead of the IntegrityError a same-name
@@ -931,6 +940,7 @@ def create_program(request, data: ProgramCreateRequest):
     _require_supervisor(request)
     _assert_client_accessible(request, data.client_id)
     _validate_treatment_area_and_tags(request, data.treatment_area, data.tags)
+    _validate_template_refs(request, data.prompting_template_id, data.workflow_template_id)
     prompting_template_id = data.prompting_template_id or _default_prompting_template_id(request)
     program = Program.objects.create(
         external_client_id=data.client_id,
@@ -969,6 +979,7 @@ def update_program(request, program_id: int, data: ProgramUpdateRequest):
     _require_supervisor(request)
     program = _get_program_or_404(request, program_id)
     updates = data.dict(exclude_none=True)
+    _validate_template_refs(request, updates.get('prompting_template_id'), updates.get('workflow_template_id'))
     if updates.get('category') == Program.Category.INSTRUCTIONS_ONLY and program.targets.exists():
         raise HttpError(400, 'Cannot switch to Instructions Only while this program still has targets — remove them first')
     if 'treatment_area' in updates or 'tags' in updates:
@@ -1374,6 +1385,7 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
     if program.category == Program.Category.INSTRUCTIONS_ONLY:
         raise HttpError(400, 'Instructions Only programs cannot have targets — they store reference information only')
     target_data = data.dict()
+    _validate_template_refs(request, target_data.get('prompting_template_id'), target_data.get('workflow_template_id'))
     if program.prompting_template_id and not target_data.get('prompting_template_id'):
         target_data['prompting_template_id'] = program.prompting_template_id
     if target_data.get('status'):
@@ -1420,6 +1432,7 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
     _require_supervisor(request)
     target = _get_target_or_404(request, target_id)
     updates = data.dict(exclude_none=True)
+    _validate_template_refs(request, updates.get('prompting_template_id'), updates.get('workflow_template_id'))
     old_status = target.status
     for field, value in updates.items():
         setattr(target, field, value)
@@ -2034,6 +2047,7 @@ def list_org_programs(
 def create_org_program(request, data: OrgProgramCreateRequest):
     require_permission(request, 'org_programs_create')
     _validate_treatment_area_and_tags(request, data.treatment_area, data.tags)
+    _validate_template_refs(request, data.prompting_template_id, data.workflow_template_id)
     program = Program.objects.create(
         is_template=True,
         external_client_id=None,
