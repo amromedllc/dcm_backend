@@ -227,6 +227,7 @@ class ProgramListSchema(Schema):
     last_run_at: datetime | None = None
     target_count: int = 0
     target_status_counts: dict[str, int] = {}
+    archived_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

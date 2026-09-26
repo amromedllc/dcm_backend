@@ -80,3 +80,11 @@ class RequireTargetsTests(SimpleTestCase):
         self.assertEqual(data.targets[0].measurement_type, 'discrete_trial')
         with self.assertRaises(ValidationError):
             OrgProgramCreateRequest(name='X', targets=[{'name': ''}])
+
+
+class ProgramListSchemaTests(SimpleTestCase):
+    def test_list_schema_exposes_archived_at(self):
+        # The Programs page splits Active/Archived on this field; if the list schema drops it,
+        # every archived program shows up as active.
+        from apps.programs.schemas import ProgramListSchema
+        self.assertIn('archived_at', ProgramListSchema.model_fields)

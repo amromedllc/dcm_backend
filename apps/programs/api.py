@@ -918,12 +918,13 @@ def _optimized_program_image_url(request, image_field) -> str | None:
 # ---------------------------------------------------------------------------
 
 @router.get('/programs', response=list[ProgramListSchema])
-def list_programs(request, client_id: int, category: str | None = None, status: str | None = None):
+def list_programs(request, client_id: int, category: str | None = None, status: str | None = None, include_archived: bool = False):
     qs = Program.objects.filter(
         external_client_id=client_id,
         external_client_id__in=_accessible_external_client_ids(request),
-        archived_at__isnull=True,
     )
+    if not include_archived:
+        qs = qs.filter(archived_at__isnull=True)
     if category:
         qs = qs.filter(category=category)
     if status:
