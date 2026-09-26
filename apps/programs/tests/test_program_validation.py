@@ -60,3 +60,23 @@ class TemplateRefTests(SimpleTestCase):
         with mock.patch.object(programs_api, '_settings_qs', return_value=self._qs(True)):
             programs_api._validate_template_refs(None, 1, 2)
         programs_api._validate_template_refs(None, None, None)  # nothing to check, no query made
+
+
+class RequireTargetsTests(SimpleTestCase):
+    def test_program_needs_at_least_one_target(self):
+        with self.assertRaises(HttpError) as ctx:
+            programs_api._require_targets('skill_acquisition', [])
+        self.assertEqual(ctx.exception.status_code, 400)
+        programs_api._require_targets('skill_acquisition', [object()])
+
+    def test_instructions_only_cannot_have_targets_and_does_not_need_them(self):
+        programs_api._require_targets('instructions_only', [])
+        with self.assertRaises(HttpError):
+            programs_api._require_targets('instructions_only', [object()])
+
+    def test_create_requests_accept_embedded_targets(self):
+        data = ProgramCreateRequest(client_id=1, name='X', targets=[{'name': 'Asks for snack'}])
+        self.assertEqual(data.targets[0].name, 'Asks for snack')
+        self.assertEqual(data.targets[0].measurement_type, 'discrete_trial')
+        with self.assertRaises(ValidationError):
+            OrgProgramCreateRequest(name='X', targets=[{'name': ''}])

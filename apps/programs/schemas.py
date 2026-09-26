@@ -248,6 +248,8 @@ class ProgramCreateRequest(Schema):
     hidden_prompt_level_labels: list[str] = []
     workflow_template_id: int | None = None
     display_order: int = Field(default=0, ge=0)
+    # Required for every category except Instructions Only; created together with the program.
+    targets: list['TargetCreateRequest'] = []
 
 
 class ProgramUpdateRequest(Schema):
@@ -538,6 +540,8 @@ class OrgProgramCreateRequest(Schema):
     hidden_prompt_level_labels: list[str] = []
     baseline_notes: str = Field(default='', max_length=50000)
     display_order: int = Field(default=0, ge=0)
+    # Required for every category except Instructions Only; created together with the program.
+    targets: list['TargetCreateRequest'] = []
 
 
 class AssignOrgProgramRequest(Schema):
@@ -1030,3 +1034,8 @@ class ProgramDraftSchema(Schema):
     objective: str = ''
     instructions_html: str = ''
     targets: list[ProgramDraftTargetSchema] = []
+
+
+# The create requests above embed TargetCreateRequest, which is defined further down.
+ProgramCreateRequest.model_rebuild()
+OrgProgramCreateRequest.model_rebuild()

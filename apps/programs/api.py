@@ -200,6 +200,16 @@ def _validate_treatment_area_and_tags(request, treatment_area: str | None, tags:
             raise HttpError(400, f'Unknown tag(s): {", ".join(invalid)}')
 
 
+def _require_targets(category, targets: list) -> None:
+    """A new program must come with at least one target — except Instructions Only programs, which are
+    reference material and can't hold any."""
+    if category == Program.Category.INSTRUCTIONS_ONLY:
+        if targets:
+            raise HttpError(400, 'Instructions Only programs cannot have targets — they store reference information only')
+    elif not targets:
+        raise HttpError(400, 'Add at least one target to the program')
+
+
 def _validate_template_refs(request, prompting_template_id: int | None, workflow_template_id: int | None) -> None:
     """A prompt-level or workflow template id must exist in this organization — otherwise a stale or
     foreign id would either fail at the database (a 500) or link to another organization's template."""
@@ -941,27 +951,32 @@ def create_program(request, data: ProgramCreateRequest):
     _assert_client_accessible(request, data.client_id)
     _validate_treatment_area_and_tags(request, data.treatment_area, data.tags)
     _validate_template_refs(request, data.prompting_template_id, data.workflow_template_id)
+    _require_targets(data.category, data.targets)
     prompting_template_id = data.prompting_template_id or _default_prompting_template_id(request)
-    program = Program.objects.create(
-        external_client_id=data.client_id,
-        name=data.name,
-        category=data.category,
-        phase=data.phase,
-        treatment_area=data.treatment_area,
-        tags=data.tags,
-        baseline_notes=data.baseline_notes,
-        objective=data.objective,
-        instructions=data.instructions,
-        instructions_html=data.instructions_html,
-        professional_instructions_html=data.professional_instructions_html,
-        custom_field_values=data.custom_field_values,
-        prompting_template_id=prompting_template_id,
-        hidden_prompt_level_labels=_normalize_hidden_prompt_labels(data.hidden_prompt_level_labels),
-        workflow_template_id=data.workflow_template_id,
-        display_order=data.display_order,
-        created_by=request.user,
-    )
-    return 201, {**_serialize_program(program, request), 'targets': []}
+    with transaction.atomic():
+        program = Program.objects.create(
+            external_client_id=data.client_id,
+            name=data.name,
+            category=data.category,
+            phase=data.phase,
+            treatment_area=data.treatment_area,
+            tags=data.tags,
+            baseline_notes=data.baseline_notes,
+            objective=data.objective,
+            instructions=data.instructions,
+            instructions_html=data.instructions_html,
+            professional_instructions_html=data.professional_instructions_html,
+            custom_field_values=data.custom_field_values,
+            prompting_template_id=prompting_template_id,
+            hidden_prompt_level_labels=_normalize_hidden_prompt_labels(data.hidden_prompt_level_labels),
+            workflow_template_id=data.workflow_template_id,
+            display_order=data.display_order,
+            created_by=request.user,
+        )
+        for target_data in data.targets:
+            _build_target(request, program, target_data)
+        result = _serialize_program(program, request, include_targets=True)
+    return 201, result
 
 
 @router.get('/programs/{program_id}', response=ProgramSchema)
@@ -1378,12 +1393,9 @@ def list_targets(request, program_id: int, staff_view: bool = False):
     return targets
 
 
-@router.post('/programs/{program_id}/targets', response={201: TargetSchema})
-def create_target(request, program_id: int, data: TargetCreateRequest):
-    _require_supervisor(request)
-    program = _get_program_or_404(request, program_id)
-    if program.category == Program.Category.INSTRUCTIONS_ONLY:
-        raise HttpError(400, 'Instructions Only programs cannot have targets — they store reference information only')
+def _build_target(request, program: Program, data: TargetCreateRequest) -> Target:
+    """Validate and create one target on `program` — shared by the add-target endpoint and by program
+    creation, which creates the program and its targets together."""
     target_data = data.dict()
     _validate_template_refs(request, target_data.get('prompting_template_id'), target_data.get('workflow_template_id'))
     if program.prompting_template_id and not target_data.get('prompting_template_id'):
@@ -1419,7 +1431,16 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
     )
     if target.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
         _sync_target_sub_items(request, target, target.sub_items, request.user)
-    return 201, target
+    return target
+
+
+@router.post('/programs/{program_id}/targets', response={201: TargetSchema})
+def create_target(request, program_id: int, data: TargetCreateRequest):
+    _require_supervisor(request)
+    program = _get_program_or_404(request, program_id)
+    if program.category == Program.Category.INSTRUCTIONS_ONLY:
+        raise HttpError(400, 'Instructions Only programs cannot have targets — they store reference information only')
+    return 201, _build_target(request, program, data)
 
 
 @router.get('/targets/{target_id}', response=TargetSchema)
@@ -2048,27 +2069,32 @@ def create_org_program(request, data: OrgProgramCreateRequest):
     require_permission(request, 'org_programs_create')
     _validate_treatment_area_and_tags(request, data.treatment_area, data.tags)
     _validate_template_refs(request, data.prompting_template_id, data.workflow_template_id)
-    program = Program.objects.create(
-        is_template=True,
-        external_client_id=None,
-        name=data.name,
-        category=data.category,
-        phase=data.phase,
-        treatment_area=data.treatment_area,
-        tags=data.tags,
-        objective=data.objective,
-        instructions=data.instructions,
-        instructions_html=data.instructions_html,
-        professional_instructions_html=data.professional_instructions_html,
-        custom_field_values=data.custom_field_values,
-        prompting_template_id=data.prompting_template_id,
-        workflow_template_id=data.workflow_template_id,
-        hidden_prompt_level_labels=data.hidden_prompt_level_labels,
-        baseline_notes=data.baseline_notes,
-        display_order=data.display_order,
-        created_by=request.user,
-    )
-    return 201, _serialize_org_program(program, request, include_targets=True)
+    _require_targets(data.category, data.targets)
+    with transaction.atomic():
+        program = Program.objects.create(
+            is_template=True,
+            external_client_id=None,
+            name=data.name,
+            category=data.category,
+            phase=data.phase,
+            treatment_area=data.treatment_area,
+            tags=data.tags,
+            objective=data.objective,
+            instructions=data.instructions,
+            instructions_html=data.instructions_html,
+            professional_instructions_html=data.professional_instructions_html,
+            custom_field_values=data.custom_field_values,
+            prompting_template_id=data.prompting_template_id,
+            workflow_template_id=data.workflow_template_id,
+            hidden_prompt_level_labels=data.hidden_prompt_level_labels,
+            baseline_notes=data.baseline_notes,
+            display_order=data.display_order,
+            created_by=request.user,
+        )
+        for target_data in data.targets:
+            _build_target(request, program, target_data)
+        result = _serialize_org_program(program, request, include_targets=True)
+    return 201, result
 
 
 ASSESSMENT_STARTER_NAME = 'Skills Assessment (Starter)'
