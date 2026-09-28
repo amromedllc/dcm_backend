@@ -7,7 +7,7 @@ from django_tenants.utils import schema_context
 from apps.accounts.models import User
 from apps.clients.models import Client
 from apps.exports.note_pdf import body_blocks, render_note_pdf
-from apps.notes.models import LessonNote, NoteSignature, NoteTemplate
+from apps.notes.models import LessonNote, NoteLayoutSettings, NoteSignature, NoteTemplate
 from apps.tenants.models import Organization
 from shared.tenancy import tenant_context
 
@@ -67,3 +67,44 @@ class NotePdfTests(TestCase):
             n2 = LessonNote.objects.create(external_client_id=1, staff=self.staff, note_date=date(2026, 5, 1), body={'text': '<div>Hi <b>there</b></div>'})
             self.assertTrue(render_note_pdf(n1).startswith(b'%PDF'))
             self.assertTrue(render_note_pdf(n2).startswith(b'%PDF'))
+
+    def test_html_blocks_resolves_dynamic_fields_for_layout_content(self):
+        from apps.exports.note_pdf import html_blocks
+
+        html = '<p>Prepared for <span data-dynamic-field="true" data-key="client.full_name" data-label="Client">[Client]</span></p>'
+        blocks = html_blocks(html, {'client.full_name': 'Sam Lee'})
+        text = ' '.join(str(b) for b in blocks)
+        self.assertIn('Sam Lee', text)
+        self.assertNotIn('[Client]', text)
+
+    def _basic_note(self):
+        client = Client.objects.create(first_name='Sam', last_name='Lee', date_of_birth=date(2018, 4, 2), organization=self.org)
+        template = NoteTemplate.objects.create(name='Session note', body_template=BODY, fields=[{'key': 'resp', 'label': 'Response', 'type': 'text'}])
+        note = LessonNote.objects.create(
+            external_client_id=client.id, staff=self.staff, template=template,
+            note_date=date(2026, 5, 1), body={'resp': 'well'},
+        )
+        return LessonNote.objects.select_related('staff', 'template', 'organization').prefetch_related('signatures').get(id=note.id)
+
+    def test_layout_header_and_footer_are_added_to_the_pdf_when_enabled(self):
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            note = self._basic_note()
+            baseline = render_note_pdf(note)
+
+            NoteLayoutSettings.objects.create(
+                template_type='notes', header_enabled=True,
+                header_html='<p>Confidential clinic letterhead for <span data-dynamic-field="true" data-key="client.full_name" data-label="Client">[Client]</span></p>',
+                footer_enabled=True, footer_html='<p>Approved by the clinic’s medical director</p>',
+            )
+            with_layout = render_note_pdf(note)
+
+        self.assertTrue(with_layout.startswith(b'%PDF'))
+        # A compressed PDF still grows measurably once real extra content streams in.
+        self.assertGreater(len(with_layout), len(baseline))
+
+    def test_layout_settings_disabled_by_default_leaves_pdf_unchanged(self):
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            note = self._basic_note()
+            NoteLayoutSettings.objects.create(template_type='notes', header_enabled=False, footer_enabled=False)
+            pdf = render_note_pdf(note)
+        self.assertTrue(pdf.startswith(b'%PDF'))

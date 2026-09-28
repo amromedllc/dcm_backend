@@ -73,6 +73,25 @@ class NoteTemplateUpdateRequest(Schema):
 
 
 # ---------------------------------------------------------------------------
+# Note/form layout settings (PDF export header & footer)
+# ---------------------------------------------------------------------------
+
+class NoteLayoutSettingsSchema(Schema):
+    template_type: str
+    header_enabled: bool
+    header_html: str
+    footer_enabled: bool
+    footer_html: str
+
+
+class NoteLayoutSettingsUpdateRequest(Schema):
+    header_enabled: bool = False
+    header_html: str = ''
+    footer_enabled: bool = False
+    footer_html: str = ''
+
+
+# ---------------------------------------------------------------------------
 # Note signatures
 # ---------------------------------------------------------------------------
 

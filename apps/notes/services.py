@@ -133,12 +133,22 @@ def resolve_template_tokens(note: LessonNote, appointment_id: int | None = None)
     A token that can't be resolved (no linked session/appointment, missing
     client, etc.) is simply omitted so the renderer falls back to showing the
     ``[Label]`` placeholder.
-    """
-    from apps.clients.models import Client
-    from apps.sessions.models import Appointment
 
+    Only meaningful for a note whose template actually has a body — see
+    ``resolve_note_tokens`` for the same resolution without that requirement
+    (e.g. for a layout header/footer, which isn't tied to any one template).
+    """
     if not (note.template_id and note.template and note.template.body_template):
         return {}
+    return resolve_note_tokens(note, appointment_id)
+
+
+def resolve_note_tokens(note: LessonNote, appointment_id: int | None = None) -> dict[str, str]:
+    """Same token set as ``resolve_template_tokens``, without requiring the
+    note's template to have a ``body_template`` — used for PDF layout
+    header/footer content, which stands apart from any one template's body."""
+    from apps.clients.models import Client
+    from apps.sessions.models import Appointment
 
     out: dict[str, str] = {}
 
