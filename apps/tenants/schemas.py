@@ -13,6 +13,20 @@ class OrganizationAuthenticationSettingsUpdate(Schema):
     automatic_logout_minutes: int | None = None
 
 
+class OrganizationIntegrationSettingsSchema(Schema):
+    integration_platform: str
+    organization_name: str
+
+
+class OrganizationIntegrationSettingsUpdate(Schema):
+    integration_platform: str | None = None
+
+
+class TherapyPmsConnectRequest(Schema):
+    email: str
+    password: str
+
+
 class TpmsAdminEmailSettingSchema(Schema):
     id: int
     admin_id: int

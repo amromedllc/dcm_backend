@@ -14,6 +14,9 @@ class Organization(TenantMixin):
         TWENTY_FOUR_HOURS = 24 * 60, '24 hours'
         ONE_WEEK = 7 * 24 * 60, '1 week'
 
+    class IntegrationPlatform(models.TextChoices):
+        THERAPY_PMS = 'therapy_pms', 'TherapyPMS'
+
     name = models.CharField(max_length=200)
     slug = models.SlugField(unique=True)
     plan = models.CharField(max_length=20, choices=Plan.choices, default=Plan.STARTER)
@@ -22,6 +25,11 @@ class Organization(TenantMixin):
     automatic_logout_minutes = models.PositiveIntegerField(
         choices=AutomaticLogoutMinutes.choices,
         default=AutomaticLogoutMinutes.NINE_HOURS,
+    )
+    # Blank until the org actually connects (see tenants.api.connect_therapy_pms) —
+    # picking a platform in the UI doesn't set this by itself.
+    integration_platform = models.CharField(
+        max_length=30, choices=IntegrationPlatform.choices, blank=True, default='',
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

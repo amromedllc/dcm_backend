@@ -260,6 +260,29 @@ def authenticate_raw(email: str, password: str) -> dict[str, Any]:
     return login_with_encrypted(enc_email, enc_password)
 
 
+def authenticate_admin_raw(email: str, password: str) -> dict[str, Any]:
+    """POST /api/v1/admin/login with plain (unencrypted) credentials — the
+    practice-admin login used to verify an organization's TherapyPMS
+    connection (tenants.api.connect_therapy_pms), separate from the
+    encrypted /ios/login flow staff and client-portal sign-ins use."""
+    payload = _post(
+        '/api/v1/admin/login',
+        {'email': email, 'password': password},
+        debug_label='admin-login',
+    )
+
+    status = str(payload.get('status', '')).lower()
+    if status in {'unauthorised', 'unauthorized', 'error', 'fail', 'failed'}:
+        message = payload.get('message') or 'Invalid email or password'
+        if isinstance(message, dict):
+            message = next(iter(message.values()), ['Invalid email or password'])
+            if isinstance(message, list):
+                message = message[0] if message else 'Invalid email or password'
+        raise TpmsAuthError(str(message), payload=payload)
+
+    return payload
+
+
 def authenticate(email: str, password: str) -> TpmsAuthProfile:
     """encrypt (email) + encrypt (password) → login → normalized staff profile."""
     payload = authenticate_raw(email, password)

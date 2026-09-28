@@ -11,7 +11,10 @@ from .models import Domain, Organization, OrganizationTpmsAdminId
 from .schemas import (
     OrganizationAuthenticationSettingsSchema,
     OrganizationAuthenticationSettingsUpdate,
+    OrganizationIntegrationSettingsSchema,
+    OrganizationIntegrationSettingsUpdate,
     OrganizationPracticeEmailSettingsSchema,
+    TherapyPmsConnectRequest,
     OrganizationSuperadminCreate,
     OrganizationSuperadminUpdate,
     SuperadminAPIKeyCreate,
@@ -299,6 +302,63 @@ def update_authentication_settings(request, data: OrganizationAuthenticationSett
         'automatic_logout_enabled': org.automatic_logout_enabled,
         'automatic_logout_minutes': org.automatic_logout_minutes,
     }
+
+
+@router.get('/settings/integrations', response=OrganizationIntegrationSettingsSchema)
+def get_integration_settings(request):
+    _require_manager(request)
+    org = _organization(request)
+    return {'integration_platform': org.integration_platform, 'organization_name': org.name}
+
+
+@router.patch('/settings/integrations', response=OrganizationIntegrationSettingsSchema)
+def update_integration_settings(request, data: OrganizationIntegrationSettingsUpdate):
+    _require_manager(request)
+    org = _organization(request)
+
+    if data.integration_platform is not None:
+        valid_platforms = {choice.value for choice in Organization.IntegrationPlatform}
+        if data.integration_platform not in valid_platforms:
+            raise HttpError(400, 'Unsupported practice management platform')
+        org.integration_platform = data.integration_platform
+        org.save(update_fields=['integration_platform', 'updated_at'])
+
+    return {'integration_platform': org.integration_platform, 'organization_name': org.name}
+
+
+@router.post('/settings/integrations/therapy-pms/connect', response={204: None})
+def connect_therapy_pms(request, data: TherapyPmsConnectRequest):
+    """Verify TherapyPMS credentials work. Nothing is stored — the password is
+    used once, to call TherapyPMS, and discarded."""
+    _require_manager(request)
+    from apps.integrations.tpms_auth_client import TpmsAuthError, authenticate_admin_raw as tpms_authenticate_admin_raw
+
+    if not data.email.strip() or not data.password:
+        raise HttpError(400, 'Email and password are required.')
+    try:
+        tpms_authenticate_admin_raw(data.email, data.password)
+    except TpmsAuthError as exc:
+        # Not 401 — that status is reserved for the caller's own DCM session
+        # and triggers an automatic logout in the web app's API client.
+        raise HttpError(
+            400,
+            'Error making a request to TherapyPMS. Please verify that the credentials are valid and try again. '
+            'If the problem persists, please contact TherapyPMS support.',
+        ) from exc
+
+    org = _organization(request)
+    org.integration_platform = Organization.IntegrationPlatform.THERAPY_PMS
+    org.save(update_fields=['integration_platform', 'updated_at'])
+    return 204, None
+
+
+@router.post('/settings/integrations/disconnect', response={204: None})
+def disconnect_integration(request):
+    _require_manager(request)
+    org = _organization(request)
+    org.integration_platform = ''
+    org.save(update_fields=['integration_platform', 'updated_at'])
+    return 204, None
 
 
 # ---------------------------------------------------------------------------
