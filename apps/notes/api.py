@@ -8,12 +8,13 @@ from ninja.errors import HttpError
 from apps.accounts.auth import partner_auth
 from apps.accounts.permissions import require_permission
 from apps.clients.models import Client
-from .models import LessonNote, NoteTemplate, NoteSignature, NoteAssignment
+from .models import LessonNote, NoteTemplate, NoteLayoutSettings, NoteSignature, NoteAssignment
 from .schemas import (
     LessonNoteSchema, LessonNoteListSchema, NoteCreateRequest, NoteUpdateRequest,
     NoteRejectRequest, NoteSignatureSchema, SignNoteRequest,
     NoteTemplateSchema, NoteTemplateCreateRequest, NoteTemplateUpdateRequest,
     NoteTemplateDraftRequest, NoteTemplateDraftSchema,
+    NoteLayoutSettingsSchema, NoteLayoutSettingsUpdateRequest,
     ReviewQueueItem,
     NoteAssignmentSchema, NoteAssignmentCreateRequest,
 )
@@ -167,6 +168,43 @@ def delete_note_template(request, template_id: int):
     except NoteTemplate.DoesNotExist:
         raise HttpError(404, 'Template not found')
     return 204, None
+
+
+# ---------------------------------------------------------------------------
+# Layout settings — optional PDF export header/footer, one per template type
+# ---------------------------------------------------------------------------
+
+def _layout_settings_schema(template_type: str) -> NoteLayoutSettingsSchema:
+    row = NoteLayoutSettings.objects.filter(template_type=template_type).first()
+    if row is None:
+        return NoteLayoutSettingsSchema(
+            template_type=template_type, header_enabled=False, header_html='',
+            footer_enabled=False, footer_html='',
+        )
+    return NoteLayoutSettingsSchema(
+        template_type=row.template_type, header_enabled=row.header_enabled, header_html=row.header_html,
+        footer_enabled=row.footer_enabled, footer_html=row.footer_html,
+    )
+
+
+@router.get('/templates/layout-settings/{template_type}', response=NoteLayoutSettingsSchema)
+def get_layout_settings(request, template_type: str):
+    _require_template_read(request)
+    if template_type not in ('notes', 'forms'):
+        raise HttpError(404, 'Not found')
+    return _layout_settings_schema(template_type)
+
+
+@router.put('/templates/layout-settings/{template_type}', response=NoteLayoutSettingsSchema)
+def update_layout_settings(request, template_type: str, data: NoteLayoutSettingsUpdateRequest):
+    _require_template_manager(request, 'edit')
+    if template_type not in ('notes', 'forms'):
+        raise HttpError(404, 'Not found')
+    NoteLayoutSettings.objects.update_or_create(
+        template_type=template_type,
+        defaults=data.dict(),
+    )
+    return _layout_settings_schema(template_type)
 
 
 # ---------------------------------------------------------------------------

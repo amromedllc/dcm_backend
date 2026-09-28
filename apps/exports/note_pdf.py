@@ -167,6 +167,15 @@ def body_blocks(template, body: dict, tokens: dict) -> list[tuple]:
     return parser.blocks
 
 
+def html_blocks(html: str, tokens: dict) -> list[tuple]:
+    """Same block parsing as ``body_blocks``, for arbitrary rich-text HTML that
+    isn't tied to a template's own fields (e.g. a layout header/footer)."""
+    parser = _BodyParser({}, {}, tokens)
+    parser.feed(html)
+    parser.close()
+    return parser.blocks
+
+
 def _client_details(note) -> tuple[str, str]:
     from apps.clients.models import Client
 
@@ -192,7 +201,8 @@ def render_note_pdf(note) -> bytes:
         BaseDocTemplate, Frame, HRFlowable, KeepTogether, PageTemplate, Paragraph, Spacer, Table, TableStyle,
     )
 
-    from apps.notes.services import resolve_template_tokens
+    from apps.notes.models import NoteLayoutSettings
+    from apps.notes.services import resolve_note_tokens
 
     hexc = colors.HexColor
     reg, semi, bold = _register_fonts()
@@ -217,10 +227,34 @@ def render_note_pdf(note) -> bytes:
     client_name, dob = _client_details(note)
     staff = note.staff
     staff_name = (staff.full_name if staff else '') or '—'
-    tokens = resolve_template_tokens(note) if template and template.body_template else {}
+    tokens = resolve_note_tokens(note)
+    layout = NoteLayoutSettings.objects.filter(template_type=template.template_type).first() if template else None
 
     doc_width = letter[0] - 1.5 * inch
     pad = 10
+
+    def render_blocks(blocks: list[tuple]) -> list:
+        """Convert parsed HTML blocks (paragraphs, headings, tables) into flowables —
+        shared by the note body and an optional layout header/footer."""
+        flowables: list = []
+        for block in blocks:
+            if block[0] == 'table':
+                rows = [[Paragraph(c or '', normal) for c in r] for r in block[1]]
+                width = max(len(r) for r in rows)
+                for r in rows:
+                    r += [Paragraph('', normal)] * (width - len(r))
+                t = Table(rows, colWidths=[doc_width / width] * width, repeatRows=0)
+                t.setStyle(TableStyle([
+                    ('BOX', (0, 0), (-1, -1), 0.8, hexc(RULE)),
+                    ('INNERGRID', (0, 0), (-1, -1), 0.5, hexc(RULE)),
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 8), ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+                    ('TOPPADDING', (0, 0), (-1, -1), 5), ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+                ]))
+                flowables += [Spacer(1, 2), t, Spacer(1, 8)]
+            else:
+                flowables.append(Paragraph(block[1], h_styles.get(block[2], para)))
+        return flowables
 
     def page_frame(canvas, doc):
         canvas.saveState()
@@ -247,6 +281,11 @@ def render_note_pdf(note) -> bytes:
     doc.addPageTemplates([PageTemplate(id='note', frames=[frame], onPage=page_frame)])
 
     story: list = []
+
+    # Custom layout header (org-configured, on top of the standard header below)
+    if layout and layout.header_enabled and layout.header_html.strip():
+        story += render_blocks(html_blocks(layout.header_html, tokens))
+        story += [Spacer(1, 6), HRFlowable(width='100%', thickness=0.6, color=hexc(RULE)), Spacer(1, 10)]
 
     # Header: practice on the left, document type on the right, both on one baseline
     head = Table(
@@ -294,23 +333,7 @@ def render_note_pdf(note) -> bytes:
     # Note content
     body = note.body or {}
     if template and template.body_template.strip():
-        for block in body_blocks(template, body, tokens):
-            if block[0] == 'table':
-                rows = [[Paragraph(c or '', normal) for c in r] for r in block[1]]
-                width = max(len(r) for r in rows)
-                for r in rows:
-                    r += [Paragraph('', normal)] * (width - len(r))
-                t = Table(rows, colWidths=[doc_width / width] * width, repeatRows=0)
-                t.setStyle(TableStyle([
-                    ('BOX', (0, 0), (-1, -1), 0.8, hexc(RULE)),
-                    ('INNERGRID', (0, 0), (-1, -1), 0.5, hexc(RULE)),
-                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                    ('LEFTPADDING', (0, 0), (-1, -1), 8), ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-                    ('TOPPADDING', (0, 0), (-1, -1), 5), ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
-                ]))
-                story += [Spacer(1, 2), t, Spacer(1, 8)]
-            else:
-                story.append(Paragraph(block[1], h_styles.get(block[2], para)))
+        story += render_blocks(body_blocks(template, body, tokens))
     elif template and template.fields:
         rows = [
             [Paragraph(escape(str(f.get('label', f.get('key')))).upper(), field_label),
@@ -375,6 +398,11 @@ def render_note_pdf(note) -> bytes:
         story.append(KeepTogether([sig_head, grid_t]))
     else:
         story.append(KeepTogether([sig_head, Paragraph('Not yet signed.', small)]))
+
+    # Custom layout footer (org-configured, additional to the standard page footer)
+    if layout and layout.footer_enabled and layout.footer_html.strip():
+        story += [Spacer(1, 14), HRFlowable(width='100%', thickness=0.6, color=hexc(RULE)), Spacer(1, 10)]
+        story += render_blocks(html_blocks(layout.footer_html, tokens))
 
     doc.build(story)
     return buf.getvalue()
