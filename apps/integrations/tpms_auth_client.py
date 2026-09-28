@@ -130,6 +130,28 @@ def clear_tpms_access_token(user_id: int) -> None:
     _redis().delete(_tpms_token_key(user_id))
 
 
+def _org_admin_token_key(org_id: int) -> str:
+    return f'dcm:tpms:org-admin-token:{org_id}'
+
+
+def store_org_tpms_admin_token(org_id: int, token: str) -> None:
+    """Cache the practice-admin Bearer token used for Integrations Pull."""
+    raw = _normalize_bearer_token(token)
+    if not raw:
+        return
+    ttl = _ttl_from_token(raw)
+    _redis().setex(_org_admin_token_key(org_id), ttl, raw)
+
+
+def get_org_tpms_admin_token(org_id: int) -> str | None:
+    value = _redis().get(_org_admin_token_key(org_id))
+    return value if isinstance(value, str) and value else None
+
+
+def clear_org_tpms_admin_token(org_id: int) -> None:
+    _redis().delete(_org_admin_token_key(org_id))
+
+
 def _request(
     method: str,
     path: str,
@@ -384,6 +406,26 @@ def _extract_rows(payload: dict[str, Any], *block_keys: str) -> list[dict[str, A
             add_rows(data)
         elif isinstance(data, dict):
             add_rows(data)
+
+    if not rows:
+        # Last resort: the caller's block_keys guessed wrong (a real TPMS
+        # endpoint has been seen wrapping rows under a key none of them
+        # expected). Scan every value — one level deep, then two — for the
+        # first non-empty list of dicts, whatever it's called.
+        def find_list_of_dicts(node: Any, depth: int) -> list[dict[str, Any]] | None:
+            if isinstance(node, list) and node and all(isinstance(item, dict) for item in node):
+                return node
+            if depth <= 0 or not isinstance(node, dict):
+                return None
+            for value in node.values():
+                found = find_list_of_dicts(value, depth - 1)
+                if found:
+                    return found
+            return None
+
+        found = find_list_of_dicts(payload, depth=3)
+        if found:
+            rows = found
 
     return rows
 
@@ -860,4 +902,119 @@ def normalize_client_portal_payload(
         has_sibling=has_sibling,
         access_token=_extract_access_token(payload),
         raw=payload,
+    )
+
+
+@dataclass(frozen=True)
+class TpmsAdminSession:
+    """Practice-admin identity from POST /api/v1/admin/login."""
+
+    access_token: str
+    admin_id: int
+    email: str
+    raw: dict[str, Any]
+
+
+def normalize_admin_login_payload(fallback_email: str, payload: dict[str, Any]) -> TpmsAdminSession:
+    """Extract Bearer token + practice admin_id from an admin login response.
+
+    For practice admins the TPMS `id` (or `admin_id`) is the practice key
+    used in OrganizationTpmsAdminId — required so Pull sync stays bound to
+    one facility and cannot leak into another org's mapping.
+    """
+    token = _extract_access_token(payload)
+    if not token:
+        raise TpmsAuthError('TherapyPMS admin login did not return an access token', payload=payload)
+
+    data = _unwrap_profile(payload)
+    admin_id = _practice_id_from_payload(data)
+    if admin_id is None:
+        admin_id = _as_int(_dig(data, 'id', 'user_id', 'userId', 'admin_id', 'adminId'))
+    if admin_id is None:
+        raise TpmsAuthError(
+            'TherapyPMS admin login did not return a practice id',
+            payload=payload,
+        )
+
+    email = str(_dig(data, 'email', 'login_email') or fallback_email).strip().lower()
+    return TpmsAdminSession(
+        access_token=token,
+        admin_id=admin_id,
+        email=email,
+        raw=payload,
+    )
+
+
+def admin_list_clients(access_token: str) -> list[dict[str, Any]]:
+    """GET /api/v1/admin/get/clients — practice clients for Integrations Pull."""
+    payload = _request(
+        'GET',
+        '/api/v1/admin/get/clients',
+        access_token=access_token,
+        debug_label='admin-get-clients',
+    )
+    status = str(payload.get('status', '')).lower()
+    if status in {'unauthorised', 'unauthorized', 'error', 'fail', 'failed'}:
+        message = payload.get('message') or 'Failed to load clients'
+        raise TpmsAuthError(str(message), payload=payload)
+    return _extract_rows(payload, 'clients', 'client_data', 'patients', 'data', 'result')
+
+
+def admin_list_providers(access_token: str) -> list[dict[str, Any]]:
+    """GET /api/v1/admin/get/providers — practice providers for Integrations Pull."""
+    payload = _request(
+        'GET',
+        '/api/v1/admin/get/providers',
+        access_token=access_token,
+        debug_label='admin-get-providers',
+    )
+    status = str(payload.get('status', '')).lower()
+    if status in {'unauthorised', 'unauthorized', 'error', 'fail', 'failed'}:
+        message = payload.get('message') or 'Failed to load providers'
+        raise TpmsAuthError(str(message), payload=payload)
+    return _extract_rows(payload, 'providers', 'provider_data', 'employees', 'staff', 'data', 'result')
+
+
+def admin_list_appointments(
+    access_token: str,
+    *,
+    from_date: str,
+    to_date: str,
+    patient_ids: list[int] | None = None,
+    staff_ids: list[int] | None = None,
+) -> list[dict[str, Any]]:
+    """POST /api/v1/admin/get/appointment — practice sessions for Integrations Pull.
+
+    from_date / to_date are mandatory (YYYY-MM-DD). patient_ids and staff_ids
+    are optional filters forwarded when non-empty.
+    """
+    body: dict[str, Any] = {
+        'from_date': from_date,
+        'to_date': to_date,
+    }
+    if patient_ids:
+        body['patient_ids'] = [int(p) for p in patient_ids]
+    if staff_ids:
+        body['staff_ids'] = [int(s) for s in staff_ids]
+
+    payload = _request(
+        'POST',
+        '/api/v1/admin/get/appointment',
+        body=body,
+        access_token=access_token,
+        debug_label='admin-get-appointment',
+    )
+    status = str(payload.get('status', '')).lower()
+    if status in {'unauthorised', 'unauthorized', 'error', 'fail', 'failed'}:
+        message = payload.get('message') or 'Failed to load appointments'
+        raise TpmsAuthError(str(message), payload=payload)
+    return _extract_rows(
+        payload,
+        'appointments',
+        'appointment',
+        'appointment_list',
+        'sessions',
+        'data_all',
+        'data',
+        'result',
     )

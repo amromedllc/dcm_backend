@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from ninja import Schema
 
@@ -25,6 +25,20 @@ class OrganizationIntegrationSettingsUpdate(Schema):
 class TherapyPmsConnectRequest(Schema):
     email: str
     password: str
+
+
+class TherapyPmsPullResultSchema(Schema):
+    created: int
+    updated: int
+    skipped: int
+    errors: list[str] = []
+
+
+class TherapyPmsPullAppointmentsRequest(Schema):
+    from_date: date
+    to_date: date
+    patient_ids: list[int] | None = None
+    staff_ids: list[int] | None = None
 
 
 class TpmsAdminEmailSettingSchema(Schema):

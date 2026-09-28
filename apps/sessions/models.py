@@ -43,6 +43,18 @@ class Appointment(TenantAwareModel):
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.SCHEDULED)
     synced_at = models.DateTimeField(null=True, blank=True)
 
+    session_title = models.CharField(max_length=255, blank=True)
+    external_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
+    billable = models.IntegerField(null=True, blank=True)
+    authorization_id = models.CharField(max_length=100, blank=True)
+    payor_id = models.IntegerField(null=True, blank=True)
+    time_duration = models.PositiveIntegerField(null=True, blank=True, help_text='Minutes, as reported by the PM system')
+    cpt_code = models.CharField(max_length=20, blank=True)
+    external_created_at = models.DateTimeField(null=True, blank=True, help_text="The PM system's own created-at timestamp")
+    external_updated_at = models.DateTimeField(null=True, blank=True, help_text="The PM system's own updated-at timestamp")
+    start_time_local_raw = models.CharField(max_length=40, blank=True)
+    end_time_local_raw = models.CharField(max_length=40, blank=True)
+
     _org_scoped_fk_fields = ('lesson',)  # cross-app FK -> programs.Lesson
 
     class Meta:

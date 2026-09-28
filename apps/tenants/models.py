@@ -31,6 +31,9 @@ class Organization(TenantMixin):
     integration_platform = models.CharField(
         max_length=30, choices=IntegrationPlatform.choices, blank=True, default='',
     )
+    integration_email = models.EmailField(blank=True, default='')
+    integration_password_encrypted = models.TextField(blank=True, default='')
+    integration_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

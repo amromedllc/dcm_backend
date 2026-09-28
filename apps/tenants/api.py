@@ -15,6 +15,8 @@ from .schemas import (
     OrganizationIntegrationSettingsUpdate,
     OrganizationPracticeEmailSettingsSchema,
     TherapyPmsConnectRequest,
+    TherapyPmsPullAppointmentsRequest,
+    TherapyPmsPullResultSchema,
     OrganizationSuperadminCreate,
     OrganizationSuperadminUpdate,
     SuperadminAPIKeyCreate,
@@ -328,37 +330,70 @@ def update_integration_settings(request, data: OrganizationIntegrationSettingsUp
 
 @router.post('/settings/integrations/therapy-pms/connect', response={204: None})
 def connect_therapy_pms(request, data: TherapyPmsConnectRequest):
-    """Verify TherapyPMS credentials work. Nothing is stored — the password is
-    used once, to call TherapyPMS, and discarded."""
+    """Verify TherapyPMS admin credentials, bind this org to that practice, and
+    store encrypted credentials for later Pull sync. The password is never
+    returned to the client."""
     _require_manager(request)
-    from apps.integrations.tpms_auth_client import TpmsAuthError, authenticate_admin_raw as tpms_authenticate_admin_raw
+    from apps.integrations.tpms_pull import bind_therapy_pms_connection
 
     if not data.email.strip() or not data.password:
         raise HttpError(400, 'Email and password are required.')
-    try:
-        tpms_authenticate_admin_raw(data.email, data.password)
-    except TpmsAuthError as exc:
-        # Not 401 — that status is reserved for the caller's own DCM session
-        # and triggers an automatic logout in the web app's API client.
-        raise HttpError(
-            400,
-            'Error making a request to TherapyPMS. Please verify that the credentials are valid and try again. '
-            'If the problem persists, please contact TherapyPMS support.',
-        ) from exc
 
     org = _organization(request)
-    org.integration_platform = Organization.IntegrationPlatform.THERAPY_PMS
-    org.save(update_fields=['integration_platform', 'updated_at'])
+    bind_therapy_pms_connection(org, data.email.strip(), data.password)
     return 204, None
 
 
 @router.post('/settings/integrations/disconnect', response={204: None})
 def disconnect_integration(request):
     _require_manager(request)
+    from apps.integrations.tpms_pull import clear_therapy_pms_connection
+
     org = _organization(request)
-    org.integration_platform = ''
-    org.save(update_fields=['integration_platform', 'updated_at'])
+    clear_therapy_pms_connection(org)
     return 204, None
+
+
+@router.post(
+    '/settings/integrations/therapy-pms/pull/clients',
+    response=TherapyPmsPullResultSchema,
+)
+def pull_therapy_pms_clients(request):
+    """Pull clients from TherapyPMS admin API into this organization only."""
+    _require_manager(request)
+    from apps.integrations.tpms_pull import pull_clients
+
+    return pull_clients(_organization(request)).as_dict()
+
+
+@router.post(
+    '/settings/integrations/therapy-pms/pull/providers',
+    response=TherapyPmsPullResultSchema,
+)
+def pull_therapy_pms_providers(request):
+    """Pull providers from TherapyPMS admin API into this organization's users."""
+    _require_manager(request)
+    from apps.integrations.tpms_pull import pull_providers
+
+    return pull_providers(_organization(request)).as_dict()
+
+
+@router.post(
+    '/settings/integrations/therapy-pms/pull/appointments',
+    response=TherapyPmsPullResultSchema,
+)
+def pull_therapy_pms_appointments(request, data: TherapyPmsPullAppointmentsRequest):
+    """Pull appointments/sessions for a date range into this organization only."""
+    _require_manager(request)
+    from apps.integrations.tpms_pull import pull_appointments
+
+    return pull_appointments(
+        _organization(request),
+        from_date=data.from_date,
+        to_date=data.to_date,
+        patient_ids=data.patient_ids,
+        staff_ids=data.staff_ids,
+    ).as_dict()
 
 
 # ---------------------------------------------------------------------------
