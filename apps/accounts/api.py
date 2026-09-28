@@ -16,9 +16,11 @@ from .permissions import get_user_permissions, require_permission, resolve_permi
 from .schemas import (
     LoginRequest,
     LoginResponse,
+    MfaAccountSetupStartRequest,
     MfaCodeRequest,
     MfaRemoveRequest,
     MfaSetupResponse,
+    MfaSetupStartRequest,
     MfaStatusSchema,
     MfaTokenCodeRequest,
     MfaTokenRequest,
@@ -129,9 +131,24 @@ def _mfa_gate(tenant, tokens: TokenResponse):
     user = User.objects.select_related('mfa').get(id=tokens.user_id)
     if not mfa.needs_mfa(user):
         return tokens
+    setup_required = not user.mfa_enabled
+    method = None
+    if not setup_required:
+        method = user.mfa.method
+        if method == UserMFA.Method.EMAIL:
+            try:
+                mfa.send_email_otp(user)
+            except HttpError as exc:
+                # A code was already sent within the resend cooldown (e.g. signing
+                # back in moments after finishing setup) — that earlier code, or one
+                # from a still-open tab, may still be usable, so let the challenge
+                # through rather than blocking sign-in on a rate limit.
+                if exc.status_code != 429:
+                    raise
     return LoginResponse(
         mfa_required=True,
-        mfa_setup_required=not user.mfa_enabled,
+        mfa_setup_required=setup_required,
+        mfa_method=method,
         mfa_token=mfa.create_mfa_token(user, tenant.pk),
     )
 
@@ -144,11 +161,19 @@ def mfa_verify(request, data: MfaTokenCodeRequest):
     return _issue_tokens(user, org_id)
 
 
-@router.post('/mfa/setup/start', response=MfaSetupResponse, auth=None)
-def mfa_login_setup_start(request, data: MfaTokenRequest):
+@router.post('/mfa/resend', response={204: None}, auth=None)
+def mfa_login_resend(request, data: MfaTokenRequest):
     tenant = getattr(request, 'tenant', None)
     user, _org_id = mfa.user_from_mfa_token(data.mfa_token, getattr(tenant, 'pk', None))
-    return mfa.start_setup(user)
+    mfa.send_email_otp(user)
+    return 204, None
+
+
+@router.post('/mfa/setup/start', response=MfaSetupResponse, auth=None)
+def mfa_login_setup_start(request, data: MfaSetupStartRequest):
+    tenant = getattr(request, 'tenant', None)
+    user, _org_id = mfa.user_from_mfa_token(data.mfa_token, getattr(tenant, 'pk', None))
+    return mfa.start_setup(user, method=data.method)
 
 
 @router.post('/mfa/setup/confirm', response=TokenResponse, auth=None)
@@ -161,7 +186,8 @@ def mfa_login_setup_confirm(request, data: MfaTokenCodeRequest):
 
 def _mfa_status(user: User) -> MfaStatusSchema:
     fresh = User.objects.select_related('mfa').get(id=user.id)
-    return MfaStatusSchema(enabled=fresh.mfa_enabled, required=fresh.mfa_required)
+    method = fresh.mfa.method if hasattr(fresh, 'mfa') else None
+    return MfaStatusSchema(enabled=fresh.mfa_enabled, required=fresh.mfa_required, method=method)
 
 
 @router.get('/features', auth=jwt_auth_any_role)
@@ -177,14 +203,20 @@ def get_my_mfa(request):
 
 
 @router.post('/account/mfa/setup/start', response=MfaSetupResponse, auth=jwt_auth_any_role)
-def start_my_mfa_setup(request):
-    return mfa.start_setup(request.user)
+def start_my_mfa_setup(request, data: MfaAccountSetupStartRequest | None = None):
+    return mfa.start_setup(request.user, method=data.method if data else UserMFA.Method.TOTP)
 
 
 @router.post('/account/mfa/setup/confirm', response=MfaStatusSchema, auth=jwt_auth_any_role)
 def confirm_my_mfa_setup(request, data: MfaCodeRequest):
     mfa.check_code(request.user, data.code, activate=True)
     return _mfa_status(request.user)
+
+
+@router.post('/account/mfa/resend', response={204: None}, auth=jwt_auth_any_role)
+def resend_my_mfa(request):
+    mfa.send_email_otp(request.user)
+    return 204, None
 
 
 @router.post('/account/mfa/disable', response={204: None}, auth=jwt_auth_any_role)

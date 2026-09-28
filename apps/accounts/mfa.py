@@ -1,4 +1,5 @@
-"""Authenticator-app (TOTP) multi-factor authentication helpers.
+"""Multi-factor authentication helpers — authenticator app (TOTP) or a code
+emailed at sign-in time.
 
 Passwords are still verified by TherapyPMS at login; MFA is a second step that
 runs after that succeeds (see accounts.api.login). Until the code is verified,
@@ -30,6 +31,9 @@ TOTP_INTERVAL = 30
 MFA_TOKEN_MINUTES = 5
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_MINUTES = 5
+EMAIL_OTP_LENGTH = 6
+EMAIL_OTP_TTL_MINUTES = 10
+EMAIL_OTP_RESEND_COOLDOWN_SECONDS = 30
 
 
 def _fernet() -> Fernet:
@@ -58,36 +62,105 @@ def qr_data_uri(uri: str) -> str:
     return 'data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode()
 
 
-def start_setup(user: User) -> dict[str, str]:
+def mask_email(email: str) -> str:
+    local, _, domain = email.partition('@')
+    if not domain:
+        return email
+    masked_local = local[0] + '*' * max(len(local) - 1, 1) if len(local) <= 2 else local[0] + '*' * (len(local) - 2) + local[-1]
+    return f'{masked_local}@{domain}'
+
+
+def _hash_email_otp(code: str) -> str:
+    return hashlib.sha256(f'{settings.SECRET_KEY}:mfa-email-otp:{code}'.encode()).hexdigest()
+
+
+def _generate_email_otp() -> str:
+    return f'{secrets.randbelow(10 ** EMAIL_OTP_LENGTH):0{EMAIL_OTP_LENGTH}d}'
+
+
+def send_email_otp(user: User) -> None:
+    """(Re)send a one-time code to the user's account email, subject to a
+    resend cooldown so a client can't be used to spam the mailbox."""
+    from apps.notifications.service import _send_email
+
+    row = UserMFA.objects.filter(user=user).first()
+    if row is None or row.method != UserMFA.Method.EMAIL:
+        raise HttpError(400, 'Email verification is not set up for this account')
+
+    now = timezone.now()
+    if row.otp_last_sent_at and (now - row.otp_last_sent_at).total_seconds() < EMAIL_OTP_RESEND_COOLDOWN_SECONDS:
+        raise HttpError(429, 'Please wait a moment before requesting another code.')
+
+    code = _generate_email_otp()
+    row.otp_code_hash = _hash_email_otp(code)
+    row.otp_expires_at = now + timedelta(minutes=EMAIL_OTP_TTL_MINUTES)
+    row.otp_last_sent_at = now
+    row.save(update_fields=['otp_code_hash', 'otp_expires_at', 'otp_last_sent_at'])
+
+    _send_email(
+        user.email,
+        'Your Progressly verification code',
+        f'Your verification code is {code}. It expires in {EMAIL_OTP_TTL_MINUTES} minutes. '
+        'If you did not request this, you can ignore this email.',
+        {},
+    )
+
+
+def start_setup(user: User, method: str = UserMFA.Method.TOTP) -> dict[str, Any]:
     """(Re)start enrolment. Refuses if MFA is already active."""
     mfa = UserMFA.objects.filter(user=user).first()
     if mfa and mfa.is_active:
         raise HttpError(400, 'MFA is already set up for this account')
+
+    if method == UserMFA.Method.EMAIL:
+        if mfa:
+            mfa.method = UserMFA.Method.EMAIL
+            mfa.secret_encrypted = None
+            mfa.failed_attempts = 0
+            mfa.locked_until = None
+            mfa.last_used_step = None
+            mfa.save()
+        else:
+            UserMFA.objects.create(user=user, method=UserMFA.Method.EMAIL)
+        send_email_otp(user)
+        return {'method': UserMFA.Method.EMAIL, 'email_masked': mask_email(user.email)}
+
     secret = pyotp.random_base32()
     if mfa:
+        mfa.method = UserMFA.Method.TOTP
         mfa.secret_encrypted = encrypt_secret(secret)
         mfa.failed_attempts = 0
         mfa.locked_until = None
         mfa.last_used_step = None
         mfa.save()
     else:
-        UserMFA.objects.create(user=user, secret_encrypted=encrypt_secret(secret))
+        UserMFA.objects.create(user=user, method=UserMFA.Method.TOTP, secret_encrypted=encrypt_secret(secret))
     uri = provisioning_uri(user, secret)
-    return {'secret': secret, 'otpauth_uri': uri, 'qr_code': qr_data_uri(uri)}
+    return {'method': UserMFA.Method.TOTP, 'secret': secret, 'otpauth_uri': uri, 'qr_code': qr_data_uri(uri)}
 
 
-def check_code(user: User, code: str, *, activate: bool = False) -> None:
-    """Validate a 6-digit code or raise HttpError. Locks the account's MFA
-    after repeated failures and rejects re-use of an already-accepted code."""
-    mfa = UserMFA.objects.filter(user=user).first()
-    if mfa is None or (not mfa.is_active and not activate):
-        raise HttpError(400, 'MFA is not set up for this account')
+def _check_email_code(mfa: UserMFA, code: str, *, activate: bool, now) -> None:
+    valid = bool(mfa.otp_code_hash) and bool(mfa.otp_expires_at) and mfa.otp_expires_at > now \
+        and hmac.compare_digest(mfa.otp_code_hash, _hash_email_otp(code))
+    if not valid:
+        mfa.failed_attempts += 1
+        if mfa.failed_attempts >= MAX_FAILED_ATTEMPTS:
+            mfa.locked_until = now + timedelta(minutes=LOCKOUT_MINUTES)
+            mfa.failed_attempts = 0
+        mfa.save(update_fields=['failed_attempts', 'locked_until'])
+        raise HttpError(400, 'Invalid verification code')
 
-    now = timezone.now()
-    if mfa.locked_until and mfa.locked_until > now:
-        raise HttpError(429, 'Too many incorrect codes. Try again in a few minutes.')
+    mfa.failed_attempts = 0
+    mfa.locked_until = None
+    mfa.otp_code_hash = None
+    mfa.otp_expires_at = None
+    if activate and not mfa.is_active:
+        mfa.is_active = True
+        mfa.confirmed_at = now
+    mfa.save()
 
-    code = (code or '').strip().replace(' ', '')
+
+def _check_totp_code(mfa: UserMFA, code: str, *, activate: bool, now) -> None:
     totp = pyotp.TOTP(decrypt_secret(mfa.secret_encrypted), interval=TOTP_INTERVAL)
     current_step = int(time.time() // TOTP_INTERVAL)
     matched_step = None
@@ -111,6 +184,24 @@ def check_code(user: User, code: str, *, activate: bool = False) -> None:
         mfa.is_active = True
         mfa.confirmed_at = now
     mfa.save()
+
+
+def check_code(user: User, code: str, *, activate: bool = False) -> None:
+    """Validate a 6-digit code or raise HttpError. Locks the account's MFA
+    after repeated failures and rejects re-use of an already-accepted code."""
+    mfa = UserMFA.objects.filter(user=user).first()
+    if mfa is None or (not mfa.is_active and not activate):
+        raise HttpError(400, 'MFA is not set up for this account')
+
+    now = timezone.now()
+    if mfa.locked_until and mfa.locked_until > now:
+        raise HttpError(429, 'Too many incorrect codes. Try again in a few minutes.')
+
+    code = (code or '').strip().replace(' ', '')
+    if mfa.method == UserMFA.Method.EMAIL:
+        _check_email_code(mfa, code, activate=activate, now=now)
+    else:
+        _check_totp_code(mfa, code, activate=activate, now=now)
 
 
 def create_mfa_token(user: User, tenant_id: int) -> str:

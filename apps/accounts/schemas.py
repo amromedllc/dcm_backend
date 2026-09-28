@@ -33,11 +33,21 @@ class LoginResponse(Schema):
     full_name: str | None = None
     mfa_required: bool = False
     mfa_setup_required: bool = False
+    mfa_method: str | None = None
     mfa_token: str | None = None
 
 
 class MfaTokenRequest(Schema):
     mfa_token: str
+
+
+class MfaSetupStartRequest(Schema):
+    mfa_token: str
+    method: str = 'totp'
+
+
+class MfaAccountSetupStartRequest(Schema):
+    method: str = 'totp'
 
 
 class MfaTokenCodeRequest(Schema):
@@ -50,14 +60,17 @@ class MfaCodeRequest(Schema):
 
 
 class MfaSetupResponse(Schema):
-    secret: str
-    otpauth_uri: str
-    qr_code: str
+    method: str
+    secret: str | None = None
+    otpauth_uri: str | None = None
+    qr_code: str | None = None
+    email_masked: str | None = None
 
 
 class MfaStatusSchema(Schema):
     enabled: bool
     required: bool
+    method: str | None = None
 
 
 class MfaRemoveRequest(Schema):
