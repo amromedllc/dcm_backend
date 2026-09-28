@@ -69,3 +69,51 @@ class TokenResolverTests(TestCase):
             tokens = resolve_template_tokens(self._note(self.forms_tmpl))
             self.assertEqual(tokens['session.date'], '2026-05-01')
             self.assertNotIn('session.start_time', tokens)
+
+    def test_notes_template_with_body_resolves_too(self):
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            template = NoteTemplate.objects.create(
+                name='Session note', template_type='notes', body_template=_BODY, fields=[],
+            )
+            tokens = resolve_template_tokens(self._note(template, session_run=self.session))
+            self.assertEqual(tokens['client.full_name'], 'Sam Lee')
+
+    def test_session_notes_gathers_message_and_trial_notes(self):
+        from django.utils import timezone
+        from apps.sessions.models import TrialEvent
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            self.session.message_to_therapist = 'Great session'
+            self.session.save()
+            TrialEvent.objects.create(
+                session_run=self.session, organization=self.org, target_id=1, target_name='Sit',
+                response_score=1, trial_number=1, recorded_at=timezone.now(), staff_notes='Needed a gesture',
+            )
+            tokens = resolve_template_tokens(self._note(self.forms_tmpl, session_run=self.session))
+            self.assertEqual(tokens['session.notes'], 'Great session\nSit: Needed a gesture')
+
+    def test_unlinked_note_uses_authors_same_day_session_and_appointment(self):
+        from datetime import datetime, timedelta, timezone as dt_tz
+        from apps.sessions.models import Appointment
+        when = datetime(2026, 5, 1, 15, 0, tzinfo=dt_tz.utc)
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            SessionRun.objects.filter(id=self.session.id).update(started_at=when, ended_at=when + timedelta(hours=1))
+            Appointment.objects.create(
+                external_client_id=self.client_row.id, staff=self.staff, start_time=when, end_time=when + timedelta(hours=1),
+                organization=self.org,
+            )
+            tokens = resolve_template_tokens(self._note(self.forms_tmpl))  # not linked to a session
+            self.assertIn('session.start_time', tokens)
+            self.assertIn('session.end_time', tokens)
+            self.assertIn('appointment.time', tokens)
+
+    def test_other_staffs_session_is_never_borrowed(self):
+        from datetime import datetime, timezone as dt_tz
+        other = User.objects.create_user(
+            email='tk-other@example.com', password='x', organization=self.org, role=User.Role.STAFF,
+        )
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            SessionRun.objects.filter(id=self.session.id).update(
+                started_at=datetime(2026, 5, 1, 15, 0, tzinfo=dt_tz.utc), staff=other,
+            )
+            tokens = resolve_template_tokens(self._note(self.forms_tmpl))
+            self.assertNotIn('session.start_time', tokens)

@@ -13,10 +13,13 @@ from .schemas import (
     LessonNoteSchema, LessonNoteListSchema, NoteCreateRequest, NoteUpdateRequest,
     NoteRejectRequest, NoteSignatureSchema, SignNoteRequest,
     NoteTemplateSchema, NoteTemplateCreateRequest, NoteTemplateUpdateRequest,
+    NoteTemplateDraftRequest, NoteTemplateDraftSchema,
     ReviewQueueItem,
     NoteAssignmentSchema, NoteAssignmentCreateRequest,
 )
-from .services import submit_note, approve_note, reject_note, resolve_template_tokens
+from shared.ai_client import AIError
+from .template_draft import generate_template_draft
+from .services import submit_note, approve_note, reject_note, resolve_template_tokens, apply_session_autofill
 
 router = Router(auth=partner_auth)
 
@@ -32,6 +35,23 @@ def _require_supervisor(request):
 
 def _require_template_manager(request, action: str = 'view'):
     require_permission(request, f'templates_{action}')
+
+
+def _require_any_permission(request, permissions: tuple[str, ...]) -> None:
+    from apps.accounts.permissions import resolve_permission_organization, user_has_permission
+    organization = resolve_permission_organization(request)
+    if not any(user_has_permission(request.user, organization, p) for p in permissions):
+        raise HttpError(403, 'Insufficient permissions')
+
+
+def _require_notes_read(request) -> None:
+    """Viewing notes: the client Notes tab, the notes list permission, or the review queue."""
+    _require_any_permission(request, ('client_notes', 'notes_view', 'review_queue_view'))
+
+
+def _require_template_read(request) -> None:
+    """Reading note templates: the Templates menu, or anyone who fills in notes."""
+    _require_any_permission(request, ('templates_view', 'notes_view', 'client_notes', 'notes_create', 'notes_edit'))
 
 
 def _get_note_or_404(note_id: int) -> LessonNote:
@@ -88,6 +108,7 @@ def _serialize_note(note: LessonNote) -> dict:
 
 @router.get('/templates/notes', response=list[NoteTemplateSchema])
 def list_note_templates(request):
+    _require_template_read(request)
     return list(NoteTemplate.objects.filter(is_active=True))
 
 
@@ -98,8 +119,27 @@ def create_note_template(request, data: NoteTemplateCreateRequest):
     return 201, template
 
 
+@router.post('/templates/notes/ai-draft', response=NoteTemplateDraftSchema)
+def draft_note_template_with_ai(request, data: NoteTemplateDraftRequest):
+    """Draft a note template from a library program. Nothing is saved: the template form
+    fills in and the person reviews it. Only library programs are accepted, so no client
+    information can reach the model."""
+    _require_template_manager(request, 'create')
+    from apps.programs.api import _org_qs
+    from apps.programs.models import Program
+    try:
+        program = _org_qs(request).prefetch_related('targets').get(id=data.program_id)
+    except Program.DoesNotExist:
+        raise HttpError(404, 'Program not found')
+    try:
+        return generate_template_draft(program, data.instruction)
+    except AIError as exc:
+        raise HttpError(exc.status, str(exc)) from exc
+
+
 @router.get('/templates/notes/{template_id}', response=NoteTemplateSchema)
 def get_note_template(request, template_id: int):
+    _require_template_read(request)
     try:
         return NoteTemplate.objects.get(id=template_id)
     except NoteTemplate.DoesNotExist:
@@ -143,6 +183,7 @@ def list_notes(
     date_from: date | None = None,
     date_to: date | None = None,
 ):
+    _require_notes_read(request)
     qs = LessonNote.objects.all()
 
     if request.user.role == 'staff':
@@ -184,6 +225,24 @@ def list_notes(
     return result
 
 
+@router.get('/notes/preview-tokens')
+def preview_note_tokens(request, template_id: int, client_id: int, note_date: date, session_run_id: int | None = None, appointment_id: int | None = None):
+    """Resolve a template's dynamic details (client, session, programs, user...) for a note that
+    hasn't been created yet, so the New Note form can show real values instead of [Label] badges."""
+    require_permission(request, 'notes_create')
+    from apps.sessions.models import SessionRun
+    try:
+        template = NoteTemplate.objects.get(id=template_id)
+    except NoteTemplate.DoesNotExist:
+        raise HttpError(404, 'Template not found')
+    session = SessionRun.objects.filter(id=session_run_id).first() if session_run_id else None
+    draft = LessonNote(
+        template=template, external_client_id=client_id, staff=request.user,
+        note_date=note_date, session_run=session,
+    )
+    return {'dynamic_fields': resolve_template_tokens(draft, appointment_id)}
+
+
 @router.post('/notes', response={201: LessonNoteSchema})
 def create_note(request, data: NoteCreateRequest):
     require_permission(request, 'notes_create')
@@ -198,12 +257,28 @@ def create_note(request, data: NoteCreateRequest):
     )
     if assignment_id:
         NoteAssignment.objects.filter(id=assignment_id).update(note=note)
+    apply_session_autofill(note, overwrite=False)
     note = LessonNote.objects.prefetch_related('signatures').get(id=note.id)
     return 201, _serialize_note(note)
 
 
+@router.post('/notes/{note_id}/refill-from-session', response=LessonNoteSchema)
+def refill_note_from_session(request, note_id: int):
+    """Re-fill the note's auto-fill fields from the session's current data (for example after the
+    session's data was corrected). Replaces whatever is in those fields."""
+    require_permission(request, 'notes_edit')
+    note = _get_note_or_404(note_id)
+    _assert_note_access(note, request)
+    if not note.is_editable:
+        raise HttpError(409, f'Note is {note.status} and cannot be edited')
+    apply_session_autofill(note, overwrite=True)
+    note = LessonNote.objects.prefetch_related('signatures').get(id=note.id)
+    return _serialize_note(note)
+
+
 @router.get('/notes/{note_id}', response=LessonNoteSchema)
 def get_note(request, note_id: int):
+    _require_notes_read(request)
     note = _get_note_or_404(note_id)
     _assert_note_access(note, request)
     return _serialize_note(note)
@@ -240,6 +315,7 @@ def delete_note(request, note_id: int):
 
 @router.post('/notes/{note_id}/submit', response=LessonNoteSchema)
 def submit(request, note_id: int):
+    require_permission(request, 'note_submit')
     note = _get_note_or_404(note_id)
     _assert_note_access(note, request)
     submit_note(note, request.user)
@@ -274,6 +350,7 @@ def reject(request, note_id: int, data: NoteRejectRequest):
 
 @router.get('/notes/{note_id}/signatures', response=list[NoteSignatureSchema])
 def list_signatures(request, note_id: int):
+    _require_notes_read(request)
     note = _get_note_or_404(note_id)
     _assert_note_access(note, request)
     return list(note.signatures.all())
@@ -388,6 +465,7 @@ def _serialize_assignment(a: NoteAssignment) -> dict:
 
 @router.get('/notes/assignments', response=list[NoteAssignmentSchema])
 def list_assignments(request, appointment_id: int):
+    _require_notes_read(request)
     qs = (
         NoteAssignment.objects
         .filter(external_appointment_id=appointment_id)

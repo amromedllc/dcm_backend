@@ -1327,3 +1327,76 @@ def get_duration_occurrences(target_ids: list[int], date_from: date, date_to: da
             'duration_seconds': event['duration_seconds'],
         })
     return result
+
+
+def get_assessment_summary(program_id: int) -> dict:
+    """Per-area (module) summary for an assessment program.
+
+    A skill's score for a session is the average of its scored trials as a
+    percentage of the highest score its scoring template allows (a 0/1/2 rating
+    scale tops out at 2; with no template a trial is 0 or 1). "Latest" is the
+    most recent session that scored the skill and "previous" the one before it,
+    so repeating the assessment shows change over time."""
+    targets = list(
+        Target.objects.filter(program_id=program_id)
+        .select_related('module', 'prompting_template')
+        .order_by('module__display_order', 'module__name', 'display_order', 'id')
+    )
+    ids = [t.id for t in targets]
+
+    def top_score(target) -> int:
+        levels = (target.prompting_template.levels if target.prompting_template else None) or []
+        return max([lvl.get('score', 0) for lvl in levels] + [1]) if levels else 1
+
+    per_session: dict[int, dict[int, dict]] = defaultdict(dict)
+    for row in (
+        TrialEvent.objects.filter(target_id__in=ids)
+        .values('target_id', 'session_run_id', 'response_score', 'recorded_at__date')
+    ):
+        entry = per_session[row['target_id']].setdefault(
+            row['session_run_id'], {'total': 0, 'count': 0, 'date': row['recorded_at__date']},
+        )
+        entry['total'] += row['response_score']
+        entry['count'] += 1
+        entry['date'] = max(entry['date'], row['recorded_at__date'])
+
+    areas: dict[int | None, dict] = {}
+    for target in targets:
+        module_id = target.module_id
+        area = areas.setdefault(module_id, {
+            'module_id': module_id,
+            'module_name': target.module.name if module_id else 'Other skills',
+            'skills': [],
+        })
+        top = top_score(target)
+        sessions = sorted(per_session.get(target.id, {}).items(), key=lambda item: (item[1]['date'], item[0]))
+        pcts = [round(v['total'] / v['count'] / top * 100, 1) for _, v in sessions if v['count']]
+        latest = pcts[-1] if pcts else None
+        previous = pcts[-2] if len(pcts) >= 2 else None
+        area['skills'].append({
+            'target_id': target.id,
+            'target_name': target.name,
+            'latest_pct': latest,
+            'previous_pct': previous,
+            'change': round(latest - previous, 1) if latest is not None and previous is not None else None,
+            'last_date': sessions[-1][1]['date'] if sessions else None,
+            'sessions_scored': len(sessions),
+        })
+
+    result_areas = []
+    for area in areas.values():
+        skills = area['skills']
+        latest = [s['latest_pct'] for s in skills if s['latest_pct'] is not None]
+        both = [(s['latest_pct'], s['previous_pct']) for s in skills if s['previous_pct'] is not None]
+        dates = [s['last_date'] for s in skills if s['last_date']]
+        result_areas.append({
+            'module_id': area['module_id'],
+            'module_name': area['module_name'],
+            'total_skills': len(skills),
+            'scored_skills': len(latest),
+            'latest_avg_pct': round(sum(latest) / len(latest), 1) if latest else None,
+            'change': round(sum(a - b for a, b in both) / len(both), 1) if both else None,
+            'last_date': max(dates) if dates else None,
+            'skills': skills,
+        })
+    return {'program_id': program_id, 'areas': result_areas}

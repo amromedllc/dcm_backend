@@ -582,99 +582,8 @@ def _html_to_reportlab_markup(html: str) -> str:
 
 
 def _render_note_pdf(note) -> bytes:
-    from xml.sax.saxutils import escape
-
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-    from reportlab.lib.units import inch
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buf, pagesize=letter,
-        topMargin=0.75 * inch, bottomMargin=0.75 * inch,
-        leftMargin=0.75 * inch, rightMargin=0.75 * inch,
-    )
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle('NoteTitle', parent=styles['Heading1'], fontSize=16, spaceAfter=4)
-    meta_style = ParagraphStyle('Meta', parent=styles['Normal'], fontSize=9, textColor=colors.HexColor('#64748b'))
-    label_style = ParagraphStyle(
-        'FieldLabel', parent=styles['Normal'], fontName='Helvetica-Bold',
-        fontSize=10, textColor=colors.HexColor('#475569'), spaceBefore=12, spaceAfter=2,
-    )
-    value_style = ParagraphStyle('FieldValue', parent=styles['Normal'], fontSize=10.5, leading=14)
-
-    story = [
-        Paragraph(escape(note.template.name) if note.template else 'Session Note', title_style),
-        Paragraph(
-            escape(
-                f'Client #{note.external_client_id}  ·  {note.note_date.strftime("%B %d, %Y")}  ·  '
-                f'Staff: {note.staff.full_name if note.staff else "—"}  ·  '
-                f'Status: {note.get_status_display()}'
-            ),
-            meta_style,
-        ),
-        Spacer(1, 14),
-    ]
-
-    body = note.body or {}
-    field_defs = note.template.fields if note.template else []
-    if field_defs:
-        for field in field_defs:
-            key = field.get('key')
-            raw = body.get(key)
-            if raw is None or raw == '':
-                display = '—'
-            elif isinstance(raw, list):
-                display = ', '.join(str(v) for v in raw) or '—'
-            elif isinstance(raw, bool):
-                display = 'Yes' if raw else 'No'
-            else:
-                display = str(raw)
-            # display comes from plain-text/number/select inputs, not HTML —
-            # a user typing e.g. "5 < 10" would otherwise break reportlab's
-            # strict XML-ish parser, so escape before adding the <br/> markup.
-            story.append(Paragraph(escape(str(field.get('label', key))), label_style))
-            story.append(Paragraph(escape(display).replace('\n', '<br/>'), value_style))
-    elif isinstance(body.get('text'), str):
-        # Free-form note — body.text is raw contenteditable innerHTML from
-        # NoteEditor, already entity-escaped by the browser for any literal
-        # text; map its tags onto reportlab's supported subset.
-        story.append(Paragraph(_html_to_reportlab_markup(body['text']), value_style))
-    else:
-        for key, raw in body.items():
-            story.append(Paragraph(escape(str(key)), label_style))
-            story.append(Paragraph(escape(str(raw)), value_style))
-
-    signatures = list(note.signatures.all())
-    if signatures:
-        story.append(Spacer(1, 18))
-        story.append(Paragraph('Signatures', label_style))
-        rows = [['Signer', 'Role', 'Type', 'Signed At']]
-        for sig in signatures:
-            rows.append([
-                sig.signer_name, sig.signer_role, sig.get_signature_type_display(),
-                sig.signed_at.strftime('%Y-%m-%d %H:%M UTC'),
-            ])
-        table = Table(rows, colWidths=[1.8 * inch, 1.4 * inch, 1.2 * inch, 1.8 * inch])
-        table.setStyle(TableStyle([
-            ('FONTSIZE', (0, 0), (-1, -1), 9),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#475569')),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('LINEBELOW', (0, 0), (-1, 0), 0.5, colors.HexColor('#cbd5e1')),
-            ('TOPPADDING', (0, 0), (-1, -1), 4),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-        ]))
-        story.append(table)
-
-    if note.rejection_reason:
-        story.append(Spacer(1, 14))
-        story.append(Paragraph('Rejection reason', label_style))
-        story.append(Paragraph(escape(note.rejection_reason).replace('\n', '<br/>'), value_style))
-
-    doc.build(story)
-    return buf.getvalue()
+    from .note_pdf import render_note_pdf
+    return render_note_pdf(note)
 
 
 def generate_note_pdf(export_id: int) -> None:
@@ -686,7 +595,7 @@ def generate_note_pdf(export_id: int) -> None:
         _mark_processing(export)
         params = export.params
 
-        note = LessonNote.objects.select_related('staff', 'template').prefetch_related('signatures').get(
+        note = LessonNote.objects.select_related('staff', 'template', 'session_run', 'organization').prefetch_related('signatures').get(
             id=params['note_id'],
         )
 

@@ -72,6 +72,20 @@ class AddStaffAssignmentRequest(Schema):
     is_primary: bool = False
 
 
+class TreatmentPlanSignatureSchema(Schema):
+    id: int
+    signer_id: int
+    signer_name: str
+    signer_role: str
+    signature_data: str
+    signed_at: datetime
+
+
+class SignTreatmentPlanRequest(Schema):
+    signature_data: str          # the signer's typed full name
+    attested: bool = False       # "I have reviewed this plan and it is accurate"
+
+
 class TreatmentPlanSchema(Schema):
     id: int
     client_id: int
@@ -84,6 +98,8 @@ class TreatmentPlanSchema(Schema):
     source_snapshot: dict
     finalized_at: datetime | None = None
     finalized_by_id: int | None = None
+    is_signed: bool = False
+    signatures: list[TreatmentPlanSignatureSchema] = []
     created_at: datetime
     updated_at: datetime
 
@@ -96,6 +112,7 @@ class TreatmentPlanListSchema(Schema):
     date_from: date | None = None
     date_to: date | None = None
     status: str
+    is_signed: bool = False
     created_at: datetime
     updated_at: datetime
 

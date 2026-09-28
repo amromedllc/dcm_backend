@@ -1,9 +1,9 @@
 from datetime import date, datetime
-from typing import Any
+from typing import Annotated, Any
 from ninja import Schema
 from pydantic import Field, field_validator
 
-from shared.schema_types import NonEmptyStr, SlugStr
+from shared.schema_types import NameStr200, NonEmptyStr, SlugStr
 from .models import Program, Target, PromptingTemplate, ProgramDataField, Lesson
 
 
@@ -227,41 +227,44 @@ class ProgramListSchema(Schema):
     last_run_at: datetime | None = None
     target_count: int = 0
     target_status_counts: dict[str, int] = {}
+    archived_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
 
 class ProgramCreateRequest(Schema):
     client_id: int
-    name: NonEmptyStr
+    name: NameStr200
     category: Program.Category = Program.Category.SKILL_ACQUISITION
     phase: Program.Phase = Program.Phase.ACTIVE
-    treatment_area: str = ''
-    tags: list[str] = []
-    baseline_notes: str = ''
-    objective: str = ''
-    instructions: str = ''
-    instructions_html: str = ''
-    professional_instructions_html: str = ''
+    treatment_area: str = Field(default='', max_length=200)
+    tags: list[Annotated[str, Field(max_length=100)]] = Field(default=[], max_length=50)
+    baseline_notes: str = Field(default='', max_length=50000)
+    objective: str = Field(default='', max_length=50000)
+    instructions: str = Field(default='', max_length=50000)
+    instructions_html: str = Field(default='', max_length=50000)
+    professional_instructions_html: str = Field(default='', max_length=50000)
     custom_field_values: dict[str, Any] = {}
     prompting_template_id: int | None = None
     hidden_prompt_level_labels: list[str] = []
     workflow_template_id: int | None = None
     display_order: int = Field(default=0, ge=0)
+    # Required for every category except Instructions Only; created together with the program.
+    targets: list['TargetCreateRequest'] = []
 
 
 class ProgramUpdateRequest(Schema):
-    name: NonEmptyStr | None = None
+    name: NameStr200 | None = None
     category: Program.Category | None = None
     status: Program.Status | None = None
     phase: Program.Phase | None = None
-    treatment_area: str | None = None
-    tags: list[str] | None = None
-    baseline_notes: str | None = None
-    objective: str | None = None
-    instructions: str | None = None
-    instructions_html: str | None = None
-    professional_instructions_html: str | None = None
+    treatment_area: str | None = Field(default=None, max_length=200)
+    tags: list[Annotated[str, Field(max_length=100)]] | None = Field(default=None, max_length=50)
+    baseline_notes: str | None = Field(default=None, max_length=50000)
+    objective: str | None = Field(default=None, max_length=50000)
+    instructions: str | None = Field(default=None, max_length=50000)
+    instructions_html: str | None = Field(default=None, max_length=50000)
+    professional_instructions_html: str | None = Field(default=None, max_length=50000)
     custom_field_values: dict[str, Any] | None = None
     prompting_template_id: int | None = None
     hidden_prompt_level_labels: list[str] | None = None
@@ -347,7 +350,7 @@ class TargetSchema(Schema):
 # Targets
 # ---------------------------------------------------------------------------
 class TargetCreateRequest(Schema):
-    name: NonEmptyStr
+    name: NameStr200
     # Plain str (not the enum) so legacy values on existing rows don't 422 an
     # otherwise-unrelated edit; the API validates it (see _validate_measurement_type).
     measurement_type: str = Target.MeasurementType.DISCRETE_TRIAL.value
@@ -365,7 +368,7 @@ class TargetCreateRequest(Schema):
     workflow_template_id: int | None = None
     sd_text: str = ''
     teaching_instructions: str = ''
-    instructions_html: str = ''
+    instructions_html: str = Field(default='', max_length=50000)
     interval_seconds: int = Field(default=60, ge=1)
     interval_sync_with_session: bool = False
     interval_warn_before_end: bool = False
@@ -381,7 +384,7 @@ class TargetCreateRequest(Schema):
 
 
 class TargetUpdateRequest(Schema):
-    name: NonEmptyStr | None = None
+    name: NameStr200 | None = None
     measurement_type: str | None = None
     measurement: str | None = None
     timer_type: str | None = None
@@ -395,7 +398,7 @@ class TargetUpdateRequest(Schema):
     workflow_template_id: int | None = None
     sd_text: str | None = None
     teaching_instructions: str | None = None
-    instructions_html: str | None = None
+    instructions_html: str | None = Field(default=None, max_length=50000)
     interval_seconds: int | None = Field(default=None, ge=1)
     interval_sync_with_session: bool | None = None
     interval_warn_before_end: bool | None = None
@@ -523,19 +526,23 @@ class OrgProgramSchema(Schema):
 
 
 class OrgProgramCreateRequest(Schema):
-    name: NonEmptyStr
+    name: NameStr200
     category: Program.Category = Program.Category.SKILL_ACQUISITION
     phase: Program.Phase = Program.Phase.ACTIVE
-    treatment_area: str = ''
-    tags: list[str] = []
-    objective: str = ''
-    instructions: str = ''
-    instructions_html: str = ''
-    professional_instructions_html: str = ''
+    treatment_area: str = Field(default='', max_length=200)
+    tags: list[Annotated[str, Field(max_length=100)]] = Field(default=[], max_length=50)
+    objective: str = Field(default='', max_length=50000)
+    instructions: str = Field(default='', max_length=50000)
+    instructions_html: str = Field(default='', max_length=50000)
+    professional_instructions_html: str = Field(default='', max_length=50000)
     custom_field_values: dict[str, Any] = {}
     prompting_template_id: int | None = None
     workflow_template_id: int | None = None
+    hidden_prompt_level_labels: list[str] = []
+    baseline_notes: str = Field(default='', max_length=50000)
     display_order: int = Field(default=0, ge=0)
+    # Required for every category except Instructions Only; created together with the program.
+    targets: list['TargetCreateRequest'] = []
 
 
 class AssignOrgProgramRequest(Schema):
@@ -986,3 +993,50 @@ class ProgramPrototypeUpdateRequest(Schema):
     professional_instructions_html: str | None = None
     display_order: int | None = Field(default=None, ge=0)
     is_active: bool | None = None
+
+
+# ---------------------------------------------------------------------------
+# AI-drafted assessments
+# ---------------------------------------------------------------------------
+
+class AssessmentDraftRequest(Schema):
+    description: str
+
+
+class AssessmentDraftAreaSchema(Schema):
+    name: str
+    skills: list[str]
+
+
+class AssessmentDraftSchema(Schema):
+    name: str
+    objective: str = ''
+    areas: list[AssessmentDraftAreaSchema]
+
+
+# ---------------------------------------------------------------------------
+# AI-drafted programs
+# ---------------------------------------------------------------------------
+
+class ProgramDraftRequest(Schema):
+    description: str
+
+
+class ProgramDraftTargetSchema(Schema):
+    name: str
+    measurement_type: str
+
+
+class ProgramDraftSchema(Schema):
+    name: str
+    category: str
+    treatment_area: str = ''
+    tags: list[str] = []
+    objective: str = ''
+    instructions_html: str = ''
+    targets: list[ProgramDraftTargetSchema] = []
+
+
+# The create requests above embed TargetCreateRequest, which is defined further down.
+ProgramCreateRequest.model_rebuild()
+OrgProgramCreateRequest.model_rebuild()

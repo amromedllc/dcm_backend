@@ -164,6 +164,13 @@ def _mfa_status(user: User) -> MfaStatusSchema:
     return MfaStatusSchema(enabled=fresh.mfa_enabled, required=fresh.mfa_required)
 
 
+@router.get('/features', auth=jwt_auth_any_role)
+def get_features(request):
+    """Which optional features are switched on for this deployment (used to show or hide them in the web app)."""
+    from shared import ai_client
+    return {'ai_enabled': ai_client.is_enabled()}
+
+
 @router.get('/account/mfa', response=MfaStatusSchema, auth=jwt_auth_any_role)
 def get_my_mfa(request):
     return _mfa_status(request.user)

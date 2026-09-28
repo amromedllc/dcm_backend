@@ -2,7 +2,7 @@ import os
 from types import SimpleNamespace
 
 from django.core.exceptions import ObjectDoesNotExist
-from django.db import models
+from django.db import models, transaction
 from django_tenants.utils import get_public_schema_name, schema_context
 from ninja import Router, File, Form
 from ninja.errors import HttpError
@@ -18,7 +18,10 @@ from apps.central_library.models import (
     CentralProgram, CentralProgramFolder, CentralTarget,
     ChangelogEntry, KnowledgeBaseMedia, KnowledgeBaseModule, KnowledgeBaseTopic,
 )
+from shared.ai_client import AIError
 from shared.html_sanitize import sanitize_kb_html
+from .assessment_draft import generate_assessment_draft, normalize_assessment_draft
+from .program_draft import generate_program_draft
 from shared.uploads import (
     IMAGE_CONTENT_TYPES, VIDEO_CONTENT_TYPES, validate_image_upload, validate_media_upload,
 )
@@ -34,6 +37,7 @@ from .models import (
 )
 from .schemas import (
     ProgramPrototypeSchema, ProgramPrototypeRequest, ProgramPrototypeUpdateRequest,
+    AssessmentDraftRequest, AssessmentDraftSchema, ProgramDraftRequest, ProgramDraftSchema,
     ProgramSchema, ProgramListSchema, ProgramCreateRequest, ProgramUpdateRequest, ProgramMaterialSchema,
     TargetSchema, TargetCreateRequest, TargetUpdateRequest,
     BulkUpdateTargetsRequest, BulkUpdateResult, ReorderTargetsRequest,
@@ -67,6 +71,46 @@ router = Router(auth=partner_auth)
 def _require_supervisor(request):
     if request.user.role not in ('admin', 'supervisor'):
         raise HttpError(403, 'Supervisor or admin access required')
+
+
+# Menu-permission gates for client programs. The permission matrix (Admin → Privileges) is the single source
+# of truth: the frontend hides buttons from it, and these make the API refuse the same requests.
+_PROGRAM_READ_PERMISSIONS = (
+    'client_programs', 'client_sessions', 'session_start', 'client_progress', 'client_history', 'client_report',
+)
+
+
+def _require_client_programs(request, action: str) -> None:
+    """action: 'create' | 'edit' | 'delete' — for endpoints that only ever concern a client's programs."""
+    require_permission(request, f'client_programs_{action}')
+
+
+def _require_program_write(request, action: str) -> None:
+    """Early gate for endpoints on an existing program: either kind of programs permission. The exact one
+    (client_programs_* or org_programs_*) is enforced by _check_program_write once the program is loaded."""
+    _require_any_permission(request, (f'client_programs_{action}', f'org_programs_{action}'))
+
+
+def _check_program_write(request, program: Program, action: str) -> None:
+    """Library (template) programs need org_programs_<action>; a client's programs need client_programs_<action>."""
+    require_permission(request, f"{'org' if program.is_template else 'client'}_programs_{action}")
+
+
+def _require_any_permission(request, permissions: tuple[str, ...]) -> None:
+    from apps.accounts.permissions import resolve_permission_organization, user_has_permission
+    organization = resolve_permission_organization(request)
+    if not any(user_has_permission(request.user, organization, p) for p in permissions):
+        raise HttpError(403, 'Insufficient permissions')
+
+
+def _require_program_read(request) -> None:
+    """Reading a client's programs and targets: the Programs menu, or the screens that run or report on them."""
+    _require_any_permission(request, _PROGRAM_READ_PERMISSIONS)
+
+
+def _require_org_program_read(request) -> None:
+    """Program Library: its own menu, or anyone who can add programs to a client (the 'From Library' picker)."""
+    _require_any_permission(request, ('org_programs_view', 'org_programs_create', 'org_programs_edit', 'client_programs_create'))
 
 
 def _accessible_external_client_ids(request) -> set[int]:
@@ -194,6 +238,25 @@ def _validate_treatment_area_and_tags(request, treatment_area: str | None, tags:
         invalid = [t for t in tags if t not in valid]
         if invalid:
             raise HttpError(400, f'Unknown tag(s): {", ".join(invalid)}')
+
+
+def _require_targets(category, targets: list) -> None:
+    """A new program must come with at least one target — except Instructions Only programs, which are
+    reference material and can't hold any."""
+    if category == Program.Category.INSTRUCTIONS_ONLY:
+        if targets:
+            raise HttpError(400, 'Instructions Only programs cannot have targets — they store reference information only')
+    elif not targets:
+        raise HttpError(400, 'Add at least one target to the program')
+
+
+def _validate_template_refs(request, prompting_template_id: int | None, workflow_template_id: int | None) -> None:
+    """A prompt-level or workflow template id must exist in this organization — otherwise a stale or
+    foreign id would either fail at the database (a 500) or link to another organization's template."""
+    if prompting_template_id and not _settings_qs(PromptingTemplate, request).filter(id=prompting_template_id).exists():
+        raise HttpError(400, 'Unknown prompt level template')
+    if workflow_template_id and not _settings_qs(WorkflowTemplate, request).filter(id=workflow_template_id).exists():
+        raise HttpError(400, 'Unknown workflow template')
 
 
 def _check_unique_name(model, request, name: str, *, exclude_id: int | None = None) -> None:
@@ -895,12 +958,14 @@ def _optimized_program_image_url(request, image_field) -> str | None:
 # ---------------------------------------------------------------------------
 
 @router.get('/programs', response=list[ProgramListSchema])
-def list_programs(request, client_id: int, category: str | None = None, status: str | None = None):
+def list_programs(request, client_id: int, category: str | None = None, status: str | None = None, include_archived: bool = False):
+    _require_program_read(request)
     qs = Program.objects.filter(
         external_client_id=client_id,
         external_client_id__in=_accessible_external_client_ids(request),
-        archived_at__isnull=True,
     )
+    if not include_archived:
+        qs = qs.filter(archived_at__isnull=True)
     if category:
         qs = qs.filter(category=category)
     if status:
@@ -924,34 +989,41 @@ def list_programs(request, client_id: int, category: str | None = None, status: 
 
 @router.post('/programs', response={201: ProgramSchema})
 def create_program(request, data: ProgramCreateRequest):
-    _require_supervisor(request)
+    _require_client_programs(request, 'create')
     _assert_client_accessible(request, data.client_id)
     _validate_treatment_area_and_tags(request, data.treatment_area, data.tags)
+    _validate_template_refs(request, data.prompting_template_id, data.workflow_template_id)
+    _require_targets(data.category, data.targets)
     prompting_template_id = data.prompting_template_id or _default_prompting_template_id(request)
-    program = Program.objects.create(
-        external_client_id=data.client_id,
-        name=data.name,
-        category=data.category,
-        phase=data.phase,
-        treatment_area=data.treatment_area,
-        tags=data.tags,
-        baseline_notes=data.baseline_notes,
-        objective=data.objective,
-        instructions=data.instructions,
-        instructions_html=data.instructions_html,
-        professional_instructions_html=data.professional_instructions_html,
-        custom_field_values=data.custom_field_values,
-        prompting_template_id=prompting_template_id,
-        hidden_prompt_level_labels=_normalize_hidden_prompt_labels(data.hidden_prompt_level_labels),
-        workflow_template_id=data.workflow_template_id,
-        display_order=data.display_order,
-        created_by=request.user,
-    )
-    return 201, {**_serialize_program(program, request), 'targets': []}
+    with transaction.atomic():
+        program = Program.objects.create(
+            external_client_id=data.client_id,
+            name=data.name,
+            category=data.category,
+            phase=data.phase,
+            treatment_area=data.treatment_area,
+            tags=data.tags,
+            baseline_notes=data.baseline_notes,
+            objective=data.objective,
+            instructions=data.instructions,
+            instructions_html=data.instructions_html,
+            professional_instructions_html=data.professional_instructions_html,
+            custom_field_values=data.custom_field_values,
+            prompting_template_id=prompting_template_id,
+            hidden_prompt_level_labels=_normalize_hidden_prompt_labels(data.hidden_prompt_level_labels),
+            workflow_template_id=data.workflow_template_id,
+            display_order=data.display_order,
+            created_by=request.user,
+        )
+        for target_data in data.targets:
+            _build_target(request, program, target_data)
+        result = _serialize_program(program, request, include_targets=True)
+    return 201, result
 
 
 @router.get('/programs/{program_id}', response=ProgramSchema)
 def get_program(request, program_id: int):
+    _require_program_read(request)
     program = _get_program_or_404(request, program_id)
     last_by_target = _last_run_by_target(program.targets.values_list('id', flat=True))
     return {
@@ -962,9 +1034,11 @@ def get_program(request, program_id: int):
 
 @router.patch('/programs/{program_id}', response=ProgramSchema)
 def update_program(request, program_id: int, data: ProgramUpdateRequest):
-    _require_supervisor(request)
+    _require_program_write(request, 'edit')
     program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     updates = data.dict(exclude_none=True)
+    _validate_template_refs(request, updates.get('prompting_template_id'), updates.get('workflow_template_id'))
     if updates.get('category') == Program.Category.INSTRUCTIONS_ONLY and program.targets.exists():
         raise HttpError(400, 'Cannot switch to Instructions Only while this program still has targets — remove them first')
     if 'treatment_area' in updates or 'tags' in updates:
@@ -996,8 +1070,9 @@ def update_program(request, program_id: int, data: ProgramUpdateRequest):
 
 @router.post('/programs/{program_id}/image', response=ProgramSchema)
 def upload_program_image(request, program_id: int, file: UploadedFile = File(...)):
-    _require_supervisor(request)
+    _require_program_write(request, 'edit')
     program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     validate_image_upload(file)
     program.image = file
     program.save(update_fields=['image'])
@@ -1006,6 +1081,7 @@ def upload_program_image(request, program_id: int, file: UploadedFile = File(...
 
 @router.get('/programs/{program_id}/materials', response=list[ProgramMaterialSchema])
 def list_program_materials(request, program_id: int):
+    _require_program_read(request)
     program = _get_program_or_404(request, program_id)
     return [
         _serialize_program_material(material, request)
@@ -1020,8 +1096,9 @@ def upload_program_material(
     file: UploadedFile = File(...),
     title: str = Form(''),
 ):
-    _require_supervisor(request)
+    _require_program_write(request, 'edit')
     program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     material_type = _program_material_type_for(file)
     material = ProgramMaterial.objects.create(
         program=program,
@@ -1037,23 +1114,44 @@ def upload_program_material(
 
 @router.delete('/program-materials/{material_id}', response={204: None})
 def delete_program_material(request, material_id: int):
-    _require_supervisor(request)
+    _require_program_write(request, 'edit')
     try:
         material = ProgramMaterial.objects.select_related('program').get(id=material_id)
     except ProgramMaterial.DoesNotExist:
         raise HttpError(404, 'Learning material not found')
-    _get_program_or_404(request, material.program_id)
+    program = _get_program_or_404(request, material.program_id)
+    _check_program_write(request, program, 'edit')
     material.delete()
     return 204, None
 
 
 @router.delete('/programs/{program_id}', response={204: None})
 def archive_program(request, program_id: int):
-    _require_supervisor(request)
+    _require_program_write(request, 'delete')
     program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'delete')
     program.status = Program.Status.ARCHIVED
     program.archived_at = timezone.now()
     program.save(update_fields=['status', 'archived_at'])
+    return 204, None
+
+
+@router.delete('/programs/{program_id}/permanent', response={204: None})
+def delete_program_permanently(request, program_id: int):
+    """Permanently delete a program that has already been archived. Refused when any of its targets has
+    recorded session data: that is clinical record data and must not silently disappear."""
+    _require_program_write(request, 'delete')
+    program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'delete')
+    if program.archived_at is None:
+        raise HttpError(400, 'Archive the program first — only archived programs can be permanently deleted')
+    if _last_run_by_target(program.targets.values_list('id', flat=True)):
+        raise HttpError(409, 'This program has recorded session data, so it cannot be permanently deleted. Leave it archived.')
+    try:
+        with transaction.atomic():
+            program.delete()
+    except models.ProtectedError:
+        raise HttpError(409, 'This program is still in use and cannot be permanently deleted. Leave it archived.')
     return 204, None
 
 
@@ -1352,6 +1450,7 @@ def _validate_target_status(request, status: str) -> None:
 
 @router.get('/programs/{program_id}/targets', response=list[TargetSchema])
 def list_targets(request, program_id: int, staff_view: bool = False):
+    _require_program_read(request)
     program = _get_program_or_404(request, program_id)
     qs = program.targets.all()
     if staff_view:
@@ -1363,13 +1462,11 @@ def list_targets(request, program_id: int, staff_view: bool = False):
     return targets
 
 
-@router.post('/programs/{program_id}/targets', response={201: TargetSchema})
-def create_target(request, program_id: int, data: TargetCreateRequest):
-    _require_supervisor(request)
-    program = _get_program_or_404(request, program_id)
-    if program.category == Program.Category.INSTRUCTIONS_ONLY:
-        raise HttpError(400, 'Instructions Only programs cannot have targets — they store reference information only')
+def _build_target(request, program: Program, data: TargetCreateRequest) -> Target:
+    """Validate and create one target on `program` — shared by the add-target endpoint and by program
+    creation, which creates the program and its targets together."""
     target_data = data.dict()
+    _validate_template_refs(request, target_data.get('prompting_template_id'), target_data.get('workflow_template_id'))
     if program.prompting_template_id and not target_data.get('prompting_template_id'):
         target_data['prompting_template_id'] = program.prompting_template_id
     if target_data.get('status'):
@@ -1403,19 +1500,32 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
     )
     if target.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
         _sync_target_sub_items(request, target, target.sub_items, request.user)
-    return 201, target
+    return target
+
+
+@router.post('/programs/{program_id}/targets', response={201: TargetSchema})
+def create_target(request, program_id: int, data: TargetCreateRequest):
+    _require_program_write(request, 'edit')
+    program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
+    if program.category == Program.Category.INSTRUCTIONS_ONLY:
+        raise HttpError(400, 'Instructions Only programs cannot have targets — they store reference information only')
+    return 201, _build_target(request, program, data)
 
 
 @router.get('/targets/{target_id}', response=TargetSchema)
 def get_target(request, target_id: int):
+    _require_program_read(request)
     return _get_target_or_404(request, target_id)
 
 
 @router.patch('/targets/{target_id}', response=TargetSchema)
 def update_target(request, target_id: int, data: TargetUpdateRequest):
-    _require_supervisor(request)
+    _require_program_write(request, 'edit')
     target = _get_target_or_404(request, target_id)
+    _check_program_write(request, target.program, 'edit')
     updates = data.dict(exclude_none=True)
+    _validate_template_refs(request, updates.get('prompting_template_id'), updates.get('workflow_template_id'))
     old_status = target.status
     for field, value in updates.items():
         setattr(target, field, value)
@@ -1497,14 +1607,16 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
 
 @router.delete('/targets/{target_id}', response={204: None})
 def delete_target(request, target_id: int):
-    _require_supervisor(request)
+    _require_program_write(request, 'edit')
     target = _get_target_or_404(request, target_id)
+    _check_program_write(request, target.program, 'edit')
     target.delete()
     return 204, None
 
 
 @router.get('/targets/{target_id}/history', response=list[TargetStatusChangeSchema])
 def target_history(request, target_id: int):
+    _require_program_read(request)
     _get_target_or_404(request, target_id)
     qs = (
         TargetStatusChange.objects
@@ -1535,6 +1647,7 @@ def target_history(request, target_id: int):
 
 @router.get('/clients/{client_id}/target-history', response=list[ClientTargetStatusChangeSchema])
 def client_target_history(request, client_id: int):
+    _require_program_read(request)
     _assert_client_accessible(request, client_id)
     qs = (
         TargetStatusChange.objects
@@ -1566,6 +1679,7 @@ def client_target_history(request, client_id: int):
 
 @router.get('/targets/{target_id}/prompt-level-history', response=list[TargetPromptLevelChangeSchema])
 def target_prompt_level_history(request, target_id: int):
+    _require_program_read(request)
     _get_target_or_404(request, target_id)
     qs = (
         TargetPromptLevelChange.objects
@@ -1598,6 +1712,7 @@ def target_prompt_level_history(request, target_id: int):
 
 @router.get('/clients/{client_id}/program-audit', response=list[ClientProgramAuditSchema])
 def client_program_audit(request, client_id: int):
+    _require_supervisor(request)
     _assert_client_accessible(request, client_id)
     if request.user.role not in ('admin', 'supervisor'):
         raise HttpError(403, 'Supervisor or admin access required')
@@ -1643,8 +1758,9 @@ _BULK_UPDATE_FK_MODELS = {
 @router.post('/programs/{program_id}/targets/bulk-update', response=BulkUpdateResult)
 def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest):
     """Update specific fields across multiple targets without touching unspecified fields."""
-    _require_supervisor(request)
+    _require_program_write(request, 'edit')
     program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     updates = data.dict(exclude={'target_ids'}, exclude_none=True)
     if not updates:
         raise HttpError(400, 'No fields to update were provided')
@@ -1715,8 +1831,9 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
 @router.post('/programs/{program_id}/targets/reorder', response={200: None})
 def reorder_targets(request, program_id: int, data: ReorderTargetsRequest):
     """Set display_order on targets based on the submitted ordered list of IDs."""
-    _require_supervisor(request)
-    _get_program_or_404(request, program_id)
+    _require_program_write(request, 'edit')
+    program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     for order, target_id in enumerate(data.ordered_ids):
         Target.objects.filter(id=target_id, program_id=program_id).update(display_order=order)
     return 200, None
@@ -2012,6 +2129,7 @@ def list_org_programs(
     request, category: str | None = None, status: str | None = None,
     folder_id: int | None = None, unfiled: bool = False,
 ):
+    _require_org_program_read(request)
     # Readable by anyone authenticated — used by Program Library and the
     # client "From Library" picker. Mutations are gated separately.
     qs = _org_qs(request).filter(archived_at__isnull=True)
@@ -2030,23 +2148,141 @@ def list_org_programs(
 def create_org_program(request, data: OrgProgramCreateRequest):
     require_permission(request, 'org_programs_create')
     _validate_treatment_area_and_tags(request, data.treatment_area, data.tags)
-    program = Program.objects.create(
-        is_template=True,
-        external_client_id=None,
-        name=data.name,
-        category=data.category,
-        phase=data.phase,
-        treatment_area=data.treatment_area,
-        tags=data.tags,
-        objective=data.objective,
-        instructions=data.instructions,
-        instructions_html=data.instructions_html,
-        professional_instructions_html=data.professional_instructions_html,
-        custom_field_values=data.custom_field_values,
-        prompting_template_id=data.prompting_template_id,
-        workflow_template_id=data.workflow_template_id,
-        display_order=data.display_order,
-        created_by=request.user,
+    _validate_template_refs(request, data.prompting_template_id, data.workflow_template_id)
+    _require_targets(data.category, data.targets)
+    with transaction.atomic():
+        program = Program.objects.create(
+            is_template=True,
+            external_client_id=None,
+            name=data.name,
+            category=data.category,
+            phase=data.phase,
+            treatment_area=data.treatment_area,
+            tags=data.tags,
+            objective=data.objective,
+            instructions=data.instructions,
+            instructions_html=data.instructions_html,
+            professional_instructions_html=data.professional_instructions_html,
+            custom_field_values=data.custom_field_values,
+            prompting_template_id=data.prompting_template_id,
+            workflow_template_id=data.workflow_template_id,
+            hidden_prompt_level_labels=data.hidden_prompt_level_labels,
+            baseline_notes=data.baseline_notes,
+            display_order=data.display_order,
+            created_by=request.user,
+        )
+        for target_data in data.targets:
+            _build_target(request, program, target_data)
+        result = _serialize_org_program(program, request, include_targets=True)
+    return 201, result
+
+
+ASSESSMENT_STARTER_NAME = 'Skills Assessment (Starter)'
+ASSESSMENT_STARTER_AREAS = ['Language', 'Social', 'Play', 'Daily Living', 'Motor']
+ASSESSMENT_RATING_TEMPLATE_NAME = 'Assessment Rating (0–2)'
+ASSESSMENT_RATING_LEVELS = [
+    {'label': 'Not present', 'score': 0, 'weight': 0, 'color': '#e74c3c', 'abbreviation': '0', 'is_success': False, 'exclude_from_fading': False},
+    {'label': 'Emerging', 'score': 1, 'weight': 1, 'color': '#f59e0b', 'abbreviation': '1', 'is_success': False, 'exclude_from_fading': False},
+    {'label': 'Present', 'score': 2, 'weight': 2, 'color': '#10b981', 'abbreviation': '2', 'is_success': True, 'exclude_from_fading': False},
+]
+
+
+def _assessment_rating_template(request) -> PromptingTemplate:
+    rating = _settings_qs(PromptingTemplate, request).filter(name=ASSESSMENT_RATING_TEMPLATE_NAME).first()
+    if rating is None:
+        rating = PromptingTemplate.objects.create(
+            name=ASSESSMENT_RATING_TEMPLATE_NAME,
+            description='Scores a skill as not present (0), emerging (1) or present (2).',
+            levels=ASSESSMENT_RATING_LEVELS,
+            outcome_measurement=PromptingTemplate.OutcomeMeasurement.RATING_SCALE,
+            created_by=request.user,
+        )
+    return rating
+
+
+def _create_assessment_program(request, name: str, objective: str, areas: list[tuple[str, list[str]]]) -> Program:
+    """An org-library assessment program: each area is a module, each skill a target scored 0–2."""
+    rating = _assessment_rating_template(request)
+    default_status = _settings_qs(TargetStatus, request, include_org_defaults=True).filter(is_default=True).first()
+    status = default_status.key if default_status else 'waiting'
+    with transaction.atomic():
+        program = Program.objects.create(
+            is_template=True,
+            external_client_id=None,
+            name=name,
+            category=Program.Category.ASSESSMENT,
+            phase=Program.Phase.ACTIVE,
+            objective=objective,
+            prompting_template=rating,
+            created_by=request.user,
+        )
+        for area_index, (area_name, skills) in enumerate(areas):
+            module = ProgramModule.objects.create(
+                program=program, name=area_name, display_order=area_index * 10, created_by=request.user,
+            )
+            for skill_index, skill_name in enumerate(skills, start=1):
+                Target.objects.create(
+                    program=program,
+                    module=module,
+                    name=skill_name,
+                    measurement_type='discrete_trial',
+                    measurement=default_measurement('discrete_trial'),
+                    status=status,
+                    prompting_template=rating,
+                    display_order=area_index * 100 + skill_index,
+                    created_by=request.user,
+                )
+    return program
+
+
+@router.post('/org-programs/assessment-starter', response={200: OrgProgramSchema, 201: OrgProgramSchema})
+def create_assessment_starter(request):
+    """A blank, editable skills-assessment program for the program library: five
+    common areas as modules, placeholder skills as targets, scored 0–2 with a
+    rating scale. It contains no content from any published assessment. Safe to
+    call twice — an existing starter is returned instead of creating another."""
+    require_permission(request, 'org_programs_create')
+    existing = (
+        Program.objects
+        .filter(_same_practice_q(request.user, 'created_by__'), is_template=True,
+                name=ASSESSMENT_STARTER_NAME, archived_at__isnull=True)
+        .first()
+    )
+    if existing:
+        return 200, _serialize_org_program(existing, request, include_targets=True)
+    program = _create_assessment_program(
+        request,
+        ASSESSMENT_STARTER_NAME,
+        'Replace the placeholder skills with your own, then copy this program to a client to score it.',
+        [
+            (area, [f'{area}: skill {n} (replace with your own)' for n in range(1, 4)])
+            for area in ASSESSMENT_STARTER_AREAS
+        ],
+    )
+    return 201, _serialize_org_program(program, request, include_targets=True)
+
+
+@router.post('/org-programs/assessment-draft', response=AssessmentDraftSchema)
+def draft_assessment_with_ai(request, data: AssessmentDraftRequest):
+    """Ask the AI for a draft assessment from a short description. Nothing is saved:
+    the draft goes back to the person to review and edit first."""
+    require_permission(request, 'org_programs_create')
+    try:
+        return generate_assessment_draft(data.description)
+    except AIError as exc:
+        raise HttpError(exc.status, str(exc)) from exc
+
+
+@router.post('/org-programs/assessment-from-draft', response={201: OrgProgramSchema})
+def create_assessment_from_draft(request, data: AssessmentDraftSchema):
+    """Save a reviewed (and possibly edited) draft as an assessment program in the library."""
+    require_permission(request, 'org_programs_create')
+    try:
+        clean = normalize_assessment_draft(data.dict())
+    except AIError as exc:
+        raise HttpError(400, str(exc)) from exc
+    program = _create_assessment_program(
+        request, clean['name'], clean['objective'], [(area['name'], area['skills']) for area in clean['areas']],
     )
     return 201, _serialize_org_program(program, request, include_targets=True)
 
@@ -2074,6 +2310,7 @@ def _serialize_program_folder(folder: ProgramFolder) -> dict:
 
 @router.get('/org-programs/folders', response=list[ProgramFolderSchema])
 def list_program_folders(request):
+    _require_org_program_read(request)
     return [_serialize_program_folder(f) for f in _settings_qs(ProgramFolder, request)]
 
 
@@ -2127,6 +2364,7 @@ def set_org_program_folder(request, program_id: int, data: SetProgramFolderReque
 
 @router.get('/org-programs/{program_id}', response=OrgProgramSchema)
 def get_org_program(request, program_id: int):
+    _require_org_program_read(request)
     try:
         program = _org_qs(request).prefetch_related('targets').get(id=program_id)
     except Program.DoesNotExist:
@@ -2303,7 +2541,7 @@ def assign_org_program_to_client(request, program_id: int, data: AssignOrgProgra
 @router.post('/programs/{program_id}/copy', response={201: ProgramSchema})
 def copy_program_to_client(request, program_id: int, data: AssignOrgProgramRequest):
     """Copy any client program to another client."""
-    _require_supervisor(request)
+    _require_client_programs(request, 'create')
     _assert_client_accessible(request, data.client_id)
     source = _get_program_or_404(request, program_id)
     if source.is_template:
@@ -2921,14 +3159,16 @@ def _serialize_module(module: ProgramModule) -> dict:
 
 @router.get('/programs/{program_id}/modules', response=list[ProgramModuleSchema])
 def list_modules(request, program_id: int):
+    _require_program_read(request)
     _get_program_or_404(request, program_id)
     return [_serialize_module(m) for m in ProgramModule.objects.filter(program_id=program_id).prefetch_related('submodules')]
 
 
 @router.post('/programs/{program_id}/modules', response={201: ProgramModuleSchema})
 def create_module(request, program_id: int, data: ProgramModuleRequest):
-    _require_supervisor(request)
+    _require_program_write(request, 'edit')
     program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     module = ProgramModule.objects.create(
         program=program,
         name=data.name,
@@ -2940,8 +3180,9 @@ def create_module(request, program_id: int, data: ProgramModuleRequest):
 
 @router.patch('/programs/{program_id}/modules/{module_id}', response=ProgramModuleSchema)
 def update_module(request, program_id: int, module_id: int, data: ProgramModuleRequest):
-    _require_supervisor(request)
-    _get_program_or_404(request, program_id)
+    _require_program_write(request, 'edit')
+    program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     try:
         module = ProgramModule.objects.prefetch_related('submodules').get(id=module_id, program_id=program_id)
     except ProgramModule.DoesNotExist:
@@ -2954,8 +3195,9 @@ def update_module(request, program_id: int, module_id: int, data: ProgramModuleR
 
 @router.delete('/programs/{program_id}/modules/{module_id}', response={204: None})
 def delete_module(request, program_id: int, module_id: int):
-    _require_supervisor(request)
-    _get_program_or_404(request, program_id)
+    _require_program_write(request, 'edit')
+    program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     try:
         ProgramModule.objects.get(id=module_id, program_id=program_id).delete()
     except ProgramModule.DoesNotExist:
@@ -2965,8 +3207,9 @@ def delete_module(request, program_id: int, module_id: int):
 
 @router.post('/programs/{program_id}/modules/reorder', response={200: None})
 def reorder_modules(request, program_id: int, data: ReorderModulesRequest):
-    _require_supervisor(request)
-    _get_program_or_404(request, program_id)
+    _require_program_write(request, 'edit')
+    program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     for order, module_id in enumerate(data.ordered_ids):
         ProgramModule.objects.filter(id=module_id, program_id=program_id).update(display_order=order)
     return 200, None
@@ -2974,8 +3217,9 @@ def reorder_modules(request, program_id: int, data: ReorderModulesRequest):
 
 @router.post('/programs/{program_id}/modules/{module_id}/submodules', response={201: ProgramSubmoduleSchema})
 def create_submodule(request, program_id: int, module_id: int, data: ProgramSubmoduleRequest):
-    _require_supervisor(request)
-    _get_program_or_404(request, program_id)
+    _require_program_write(request, 'edit')
+    program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     try:
         module = ProgramModule.objects.get(id=module_id, program_id=program_id)
     except ProgramModule.DoesNotExist:
@@ -2998,8 +3242,9 @@ def create_submodule(request, program_id: int, module_id: int, data: ProgramSubm
 
 @router.patch('/programs/{program_id}/modules/{module_id}/submodules/{submodule_id}', response=ProgramSubmoduleSchema)
 def update_submodule(request, program_id: int, module_id: int, submodule_id: int, data: ProgramSubmoduleRequest):
-    _require_supervisor(request)
-    _get_program_or_404(request, program_id)
+    _require_program_write(request, 'edit')
+    program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     try:
         submodule = ProgramSubmodule.objects.get(id=submodule_id, module_id=module_id)
     except ProgramSubmodule.DoesNotExist:
@@ -3019,8 +3264,9 @@ def update_submodule(request, program_id: int, module_id: int, submodule_id: int
 
 @router.delete('/programs/{program_id}/modules/{module_id}/submodules/{submodule_id}', response={204: None})
 def delete_submodule(request, program_id: int, module_id: int, submodule_id: int):
-    _require_supervisor(request)
-    _get_program_or_404(request, program_id)
+    _require_program_write(request, 'edit')
+    program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     try:
         ProgramSubmodule.objects.get(id=submodule_id, module_id=module_id).delete()
     except ProgramSubmodule.DoesNotExist:
@@ -3030,8 +3276,9 @@ def delete_submodule(request, program_id: int, module_id: int, submodule_id: int
 
 @router.post('/programs/{program_id}/modules/{module_id}/submodules/reorder', response={200: None})
 def reorder_submodules(request, program_id: int, module_id: int, data: ReorderSubmodulesRequest):
-    _require_supervisor(request)
-    _get_program_or_404(request, program_id)
+    _require_program_write(request, 'edit')
+    program = _get_program_or_404(request, program_id)
+    _check_program_write(request, program, 'edit')
     for order, submodule_id in enumerate(data.ordered_ids):
         ProgramSubmodule.objects.filter(id=submodule_id, module_id=module_id).update(display_order=order)
     return 200, None
@@ -3178,6 +3425,27 @@ def delete_program_prototype(request, pk: int):
     except ProgramPrototype.DoesNotExist:
         raise HttpError(404, 'Not found')
     return 204, None
+
+
+# ---------------------------------------------------------------------------
+# AI program draft
+# ---------------------------------------------------------------------------
+
+@router.post('/programs/settings/ai-draft', response=ProgramDraftSchema)
+def draft_program_with_ai(request, data: ProgramDraftRequest):
+    """Draft a program from a short description. Nothing is saved: the form fills in and
+    the person reviews it. The model only sees the description and this organization's
+    treatment-area and tag names."""
+    from apps.accounts.permissions import resolve_permission_organization, user_has_permission
+    organization = resolve_permission_organization(request)
+    if not any(user_has_permission(request.user, organization, p) for p in ('client_programs_create', 'org_programs_create')):
+        raise HttpError(403, 'Insufficient permissions')
+    areas = list(_settings_qs(TreatmentArea, request).filter(is_active=True).values_list('name', flat=True))
+    tags = list(_settings_qs(ProgramTag, request).filter(is_active=True).values_list('name', flat=True))
+    try:
+        return generate_program_draft(data.description, areas, tags)
+    except AIError as exc:
+        raise HttpError(exc.status, str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
