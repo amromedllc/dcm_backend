@@ -254,14 +254,24 @@ class RolePermission(models.Model):
 
 
 class UserMFA(models.Model):
-    """Authenticator-app (TOTP) enrolment for one user. The secret is stored
-    encrypted (see accounts.mfa). A row with is_active=False is a setup that
-    was started but never confirmed with a valid code."""
+    """MFA enrolment for one user — either an authenticator app (TOTP) or a
+    code emailed at sign-in time. The TOTP secret is stored encrypted (see
+    accounts.mfa); the email method instead stores a hash of the current
+    one-time code. A row with is_active=False is a setup that was started
+    but never confirmed with a valid code."""
+    class Method(models.TextChoices):
+        TOTP = 'totp', 'Authenticator app'
+        EMAIL = 'email', 'Email'
+
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='mfa')
-    secret_encrypted = models.TextField()
+    method = models.CharField(max_length=10, choices=Method.choices, default=Method.TOTP)
+    secret_encrypted = models.TextField(null=True, blank=True)
     is_active = models.BooleanField(default=False)
     confirmed_at = models.DateTimeField(null=True, blank=True)
     last_used_step = models.BigIntegerField(null=True, blank=True)
+    otp_code_hash = models.CharField(max_length=64, null=True, blank=True)
+    otp_expires_at = models.DateTimeField(null=True, blank=True)
+    otp_last_sent_at = models.DateTimeField(null=True, blank=True)
     failed_attempts = models.PositiveIntegerField(default=0)
     locked_until = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
