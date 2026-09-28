@@ -36,6 +36,7 @@ from .schemas import (
     StaffSchema,
 )
 from apps.clients.models import Client
+from apps.integrations.models import Provider
 from apps.integrations.tpms_auth_client import (
     TpmsAuthError,
     authenticate_raw as tpms_authenticate_raw,
@@ -284,14 +285,22 @@ def _tpms_staff_auth(request, tenant, email: str, payload: dict) -> TokenRespons
 
     external_admin_id = profile.external_admin_id
     if external_admin_id is None:
-        existing = User.objects.filter(email__iexact=profile.email or email).first()
-        if existing and existing.external_admin_id is not None:
-            external_admin_id = existing.external_admin_id
-        elif profile.access_token:
-            try:
-                external_admin_id = resolve_practice_admin_id(profile.access_token)
-            except Exception:
-                external_admin_id = None
+        # Prefer what Integrations → Pull Providers already synced for this
+        # employee over a live TherapyPMS lookup.
+        if profile.external_employee_id is not None:
+            provider = Provider.objects.filter(external_employee_id=profile.external_employee_id).first()
+            if provider is not None and provider.external_admin_id is not None:
+                external_admin_id = provider.external_admin_id
+
+        if external_admin_id is None:
+            existing = User.objects.filter(email__iexact=profile.email or email).first()
+            if existing and existing.external_admin_id is not None:
+                external_admin_id = existing.external_admin_id
+            elif profile.access_token:
+                try:
+                    external_admin_id = resolve_practice_admin_id(profile.access_token)
+                except Exception:
+                    external_admin_id = None
 
         if external_admin_id is None and not profile.is_admin and len(tenant_admin_ids) == 1:
             # Staff/provider tokens are already practice-scoped by TherapyPMS;

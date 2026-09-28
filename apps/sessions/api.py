@@ -535,68 +535,20 @@ def list_provider_appointments(
     external_employee_id: int,
     status: str | None = None,
 ):
-    """Return appointments for a provider via the TherapyPMS iOS API."""
-    from datetime import date as dt_date, timedelta
-    from apps.integrations.tpms_auth_client import (
-        TpmsAuthError,
-        clear_tpms_access_token,
-        get_tpms_access_token,
-        list_appointments,
-    )
-    from apps.clients.api import _serialize_tpms_api_appointments
-
-    token = get_tpms_access_token(request.user.id)
-    if not token:
-        raise HttpError(401, 'TherapyPMS session expired. Please log in again.')
-
-    # A provider's own schedule is scoped by provider_ids alone — no
-    # client_ids needed (that's for the "one specific client" case in
-    # clients.api.list_client_sessions). Sending client_ids=[] here omits
-    # the key from the request entirely (see list_appointments).
-    # No date filter requested here — ask TPMS for a wide window rather than
-    # an unbounded one, then _serialize_tpms_api_appointments's own
-    # from_date/to_date=None just means "don't filter further client-side."
-    today = dt_date.today()
-
-    try:
-        appointments = list_appointments(
-            token,
-            client_ids=[],
-            provider_ids=[int(external_employee_id)],
-            start_date=(today - timedelta(days=3 * 365)).strftime('%m/%d/%Y'),
-            end_date=(today + timedelta(days=3 * 365)).strftime('%m/%d/%Y'),
-        )
-    except TpmsAuthError as exc:
-        if exc.status_code in {401, 403}:
-            clear_tpms_access_token(request.user.id)
-            raise HttpError(401, 'TherapyPMS session expired. Please log in again.') from exc
-        raise HttpError(502, str(exc) or 'Failed to load appointments from TherapyPMS') from exc
-
-    # Use first matching DCM client id as a placeholder; serializer remaps per row via external_id
-    dcm_client_id = 0
-    return _serialize_tpms_api_appointments(
-        appointments=appointments,
-        dcm_client_id=dcm_client_id,
-        status=status,
-        from_date=None,
-        to_date=None,
-    )
+    """Return appointments for a provider from DCM's own synced data
+    (Integrations → Pull Appointments), matched via Appointment.staff's
+    external_employee_id — no live TherapyPMS call."""
+    qs = _appt_qs().filter(staff__external_employee_id=external_employee_id)
+    if status:
+        qs = qs.filter(status=status)
+    return list(qs.order_by('start_time'))
 
 
 @router.get('/my-schedule', response=list[AppointmentSchema])
 def my_schedule(request, date: str | None = None):
-    """
-    Return appointments for the logged-in staff member on a given date
-    (defaults to today). Uses TherapyPMS iOS API for TPMS-linked users.
-    """
+    """Return appointments for the logged-in staff member on a given date
+    (defaults to today), from DCM's own synced data."""
     from datetime import date as dt_date
-    from apps.integrations.tpms_auth_client import (
-        TpmsAuthError,
-        clear_tpms_access_token,
-        get_tpms_access_token,
-        list_appointments,
-    )
-    from apps.clients.api import _serialize_tpms_api_appointments
 
     target_date = date or dt_date.today().isoformat()
     try:
@@ -604,50 +556,10 @@ def my_schedule(request, date: str | None = None):
     except ValueError:
         raise HttpError(400, 'Invalid date — use YYYY-MM-DD')
 
-    def local_schedule():
-        return list(
-            _appt_qs()
-            .filter(staff_id=request.user.id, start_time__date=target)
-            .order_by('start_time')
-        )
-
-    employee_id = request.user.external_employee_id
-    if employee_id is None:
-        return local_schedule()
-
-    token = get_tpms_access_token(request.user.id)
-    if not token:
-        raise HttpError(401, 'TherapyPMS session expired. Please log in again.')
-
-    try:
-        # Own schedule — provider_ids alone, no client_ids (see
-        # list_provider_appointments above for the same reasoning).
-        appointments = list_appointments(
-            token,
-            client_ids=[],
-            provider_ids=[int(employee_id)],
-            start_date=target.strftime('%m/%d/%Y'),
-            end_date=target.strftime('%m/%d/%Y'),
-        )
-    except TpmsAuthError as exc:
-        if exc.status_code in {401, 403}:
-            clear_tpms_access_token(request.user.id)
-            raise HttpError(401, 'TherapyPMS session expired. Please log in again.') from exc
-        logger.warning(
-            'TPMS schedule unavailable for user_id=%s employee_id=%s date=%s; returning local appointments',
-            request.user.id,
-            employee_id,
-            target.isoformat(),
-            exc_info=True,
-        )
-        return local_schedule()
-
-    return _serialize_tpms_api_appointments(
-        appointments=appointments,
-        dcm_client_id=0,
-        status=None,
-        from_date=target,
-        to_date=target,
+    return list(
+        _appt_qs()
+        .filter(staff_id=request.user.id, start_time__date=target)
+        .order_by('start_time')
     )
 
 

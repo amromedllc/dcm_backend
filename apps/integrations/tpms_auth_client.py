@@ -15,8 +15,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 20
 DEFAULT_TPMS_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 days fallback
-PATIENT_LIST_MAX_PAGES = 100
-PATIENT_LIST_MAX_WORKERS = 8
 
 
 class TpmsAuthError(Exception):
@@ -344,12 +342,17 @@ def resolve_practice_admin_id(access_token: str) -> int | None:
     """
     Provider /ios/login payloads omit practice id. Probe authenticated iOS
     endpoints that often carry admin_id / facility_id.
+
+    Callers should check DCM's own synced Provider table (by
+    external_employee_id) before calling this — see
+    accounts.api._tpms_staff_auth — so this only runs for a provider DCM
+    hasn't seen via Integrations → Pull Providers yet. contact-info and the
+    /ios/patient/list fallback were dropped in favor of that local lookup.
     """
     if not access_token:
         return None
 
     probe_paths = (
-        ('/api/v1/ios/contact-info', 'contact-info'),
         ('/api/v1/ios/credentials', 'credentials'),
         ('/api/v1/ios/work-schedule', 'work-schedule'),
     )
@@ -367,15 +370,6 @@ def resolve_practice_admin_id(access_token: str) -> int | None:
         if found is not None:
             return found
 
-    try:
-        _, rows, _ = _fetch_patient_list_page(access_token, 1)
-    except TpmsAuthError:
-        return None
-
-    for row in rows[:20]:
-        found = _practice_id_from_payload(row)
-        if found is not None:
-            return found
     return None
 
 
@@ -428,81 +422,6 @@ def _extract_rows(payload: dict[str, Any], *block_keys: str) -> list[dict[str, A
             rows = found
 
     return rows
-
-
-def _fetch_patient_list_page(
-    access_token: str,
-    page: int,
-    *,
-    search: str | None = None,
-) -> tuple[int, list[dict[str, Any]], int]:
-    """Fetch one patient-list page. Returns (page, rows, last_page)."""
-    params: dict[str, Any] = {'page': page}
-    if search:
-        params['search'] = search
-
-    payload = _request(
-        'GET',
-        '/api/v1/ios/patient/list',
-        access_token=access_token,
-        params=params,
-        debug_label=f'patient-list-page-{page}',
-    )
-
-    status = str(payload.get('status', '')).lower()
-    if status in {'unauthorised', 'unauthorized', 'error', 'fail', 'failed'}:
-        message = payload.get('message') or 'Failed to load patients'
-        raise TpmsAuthError(str(message), payload=payload)
-
-    rows = _extract_rows(payload, 'patients')
-    block = payload.get('patients')
-    last_page = page
-    if isinstance(block, dict):
-        try:
-            last_page = int(block.get('last_page') or page)
-        except (TypeError, ValueError):
-            last_page = page
-
-    return page, rows, last_page
-
-
-def list_patients(access_token: str, *, search: str | None = None) -> list[dict[str, Any]]:
-    """
-    Fetch all pages from GET /api/v1/ios/patient/list using the TPMS Bearer token.
-
-    Page 1 is fetched first to learn `last_page`, then remaining pages are
-    fetched in parallel so large practices load faster.
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    _, first_rows, last_page = _fetch_patient_list_page(access_token, 1, search=search)
-    if last_page > PATIENT_LIST_MAX_PAGES:
-        logger.warning(
-            'TPMS patient list pagination exceeded %s pages (last_page=%s); capping',
-            PATIENT_LIST_MAX_PAGES,
-            last_page,
-        )
-    last_page = min(max(last_page, 1), PATIENT_LIST_MAX_PAGES)
-
-    pages: dict[int, list[dict[str, Any]]] = {1: first_rows}
-
-    remaining = list(range(2, last_page + 1))
-    if remaining:
-        workers = min(PATIENT_LIST_MAX_WORKERS, len(remaining))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(_fetch_patient_list_page, access_token, page, search=search): page
-                for page in remaining
-            }
-            for future in as_completed(futures):
-                page, rows, _ = future.result()
-                pages[page] = rows
-
-    patients: list[dict[str, Any]] = []
-    for page in range(1, last_page + 1):
-        patients.extend(pages.get(page, []))
-
-    return patients
 
 
 def list_providers(access_token: str) -> list[dict[str, Any]]:
@@ -563,63 +482,6 @@ def list_providers(access_token: str) -> list[dict[str, Any]]:
             raise TpmsAuthError(str(message), payload=payload)
         return _extract_rows(payload, 'provider_data', 'providers', 'data', 'result')
     return []
-
-
-def list_appointments(
-    access_token: str,
-    *,
-    provider_ids: list[int],
-    client_ids: list[int],
-    start_date: str,
-    end_date: str,
-) -> list[dict[str, Any]]:
-    """
-    POST /api/v1/ios/calendar — same request/response shape as the older
-    /api/v1/ios/appointments/list (which itself replaced
-    /api/v1/ios/appointment/recurring/list, which had no date range and used
-    "patient_ids"). Dates as MM/DD/YYYY, same report_range convention as
-    list_client_portal_appointments. Ids sent as strings.
-
-    Confirmed real row shape: {"session_id", "lock_icon", "break_icon",
-    "billable", "patient_id", "patient_name", "service_hour", "provider_id",
-    "provider_name", "pos", "scheduled_date", "scheduled_time", "status",
-    "address"} — "scheduled_time" combines start+end ("10:00 am to 12:30 pm")
-    like list_client_portal_appointments's "hours" field does.
-
-    Confirmed per-role request shape (2026-07-31) — the wire key for the
-    client-side filter is "patients_ids" (not "client_ids"; kept as
-    client_ids on this function's own signature for DCM-side clarity):
-    - Own schedule (my_schedule/list_provider_appointments): provider_ids
-      only, no patients_ids key at all.
-    - Supervisor/admin viewing one client's sessions: patients_ids only, no
-      provider_ids key at all (they see every provider for that client).
-    - Staff viewing one client's sessions: both provider_ids (their own) and
-      patients_ids (that one client).
-    Each key is omitted from the body entirely when its list is empty,
-    rather than sent as `[]`.
-    """
-    body: dict[str, Any] = {
-        'report_range': {'start_date': start_date, 'end_date': end_date},
-    }
-    if provider_ids:
-        body['provider_ids'] = [str(p) for p in provider_ids]
-    if client_ids:
-        body['patients_ids'] = [str(c) for c in client_ids]
-
-    payload = _request(
-        'POST',
-        '/api/v1/ios/calendar',
-        body=body,
-        access_token=access_token,
-        debug_label='appointments-list',
-    )
-
-    status = str(payload.get('status', '')).lower()
-    if status in {'unauthorised', 'unauthorized', 'error', 'fail', 'failed'}:
-        message = payload.get('message') or 'Failed to load appointments'
-        raise TpmsAuthError(str(message), payload=payload)
-
-    return _extract_rows(payload, 'appointments', 'data')
 
 
 def list_provider_calendar(
