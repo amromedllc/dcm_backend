@@ -149,6 +149,27 @@ class ErrorResponse(Schema):
     detail: str
 
 
+class PasswordSetLinkGenerateRequest(Schema):
+    expires_at: datetime
+
+
+class PasswordSetLinkGenerateResponse(Schema):
+    url: str
+    expires_at: datetime
+
+
+class PasswordSetLinkInfoResponse(Schema):
+    first_name: str
+    email_masked: str
+    expires_at: datetime
+
+
+class PasswordSetLinkSubmitRequest(Schema):
+    token: str
+    password: str = Field(min_length=8)
+    password_confirm: str
+
+
 class StaffSchema(Schema):
     id: int
     admin_id: int | None

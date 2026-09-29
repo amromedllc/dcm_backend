@@ -1,6 +1,8 @@
+import hashlib
 import logging
 import jwt
 from ninja import Router, Body
+from django.conf import settings
 from django.contrib.auth import authenticate
 from django.utils import timezone
 
@@ -10,7 +12,7 @@ from django.db import transaction
 from django.db.models import Q
 
 from . import mfa
-from .models import User, UserMFA
+from .models import PasswordSetLink, User, UserMFA
 from .auth import create_access_token, create_refresh_token, decode_token, jwt_auth, jwt_auth_any_role, token_tenant_mismatch
 from .permissions import get_user_permissions, require_permission, resolve_permission_organization
 from .schemas import (
@@ -33,6 +35,10 @@ from .schemas import (
     UserCreateRequest,
     UserUpdateRequest,
     ErrorResponse,
+    PasswordSetLinkGenerateRequest,
+    PasswordSetLinkGenerateResponse,
+    PasswordSetLinkInfoResponse,
+    PasswordSetLinkSubmitRequest,
     StaffSchema,
 )
 from apps.clients.models import Client
@@ -795,6 +801,74 @@ def _list_native_staffs(request, include_inactive: bool) -> list[StaffSchema]:
         )
         for u in qs.order_by('last_name', 'first_name')
     ]
+
+
+@router.post('/users/{user_id}/password-link', response=PasswordSetLinkGenerateResponse, auth=jwt_auth)
+def generate_password_set_link(request, user_id: int, data: PasswordSetLinkGenerateRequest):
+    """Admin-generated one-time link so a synced provider can set their DCM
+    login password, instead of relying on TherapyPMS's /ios/login. See
+    PasswordSetLink for why generating a new link expires any prior one."""
+    require_permission(request, 'admin_users_edit')
+    try:
+        user = User.objects.get(_same_practice_q(request.user), id=user_id)
+    except User.DoesNotExist:
+        raise HttpError(404, 'User not found')
+    if user.role == User.Role.CAREGIVER:
+        raise HttpError(400, 'Caregiver accounts sign in through the client portal, not this flow.')
+    if data.expires_at <= timezone.now():
+        raise HttpError(400, 'Expiration must be in the future')
+
+    link, raw_token = PasswordSetLink.generate(user, created_by=request.user, expires_at=data.expires_at)
+    base_url = getattr(settings, 'FRONTEND_BASE_URL', '').rstrip('/')
+    url = f'{base_url}/set-password?token={raw_token}'
+    return PasswordSetLinkGenerateResponse(url=url, expires_at=link.expires_at)
+
+
+@router.get('/password-link/{token}', response=PasswordSetLinkInfoResponse, auth=None)
+def get_password_set_link(request, token: str):
+    link = PasswordSetLink.verify(token)
+    if link is None:
+        raise HttpError(404, 'This link is invalid or has expired')
+    return PasswordSetLinkInfoResponse(
+        first_name=link.user.first_name,
+        email_masked=mfa.mask_email(link.user.email),
+        expires_at=link.expires_at,
+    )
+
+
+@router.post('/password-link/set-password', response=LoginResponse, auth=None)
+def submit_password_set_link(request, data: PasswordSetLinkSubmitRequest):
+    tenant = getattr(request, 'tenant', None)
+    if tenant is None:
+        raise HttpError(401, 'Invalid or expired link')
+    if data.password != data.password_confirm:
+        raise HttpError(400, 'Passwords do not match')
+
+    if not data.token.startswith('pwl_'):
+        raise HttpError(404, 'This link is invalid or has expired')
+    token_hash = hashlib.sha256(data.token.encode()).hexdigest()
+
+    with transaction.atomic():
+        # select_for_update + a fresh used_at/expires_at check inside the
+        # transaction — not just PasswordSetLink.verify() up front — so two
+        # concurrent requests for the same token can't both pass the check
+        # and both consume it.
+        link = (
+            PasswordSetLink.objects.select_for_update()
+            .select_related('user')
+            .filter(token_hash=token_hash)
+            .first()
+        )
+        if link is None or link.used_at is not None or link.expires_at < timezone.now():
+            raise HttpError(404, 'This link is invalid or has expired')
+
+        user = link.user
+        user.set_password(data.password)
+        user.save(update_fields=['password'])
+        link.used_at = timezone.now()
+        link.save(update_fields=['used_at'])
+
+    return _mfa_gate(tenant, _issue_tokens(user, tenant.pk))
 
 
 _ROLE_RANK = {
