@@ -5,6 +5,15 @@ from shared.schema_types import NonEmptyStr
 from .models import Client
 
 
+class ClientFilterOptionSchema(Schema):
+    """Minimal shape for a filter dropdown — see list_client_filter_options.
+    Deliberately not ClientSchema: this is DB-only, never touches TPMS, and
+    a filter control has no use for status/dates/etc."""
+    id: int
+    external_id: str
+    full_name: str
+
+
 class ClientSchema(Schema):
     id: int
     external_id: str

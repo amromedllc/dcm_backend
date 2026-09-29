@@ -56,6 +56,7 @@ from apps.sessions.schemas import AppointmentSchema
 from .models import Client, ClientStaffAssignment, TreatmentPlan, TreatmentPlanSignature
 from .schemas import (
     SignTreatmentPlanRequest,
+    ClientFilterOptionSchema,
     ClientSchema,
     ClientCreateRequest,
     ClientUpdateRequest,
@@ -418,28 +419,59 @@ def _sync_clients_from_tpms(
     )
 
 
+@router.get('/filter-options', response=list[ClientFilterOptionSchema])
+def list_client_filter_options(request, search: str | None = None):
+    """Dedicated, DB-only endpoint for filter dropdowns (e.g. the sidebar's
+    central client switcher) — deliberately separate from list_clients
+    below, which has a sync=True mode that calls TherapyPMS live and (per
+    its own docstring) actually fetches *providers*, not patients. This
+    endpoint never touches TPMS and always reflects exactly what
+    Integrations -> Pull Clients synced, with no sync param to misuse."""
+    qs = _get_accessible_clients(request).filter(status=Client.Status.ACTIVE)
+    if search:
+        qs = qs.filter(
+            Q(first_name__icontains=search)
+            | Q(last_name__icontains=search)
+            | Q(preferred_name__icontains=search)
+        )
+    return [
+        {'id': c.id, 'external_id': c.external_id, 'full_name': c.full_name}
+        for c in qs.order_by('last_name', 'first_name')
+    ]
+
+
 @router.get('', response=list[ClientSchema])
 def list_clients(
     request,
     include_inactive: bool = False,
     search: str | None = None,
-    sync: bool = True,
+    sync: bool = False,
 ):
     """
-    Returns providers scoped to the logged-in user's TherapyPMS session.
+    DB-only by default: returns DCM's own Client rows (populated by
+    Integrations → Pull Clients, or created natively) — same list every
+    caller (web, mobile) sees, deterministic, no live TherapyPMS dependency.
 
-    Uses GET /api/v1/ios/appointment/filter/providers with the TPMS Bearer
-    token captured at login, then upserts DCM Client rows so
-    programs/sessions keep a stable id. Note: Client.external_id now holds a
-    TPMS *provider* id, not a patient id — the client-sessions endpoint below
-    still treats it as a patient id and has not been updated to match.
+    sync=True opts into a live TherapyPMS round trip instead, which — despite
+    the name — actually fetches *providers*, not patients, via GET
+    /api/v1/ios/appointment/filter/providers with the TPMS Bearer token
+    captured at login, then upserts them into this same Client table
+    (Client.external_id ends up holding a TPMS *provider* id in that case,
+    not a patient id — the client-sessions endpoint below still treats it as
+    a patient id and has not been updated to match). Defaulting this to True
+    used to mean every plain "list my clients" call — from the web sidebar's
+    client switcher, the dashboard's recent-clients cards, and the mobile
+    app, none of which ever pass sync explicitly — silently overwrote real
+    pulled-client data with provider rows on every page load. Nothing in
+    this codebase opts into sync=True; it's kept only in case an external
+    caller (e.g. a partner API key) relies on it.
 
-    Falls back to DB-cached Client rows (same as native/non-TPMS orgs) when
-    there's no cached TPMS Bearer token for this session — staff/provider
-    logins no longer go through TherapyPMS at all (see accounts.api.login),
-    so that cache is never populated for them; same graceful-degradation
-    pattern already used by account_profile and the notifications provider
-    list, rather than hard-failing with 401.
+    Falls back to this same DB-only path when there's no cached TPMS Bearer
+    token for this session even with sync=True — staff/provider logins no
+    longer go through TherapyPMS at all (see accounts.api.login), so that
+    cache is never populated for them; same graceful-degradation pattern
+    already used by account_profile and the notifications provider list,
+    rather than hard-failing with 401.
     """
     if request.user.external_admin_id is None or not sync or not get_tpms_access_token(request.user.id):
         return _list_native_clients(request, include_inactive, search)
@@ -1000,23 +1032,32 @@ def list_client_sessions(
     Return appointments for a client from DCM's own synced data
     (Integrations → Pull Appointments) — no live TherapyPMS call.
 
-    /clients rows are now TPMS providers (see list_providers in
-    tpms_auth_client.py), so `Client.external_id` here is a provider id, not
-    a patient id. Matched against the local Appointment table via
-    Appointment.staff's external_employee_id (set for every appointment
-    pulled for that provider — see integrations.tpms_pull.pull_appointments).
+    Matched against the local Appointment table via external_client_id,
+    which integrations.tpms_pull.pull_appointments populates with the TPMS
+    *patient* id (see pull_appointments's external_client_id: patient_id) —
+    the same convention _list_native_client_sessions below already uses for
+    native-mode appointments, just keyed by client.external_id (the TPMS
+    patient id) instead of client.id (the local pk) for a TPMS-linked org.
+
+    (This used to join through Appointment.staff's external_employee_id
+    instead, on the assumption that Client rows held TPMS *providers* — that
+    assumption no longer holds now that Client is patient data again; see
+    accounts.api.login's cutover and the Pull Clients / central-filter fixes
+    from the same day. Matching on external_client_id directly is also
+    simpler: no dependency on Appointment.staff being resolved at all.)
 
     Access is scoped the same way _get_client_or_404/_get_accessible_clients
     scopes everything else in this app: any TPMS-linked staff can reach any
-    provider's schedule within their own practice (external_admin_id) — see
+    client's schedule within their own practice (external_admin_id) — see
     _get_accessible_clients's "TPMS-linked staff — practice-scoped" branch.
-    There is deliberately no extra "only your own provider id" restriction
-    here on top of that: staff routinely need to view/assign programs on a
-    colleague's sessions (e.g. covering another provider's client), and an
-    earlier version of this endpoint added that restriction, which silently
-    emptied the list for exactly that legitimate case instead of raising an
-    error — a program-assign call would succeed, but the very next refetch
-    of this endpoint (to show it) came back empty.
+    There is deliberately no extra "only your own assigned clients"
+    restriction here on top of that: staff routinely need to view/assign
+    programs on a colleague's sessions (e.g. covering another provider's
+    client), and an earlier version of this endpoint added an analogous
+    provider-ownership restriction, which silently emptied the list for
+    exactly that legitimate case instead of raising an error — a
+    program-assign call would succeed, but the very next refetch of this
+    endpoint (to show it) came back empty.
     """
     from django.db.models import Count as _Count
     from apps.sessions.models import Appointment as DcmAppointment
@@ -1027,11 +1068,11 @@ def list_client_sessions(
         return _list_native_client_sessions(request, client, status, from_date, to_date)
 
     try:
-        tpms_provider_id = int(client.external_id)
+        tpms_patient_id = int(client.external_id)
     except (TypeError, ValueError):
-        raise HttpError(400, 'Client is missing a valid TherapyPMS provider id')
+        raise HttpError(400, 'Client is missing a valid TherapyPMS patient id')
 
-    qs = DcmAppointment.objects.filter(staff__external_employee_id=tpms_provider_id).annotate(
+    qs = DcmAppointment.objects.filter(external_client_id=tpms_patient_id).annotate(
         assigned_program_count=_Count('lesson__lesson_programs', distinct=True),
     )
     if status:
