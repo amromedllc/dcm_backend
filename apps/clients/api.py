@@ -433,8 +433,15 @@ def list_clients(
     programs/sessions keep a stable id. Note: Client.external_id now holds a
     TPMS *provider* id, not a patient id — the client-sessions endpoint below
     still treats it as a patient id and has not been updated to match.
+
+    Falls back to DB-cached Client rows (same as native/non-TPMS orgs) when
+    there's no cached TPMS Bearer token for this session — staff/provider
+    logins no longer go through TherapyPMS at all (see accounts.api.login),
+    so that cache is never populated for them; same graceful-degradation
+    pattern already used by account_profile and the notifications provider
+    list, rather than hard-failing with 401.
     """
-    if request.user.external_admin_id is None or not sync:
+    if request.user.external_admin_id is None or not sync or not get_tpms_access_token(request.user.id):
         return _list_native_clients(request, include_inactive, search)
 
     return _sync_clients_from_tpms(

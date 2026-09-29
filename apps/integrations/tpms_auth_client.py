@@ -27,33 +27,16 @@ class TpmsAuthError(Exception):
 
 
 @dataclass(frozen=True)
-class TpmsAuthProfile:
-    """Normalized identity fields extracted from a successful TPMS login."""
-
-    email: str
-    first_name: str
-    last_name: str
-    external_admin_id: int | None
-    external_employee_id: int | None
-    is_admin: bool
-    employee_type: str | None
-    is_active: bool
-    access_token: str | None
-    raw: dict[str, Any]
-
-
-@dataclass(frozen=True)
 class TpmsClientPortalProfile:
     """Normalized identity fields extracted from a client-portal (parent/
     caregiver) TPMS login (account_type == 'client'/'patient').
 
-    Deliberately a SEPARATE type from TpmsAuthProfile, with no
-    external_admin_id/external_employee_id fields — a client-portal
-    payload's `user.id` is a TPMS *patient* id, and normalize_login_payload()
-    (the staff-oriented normalizer) was previously misreading that same id
-    as external_employee_id, which let a parent account get promoted to a
-    DCM staff session. Keeping this a structurally distinct type makes that
-    class of bug impossible rather than just fixed once.
+    Deliberately has no external_admin_id/external_employee_id fields — a
+    client-portal payload's `user.id` is a TPMS *patient* id. (Staff logins
+    no longer go through TherapyPMS at all — see accounts.api.login — but
+    this type predates that cutover and the distinction it encodes, that a
+    patient id must never be misread as an employee id, still matters for
+    this payload shape.)
     """
 
     email: str
@@ -303,12 +286,6 @@ def authenticate_admin_raw(email: str, password: str) -> dict[str, Any]:
     return payload
 
 
-def authenticate(email: str, password: str) -> TpmsAuthProfile:
-    """encrypt (email) + encrypt (password) → login → normalized staff profile."""
-    payload = authenticate_raw(email, password)
-    return normalize_login_payload(email, payload)
-
-
 def account_type_of(payload: dict[str, Any]) -> str:
     """Lowercased account_type from a raw /ios/login payload ('client', 'provider', ...)."""
     data = _unwrap_profile(payload)
@@ -335,41 +312,6 @@ def _practice_id_from_payload(payload: dict[str, Any]) -> int | None:
                     found = _practice_id_from_payload(item)
                     if found is not None:
                         return found
-    return None
-
-
-def resolve_practice_admin_id(access_token: str) -> int | None:
-    """
-    Provider /ios/login payloads omit practice id. Probe authenticated iOS
-    endpoints that often carry admin_id / facility_id.
-
-    Callers should check DCM's own synced Provider table (by
-    external_employee_id) before calling this — see
-    accounts.api._tpms_staff_auth — so this only runs for a provider DCM
-    hasn't seen via Integrations → Pull Providers yet. contact-info and the
-    /ios/patient/list fallback were dropped in favor of that local lookup.
-    """
-    if not access_token:
-        return None
-
-    probe_paths = (
-        ('/api/v1/ios/credentials', 'credentials'),
-        ('/api/v1/ios/work-schedule', 'work-schedule'),
-    )
-    for path, label in probe_paths:
-        try:
-            payload = _request(
-                'GET',
-                path,
-                access_token=access_token,
-                debug_label=label,
-            )
-        except TpmsAuthError:
-            continue
-        found = _practice_id_from_payload(payload)
-        if found is not None:
-            return found
-
     return None
 
 
@@ -644,85 +586,6 @@ def _extract_access_token(payload: dict[str, Any]) -> str | None:
     if not isinstance(raw, str) or not raw.strip():
         return None
     return _normalize_bearer_token(raw)
-
-
-def normalize_login_payload(fallback_email: str, payload: dict[str, Any]) -> TpmsAuthProfile:
-    data = _unwrap_profile(payload)
-
-    email = str(
-        _dig(data, 'email', 'login_email', 'office_email') or fallback_email
-    ).strip().lower()
-
-    full_name = str(_dig(data, 'full_name', 'name') or '').strip()
-    first_name = str(
-        _dig(data, 'first_name', 'firstname', 'fname')
-        or (full_name.split(' ')[0] if full_name else '')
-        or ''
-    )
-    last_name = str(
-        _dig(data, 'last_name', 'lastname', 'lname')
-        or (' '.join(full_name.split(' ')[1:]) if full_name else '')
-        or ''
-    )
-
-    account_type = str(_dig(data, 'account_type', 'accountType') or '').lower()
-    user_type = str(
-        _dig(data, 'user_type', 'userType', 'type', 'role', 'login_type', 'employee_type')
-        or account_type
-        or ''
-    ).lower()
-    employee_type = _dig(data, 'employee_type', 'employeeType')
-    if employee_type is not None:
-        employee_type = str(employee_type)
-
-    is_admin = (
-        account_type in {'admin', 'facility', 'owner', 'practice'}
-        or any(token in user_type for token in ('admin', 'facility', 'owner', 'practice'))
-        or bool(_dig(data, 'is_admin', 'isAdmin'))
-    )
-    is_provider = account_type in {'provider', 'employee', 'staff'} or 'provider' in user_type
-
-    is_up_admin = _dig(data, 'is_up_admin', 'isUpAdmin')
-    own_id = _as_int(_dig(data, 'id', 'user_id', 'userId'))
-    admin_id = _as_int(_dig(data, 'admin_id', 'adminId', 'facility_id', 'facilityId', 'practice_id'))
-    up_admin_id = _as_int(_dig(data, 'up_admin_id', 'upAdminId'))
-
-    if is_admin and not is_provider:
-        if is_up_admin in (1, '1', True, 'true') or (is_up_admin is None and up_admin_id is None):
-            external_admin_id = admin_id or own_id
-        else:
-            external_admin_id = up_admin_id or admin_id or own_id
-        external_employee_id = _as_int(
-            _dig(data, 'employee_id', 'employeeId', 'provider_id', 'providerId')
-        )
-    else:
-        external_admin_id = admin_id
-        external_employee_id = _as_int(
-            _dig(data, 'employee_id', 'employeeId', 'provider_id', 'providerId', 'id', 'user_id')
-        )
-        is_admin = False
-
-    active_raw = _dig(data, 'active', 'is_active', 'isActive', 'is_staff_active', 'account_status')
-    if active_raw is None:
-        is_active = True
-    else:
-        is_active = str(active_raw).lower() not in {'0', 'false', 'inactive', 'disabled'}
-
-    if _dig(data, 'is_supervisor', 'isSupervisor') in (True, 1, '1', 'true'):
-        employee_type = employee_type or 'supervisor'
-
-    return TpmsAuthProfile(
-        email=email,
-        first_name=first_name,
-        last_name=last_name,
-        external_admin_id=external_admin_id,
-        external_employee_id=external_employee_id,
-        is_admin=is_admin,
-        employee_type=employee_type or (user_type or account_type or None),
-        is_active=is_active,
-        access_token=_extract_access_token(payload),
-        raw=payload,
-    )
 
 
 def normalize_client_portal_payload(

@@ -181,6 +181,10 @@ class StaffSchema(Schema):
     employee_type: str | None
     is_active: bool
     dcm_user_id: int | None = None
+    # DCM's own role (admin/supervisor/staff/reporting) — distinct from
+    # employee_type above, which is TPMS's free-text job title and isn't
+    # what permissions are keyed on. None only when dcm_user_id is None.
+    role: str | None = None
     mfa_required: bool = False
     mfa_enabled: bool = False
     password_link_status: str = 'not_invited'
