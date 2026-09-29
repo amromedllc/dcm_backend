@@ -63,6 +63,33 @@ class ClientStaffAssignment(OrganizationScopedMixin):
         return f'{self.user_id} → {self.client}'
 
 
+class ClientFavorite(OrganizationScopedMixin):
+    """A user's own bookmark on a client, for quick access in the client
+    switcher dropdown — per-user, not shared with teammates."""
+    client = models.ForeignKey(
+        Client,
+        on_delete=models.CASCADE,
+        related_name='favorited_by',
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='favorite_clients',
+        db_constraint=False,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.client.organization_id
+
+    class Meta:
+        app_label = 'clients'
+        unique_together = [['client', 'user']]
+
+    def __str__(self) -> str:
+        return f'{self.user_id} ♥ {self.client}'
+
+
 class TreatmentPlan(TenantAwareModel):
     class Status(models.TextChoices):
         DRAFT = 'draft', 'Draft'

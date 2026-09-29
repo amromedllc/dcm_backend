@@ -12,6 +12,7 @@ class ClientFilterOptionSchema(Schema):
     id: int
     external_id: str
     full_name: str
+    is_favorite: bool = False
 
 
 class ClientSchema(Schema):

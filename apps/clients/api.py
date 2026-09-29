@@ -53,7 +53,7 @@ def _cached_list_patients(access_token: str, external_admin_id: int) -> list[dic
 
     return patients
 from apps.sessions.schemas import AppointmentSchema
-from .models import Client, ClientStaffAssignment, TreatmentPlan, TreatmentPlanSignature
+from .models import Client, ClientFavorite, ClientStaffAssignment, TreatmentPlan, TreatmentPlanSignature
 from .schemas import (
     SignTreatmentPlanRequest,
     ClientFilterOptionSchema,
@@ -426,7 +426,12 @@ def list_client_filter_options(request, search: str | None = None):
     below, which has a sync=True mode that calls TherapyPMS live and (per
     its own docstring) actually fetches *providers*, not patients. This
     endpoint never touches TPMS and always reflects exactly what
-    Integrations -> Pull Clients synced, with no sync param to misuse."""
+    Integrations -> Pull Clients synced, with no sync param to misuse.
+
+    Favorited clients (ClientFavorite, per-user) sort first, each group
+    alphabetical — mirrors the client switcher's "favorites float to the
+    top" behavior.
+    """
     qs = _get_accessible_clients(request).filter(status=Client.Status.ACTIVE)
     if search:
         qs = qs.filter(
@@ -434,10 +439,36 @@ def list_client_filter_options(request, search: str | None = None):
             | Q(last_name__icontains=search)
             | Q(preferred_name__icontains=search)
         )
+    favorite_ids = set(
+        ClientFavorite.objects.filter(user=request.user, client__in=qs).values_list('client_id', flat=True)
+    )
+    clients = list(qs.order_by('last_name', 'first_name'))
+    clients.sort(key=lambda c: c.id not in favorite_ids)
     return [
-        {'id': c.id, 'external_id': c.external_id, 'full_name': c.full_name}
-        for c in qs.order_by('last_name', 'first_name')
+        {
+            'id': c.id,
+            'external_id': c.external_id,
+            'full_name': c.full_name,
+            'is_favorite': c.id in favorite_ids,
+        }
+        for c in clients
     ]
+
+
+@router.post('/{client_id}/favorite', response=ClientFilterOptionSchema)
+def toggle_client_favorite(request, client_id: int):
+    """Toggle the calling user's own favorite on a client — per-user, not
+    shared with teammates. Returns the client's new favorite state."""
+    client = _get_client_or_404(request, client_id)
+    favorite, created = ClientFavorite.objects.get_or_create(user=request.user, client=client)
+    if not created:
+        favorite.delete()
+    return {
+        'id': client.id,
+        'external_id': client.external_id,
+        'full_name': client.full_name,
+        'is_favorite': created,
+    }
 
 
 @router.get('', response=list[ClientSchema])
@@ -457,8 +488,8 @@ def list_clients(
     /api/v1/ios/appointment/filter/providers with the TPMS Bearer token
     captured at login, then upserts them into this same Client table
     (Client.external_id ends up holding a TPMS *provider* id in that case,
-    not a patient id — the client-sessions endpoint below still treats it as
-    a patient id and has not been updated to match). Defaulting this to True
+    not a patient id — every other endpoint in this app, including
+    list_client_sessions below, expects a patient id there). Defaulting this to True
     used to mean every plain "list my clients" call — from the web sidebar's
     client switcher, the dashboard's recent-clients cards, and the mobile
     app, none of which ever pass sync explicitly — silently overwrote real
