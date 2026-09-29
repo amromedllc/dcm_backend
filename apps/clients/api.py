@@ -20,7 +20,6 @@ from apps.integrations.tpms_auth_client import (
     clear_tpms_access_token,
     get_tpms_access_token,
     list_providers,
-    list_provider_calendar,
 )
 
 logger = logging.getLogger(__name__)
@@ -434,8 +433,15 @@ def list_clients(
     programs/sessions keep a stable id. Note: Client.external_id now holds a
     TPMS *provider* id, not a patient id — the client-sessions endpoint below
     still treats it as a patient id and has not been updated to match.
+
+    Falls back to DB-cached Client rows (same as native/non-TPMS orgs) when
+    there's no cached TPMS Bearer token for this session — staff/provider
+    logins no longer go through TherapyPMS at all (see accounts.api.login),
+    so that cache is never populated for them; same graceful-degradation
+    pattern already used by account_profile and the notifications provider
+    list, rather than hard-failing with 401.
     """
-    if request.user.external_admin_id is None or not sync:
+    if request.user.external_admin_id is None or not sync or not get_tpms_access_token(request.user.id):
         return _list_native_clients(request, include_inactive, search)
 
     return _sync_clients_from_tpms(
@@ -991,15 +997,14 @@ def list_client_sessions(
     to_date: date | None = None,
 ):
     """
-    Return appointments for a client from TherapyPMS iOS API.
+    Return appointments for a client from DCM's own synced data
+    (Integrations → Pull Appointments) — no live TherapyPMS call.
 
     /clients rows are now TPMS providers (see list_providers in
     tpms_auth_client.py), so `Client.external_id` here is a provider id, not
-    a patient id. Uses POST /api/v1/ios/calendar via list_provider_calendar
-    with:
-    - provider_ids: just this one client's TPMS provider id (`Client.external_id`)
-    - start_date/end_date: from_date/to_date if given, else a wide default
-      window, sent as YYYY-MM-DD
+    a patient id. Matched against the local Appointment table via
+    Appointment.staff's external_employee_id (set for every appointment
+    pulled for that provider — see integrations.tpms_pull.pull_appointments).
 
     Access is scoped the same way _get_client_or_404/_get_accessible_clients
     scopes everything else in this app: any TPMS-linked staff can reach any
@@ -1013,6 +1018,9 @@ def list_client_sessions(
     error — a program-assign call would succeed, but the very next refetch
     of this endpoint (to show it) came back empty.
     """
+    from django.db.models import Count as _Count
+    from apps.sessions.models import Appointment as DcmAppointment
+
     client = _get_client_or_404(request, client_id)
 
     if not client.external_id:
@@ -1023,34 +1031,16 @@ def list_client_sessions(
     except (TypeError, ValueError):
         raise HttpError(400, 'Client is missing a valid TherapyPMS provider id')
 
-    token = get_tpms_access_token(request.user.id)
-    if not token:
-        raise HttpError(401, 'TherapyPMS session expired. Please log in again.')
-
-    range_start = from_date or (date.today() - timedelta(days=3 * 365))
-    range_end = to_date or (date.today() + timedelta(days=3 * 365))
-
-    try:
-        appointments = list_provider_calendar(
-            token,
-            provider_ids=[tpms_provider_id],
-            start_date=range_start.isoformat(),
-            end_date=range_end.isoformat(),
-        )
-    except TpmsAuthError as exc:
-        if exc.status_code in {401, 403}:
-            clear_tpms_access_token(request.user.id)
-            raise HttpError(401, 'TherapyPMS session expired. Please log in again.') from exc
-        raise HttpError(502, str(exc) or 'Failed to load appointments from TherapyPMS') from exc
-
-    return _serialize_tpms_api_appointments(
-        appointments=appointments,
-        dcm_client_id=client_id,
-        status=status,
-        from_date=from_date,
-        to_date=to_date,
-        provider_id=tpms_provider_id,
+    qs = DcmAppointment.objects.filter(staff__external_employee_id=tpms_provider_id).annotate(
+        assigned_program_count=_Count('lesson__lesson_programs', distinct=True),
     )
+    if status:
+        qs = qs.filter(status=status)
+    if from_date:
+        qs = qs.filter(start_time__date__gte=from_date)
+    if to_date:
+        qs = qs.filter(start_time__date__lte=to_date)
+    return list(qs.order_by('-start_time'))
 
 
 @router.post('/{client_id}/sessions/telehealth-connect', response=TelehealthConnectionDetailsSchema)

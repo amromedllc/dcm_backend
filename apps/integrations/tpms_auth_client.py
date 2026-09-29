@@ -15,8 +15,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 20
 DEFAULT_TPMS_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 days fallback
-PATIENT_LIST_MAX_PAGES = 100
-PATIENT_LIST_MAX_WORKERS = 8
 
 
 class TpmsAuthError(Exception):
@@ -29,33 +27,16 @@ class TpmsAuthError(Exception):
 
 
 @dataclass(frozen=True)
-class TpmsAuthProfile:
-    """Normalized identity fields extracted from a successful TPMS login."""
-
-    email: str
-    first_name: str
-    last_name: str
-    external_admin_id: int | None
-    external_employee_id: int | None
-    is_admin: bool
-    employee_type: str | None
-    is_active: bool
-    access_token: str | None
-    raw: dict[str, Any]
-
-
-@dataclass(frozen=True)
 class TpmsClientPortalProfile:
     """Normalized identity fields extracted from a client-portal (parent/
     caregiver) TPMS login (account_type == 'client'/'patient').
 
-    Deliberately a SEPARATE type from TpmsAuthProfile, with no
-    external_admin_id/external_employee_id fields — a client-portal
-    payload's `user.id` is a TPMS *patient* id, and normalize_login_payload()
-    (the staff-oriented normalizer) was previously misreading that same id
-    as external_employee_id, which let a parent account get promoted to a
-    DCM staff session. Keeping this a structurally distinct type makes that
-    class of bug impossible rather than just fixed once.
+    Deliberately has no external_admin_id/external_employee_id fields — a
+    client-portal payload's `user.id` is a TPMS *patient* id. (Staff logins
+    no longer go through TherapyPMS at all — see accounts.api.login — but
+    this type predates that cutover and the distinction it encodes, that a
+    patient id must never be misread as an employee id, still matters for
+    this payload shape.)
     """
 
     email: str
@@ -128,6 +109,28 @@ def get_tpms_access_token(user_id: int) -> str | None:
 
 def clear_tpms_access_token(user_id: int) -> None:
     _redis().delete(_tpms_token_key(user_id))
+
+
+def _org_admin_token_key(org_id: int) -> str:
+    return f'dcm:tpms:org-admin-token:{org_id}'
+
+
+def store_org_tpms_admin_token(org_id: int, token: str) -> None:
+    """Cache the practice-admin Bearer token used for Integrations Pull."""
+    raw = _normalize_bearer_token(token)
+    if not raw:
+        return
+    ttl = _ttl_from_token(raw)
+    _redis().setex(_org_admin_token_key(org_id), ttl, raw)
+
+
+def get_org_tpms_admin_token(org_id: int) -> str | None:
+    value = _redis().get(_org_admin_token_key(org_id))
+    return value if isinstance(value, str) and value else None
+
+
+def clear_org_tpms_admin_token(org_id: int) -> None:
+    _redis().delete(_org_admin_token_key(org_id))
 
 
 def _request(
@@ -260,10 +263,27 @@ def authenticate_raw(email: str, password: str) -> dict[str, Any]:
     return login_with_encrypted(enc_email, enc_password)
 
 
-def authenticate(email: str, password: str) -> TpmsAuthProfile:
-    """encrypt (email) + encrypt (password) → login → normalized staff profile."""
-    payload = authenticate_raw(email, password)
-    return normalize_login_payload(email, payload)
+def authenticate_admin_raw(email: str, password: str) -> dict[str, Any]:
+    """POST /api/v1/admin/login with plain (unencrypted) credentials — the
+    practice-admin login used to verify an organization's TherapyPMS
+    connection (tenants.api.connect_therapy_pms), separate from the
+    encrypted /ios/login flow staff and client-portal sign-ins use."""
+    payload = _post(
+        '/api/v1/admin/login',
+        {'email': email, 'password': password},
+        debug_label='admin-login',
+    )
+
+    status = str(payload.get('status', '')).lower()
+    if status in {'unauthorised', 'unauthorized', 'error', 'fail', 'failed'}:
+        message = payload.get('message') or 'Invalid email or password'
+        if isinstance(message, dict):
+            message = next(iter(message.values()), ['Invalid email or password'])
+            if isinstance(message, list):
+                message = message[0] if message else 'Invalid email or password'
+        raise TpmsAuthError(str(message), payload=payload)
+
+    return payload
 
 
 def account_type_of(payload: dict[str, Any]) -> str:
@@ -295,45 +315,6 @@ def _practice_id_from_payload(payload: dict[str, Any]) -> int | None:
     return None
 
 
-def resolve_practice_admin_id(access_token: str) -> int | None:
-    """
-    Provider /ios/login payloads omit practice id. Probe authenticated iOS
-    endpoints that often carry admin_id / facility_id.
-    """
-    if not access_token:
-        return None
-
-    probe_paths = (
-        ('/api/v1/ios/contact-info', 'contact-info'),
-        ('/api/v1/ios/credentials', 'credentials'),
-        ('/api/v1/ios/work-schedule', 'work-schedule'),
-    )
-    for path, label in probe_paths:
-        try:
-            payload = _request(
-                'GET',
-                path,
-                access_token=access_token,
-                debug_label=label,
-            )
-        except TpmsAuthError:
-            continue
-        found = _practice_id_from_payload(payload)
-        if found is not None:
-            return found
-
-    try:
-        _, rows, _ = _fetch_patient_list_page(access_token, 1)
-    except TpmsAuthError:
-        return None
-
-    for row in rows[:20]:
-        found = _practice_id_from_payload(row)
-        if found is not None:
-            return found
-    return None
-
-
 def _extract_rows(payload: dict[str, Any], *block_keys: str) -> list[dict[str, Any]]:
     """Flatten paginated or nested list payloads from TPMS iOS APIs."""
     rows: list[dict[str, Any]] = []
@@ -362,82 +343,27 @@ def _extract_rows(payload: dict[str, Any], *block_keys: str) -> list[dict[str, A
         elif isinstance(data, dict):
             add_rows(data)
 
+    if not rows:
+        # Last resort: the caller's block_keys guessed wrong (a real TPMS
+        # endpoint has been seen wrapping rows under a key none of them
+        # expected). Scan every value — one level deep, then two — for the
+        # first non-empty list of dicts, whatever it's called.
+        def find_list_of_dicts(node: Any, depth: int) -> list[dict[str, Any]] | None:
+            if isinstance(node, list) and node and all(isinstance(item, dict) for item in node):
+                return node
+            if depth <= 0 or not isinstance(node, dict):
+                return None
+            for value in node.values():
+                found = find_list_of_dicts(value, depth - 1)
+                if found:
+                    return found
+            return None
+
+        found = find_list_of_dicts(payload, depth=3)
+        if found:
+            rows = found
+
     return rows
-
-
-def _fetch_patient_list_page(
-    access_token: str,
-    page: int,
-    *,
-    search: str | None = None,
-) -> tuple[int, list[dict[str, Any]], int]:
-    """Fetch one patient-list page. Returns (page, rows, last_page)."""
-    params: dict[str, Any] = {'page': page}
-    if search:
-        params['search'] = search
-
-    payload = _request(
-        'GET',
-        '/api/v1/ios/patient/list',
-        access_token=access_token,
-        params=params,
-        debug_label=f'patient-list-page-{page}',
-    )
-
-    status = str(payload.get('status', '')).lower()
-    if status in {'unauthorised', 'unauthorized', 'error', 'fail', 'failed'}:
-        message = payload.get('message') or 'Failed to load patients'
-        raise TpmsAuthError(str(message), payload=payload)
-
-    rows = _extract_rows(payload, 'patients')
-    block = payload.get('patients')
-    last_page = page
-    if isinstance(block, dict):
-        try:
-            last_page = int(block.get('last_page') or page)
-        except (TypeError, ValueError):
-            last_page = page
-
-    return page, rows, last_page
-
-
-def list_patients(access_token: str, *, search: str | None = None) -> list[dict[str, Any]]:
-    """
-    Fetch all pages from GET /api/v1/ios/patient/list using the TPMS Bearer token.
-
-    Page 1 is fetched first to learn `last_page`, then remaining pages are
-    fetched in parallel so large practices load faster.
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    _, first_rows, last_page = _fetch_patient_list_page(access_token, 1, search=search)
-    if last_page > PATIENT_LIST_MAX_PAGES:
-        logger.warning(
-            'TPMS patient list pagination exceeded %s pages (last_page=%s); capping',
-            PATIENT_LIST_MAX_PAGES,
-            last_page,
-        )
-    last_page = min(max(last_page, 1), PATIENT_LIST_MAX_PAGES)
-
-    pages: dict[int, list[dict[str, Any]]] = {1: first_rows}
-
-    remaining = list(range(2, last_page + 1))
-    if remaining:
-        workers = min(PATIENT_LIST_MAX_WORKERS, len(remaining))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(_fetch_patient_list_page, access_token, page, search=search): page
-                for page in remaining
-            }
-            for future in as_completed(futures):
-                page, rows, _ = future.result()
-                pages[page] = rows
-
-    patients: list[dict[str, Any]] = []
-    for page in range(1, last_page + 1):
-        patients.extend(pages.get(page, []))
-
-    return patients
 
 
 def list_providers(access_token: str) -> list[dict[str, Any]]:
@@ -498,63 +424,6 @@ def list_providers(access_token: str) -> list[dict[str, Any]]:
             raise TpmsAuthError(str(message), payload=payload)
         return _extract_rows(payload, 'provider_data', 'providers', 'data', 'result')
     return []
-
-
-def list_appointments(
-    access_token: str,
-    *,
-    provider_ids: list[int],
-    client_ids: list[int],
-    start_date: str,
-    end_date: str,
-) -> list[dict[str, Any]]:
-    """
-    POST /api/v1/ios/calendar — same request/response shape as the older
-    /api/v1/ios/appointments/list (which itself replaced
-    /api/v1/ios/appointment/recurring/list, which had no date range and used
-    "patient_ids"). Dates as MM/DD/YYYY, same report_range convention as
-    list_client_portal_appointments. Ids sent as strings.
-
-    Confirmed real row shape: {"session_id", "lock_icon", "break_icon",
-    "billable", "patient_id", "patient_name", "service_hour", "provider_id",
-    "provider_name", "pos", "scheduled_date", "scheduled_time", "status",
-    "address"} — "scheduled_time" combines start+end ("10:00 am to 12:30 pm")
-    like list_client_portal_appointments's "hours" field does.
-
-    Confirmed per-role request shape (2026-07-31) — the wire key for the
-    client-side filter is "patients_ids" (not "client_ids"; kept as
-    client_ids on this function's own signature for DCM-side clarity):
-    - Own schedule (my_schedule/list_provider_appointments): provider_ids
-      only, no patients_ids key at all.
-    - Supervisor/admin viewing one client's sessions: patients_ids only, no
-      provider_ids key at all (they see every provider for that client).
-    - Staff viewing one client's sessions: both provider_ids (their own) and
-      patients_ids (that one client).
-    Each key is omitted from the body entirely when its list is empty,
-    rather than sent as `[]`.
-    """
-    body: dict[str, Any] = {
-        'report_range': {'start_date': start_date, 'end_date': end_date},
-    }
-    if provider_ids:
-        body['provider_ids'] = [str(p) for p in provider_ids]
-    if client_ids:
-        body['patients_ids'] = [str(c) for c in client_ids]
-
-    payload = _request(
-        'POST',
-        '/api/v1/ios/calendar',
-        body=body,
-        access_token=access_token,
-        debug_label='appointments-list',
-    )
-
-    status = str(payload.get('status', '')).lower()
-    if status in {'unauthorised', 'unauthorized', 'error', 'fail', 'failed'}:
-        message = payload.get('message') or 'Failed to load appointments'
-        raise TpmsAuthError(str(message), payload=payload)
-
-    return _extract_rows(payload, 'appointments', 'data')
 
 
 def list_provider_calendar(
@@ -719,85 +588,6 @@ def _extract_access_token(payload: dict[str, Any]) -> str | None:
     return _normalize_bearer_token(raw)
 
 
-def normalize_login_payload(fallback_email: str, payload: dict[str, Any]) -> TpmsAuthProfile:
-    data = _unwrap_profile(payload)
-
-    email = str(
-        _dig(data, 'email', 'login_email', 'office_email') or fallback_email
-    ).strip().lower()
-
-    full_name = str(_dig(data, 'full_name', 'name') or '').strip()
-    first_name = str(
-        _dig(data, 'first_name', 'firstname', 'fname')
-        or (full_name.split(' ')[0] if full_name else '')
-        or ''
-    )
-    last_name = str(
-        _dig(data, 'last_name', 'lastname', 'lname')
-        or (' '.join(full_name.split(' ')[1:]) if full_name else '')
-        or ''
-    )
-
-    account_type = str(_dig(data, 'account_type', 'accountType') or '').lower()
-    user_type = str(
-        _dig(data, 'user_type', 'userType', 'type', 'role', 'login_type', 'employee_type')
-        or account_type
-        or ''
-    ).lower()
-    employee_type = _dig(data, 'employee_type', 'employeeType')
-    if employee_type is not None:
-        employee_type = str(employee_type)
-
-    is_admin = (
-        account_type in {'admin', 'facility', 'owner', 'practice'}
-        or any(token in user_type for token in ('admin', 'facility', 'owner', 'practice'))
-        or bool(_dig(data, 'is_admin', 'isAdmin'))
-    )
-    is_provider = account_type in {'provider', 'employee', 'staff'} or 'provider' in user_type
-
-    is_up_admin = _dig(data, 'is_up_admin', 'isUpAdmin')
-    own_id = _as_int(_dig(data, 'id', 'user_id', 'userId'))
-    admin_id = _as_int(_dig(data, 'admin_id', 'adminId', 'facility_id', 'facilityId', 'practice_id'))
-    up_admin_id = _as_int(_dig(data, 'up_admin_id', 'upAdminId'))
-
-    if is_admin and not is_provider:
-        if is_up_admin in (1, '1', True, 'true') or (is_up_admin is None and up_admin_id is None):
-            external_admin_id = admin_id or own_id
-        else:
-            external_admin_id = up_admin_id or admin_id or own_id
-        external_employee_id = _as_int(
-            _dig(data, 'employee_id', 'employeeId', 'provider_id', 'providerId')
-        )
-    else:
-        external_admin_id = admin_id
-        external_employee_id = _as_int(
-            _dig(data, 'employee_id', 'employeeId', 'provider_id', 'providerId', 'id', 'user_id')
-        )
-        is_admin = False
-
-    active_raw = _dig(data, 'active', 'is_active', 'isActive', 'is_staff_active', 'account_status')
-    if active_raw is None:
-        is_active = True
-    else:
-        is_active = str(active_raw).lower() not in {'0', 'false', 'inactive', 'disabled'}
-
-    if _dig(data, 'is_supervisor', 'isSupervisor') in (True, 1, '1', 'true'):
-        employee_type = employee_type or 'supervisor'
-
-    return TpmsAuthProfile(
-        email=email,
-        first_name=first_name,
-        last_name=last_name,
-        external_admin_id=external_admin_id,
-        external_employee_id=external_employee_id,
-        is_admin=is_admin,
-        employee_type=employee_type or (user_type or account_type or None),
-        is_active=is_active,
-        access_token=_extract_access_token(payload),
-        raw=payload,
-    )
-
-
 def normalize_client_portal_payload(
     fallback_email: str, payload: dict[str, Any],
 ) -> TpmsClientPortalProfile:
@@ -837,4 +627,119 @@ def normalize_client_portal_payload(
         has_sibling=has_sibling,
         access_token=_extract_access_token(payload),
         raw=payload,
+    )
+
+
+@dataclass(frozen=True)
+class TpmsAdminSession:
+    """Practice-admin identity from POST /api/v1/admin/login."""
+
+    access_token: str
+    admin_id: int
+    email: str
+    raw: dict[str, Any]
+
+
+def normalize_admin_login_payload(fallback_email: str, payload: dict[str, Any]) -> TpmsAdminSession:
+    """Extract Bearer token + practice admin_id from an admin login response.
+
+    For practice admins the TPMS `id` (or `admin_id`) is the practice key
+    used in OrganizationTpmsAdminId — required so Pull sync stays bound to
+    one facility and cannot leak into another org's mapping.
+    """
+    token = _extract_access_token(payload)
+    if not token:
+        raise TpmsAuthError('TherapyPMS admin login did not return an access token', payload=payload)
+
+    data = _unwrap_profile(payload)
+    admin_id = _practice_id_from_payload(data)
+    if admin_id is None:
+        admin_id = _as_int(_dig(data, 'id', 'user_id', 'userId', 'admin_id', 'adminId'))
+    if admin_id is None:
+        raise TpmsAuthError(
+            'TherapyPMS admin login did not return a practice id',
+            payload=payload,
+        )
+
+    email = str(_dig(data, 'email', 'login_email') or fallback_email).strip().lower()
+    return TpmsAdminSession(
+        access_token=token,
+        admin_id=admin_id,
+        email=email,
+        raw=payload,
+    )
+
+
+def admin_list_clients(access_token: str) -> list[dict[str, Any]]:
+    """GET /api/v1/admin/get/clients — practice clients for Integrations Pull."""
+    payload = _request(
+        'GET',
+        '/api/v1/admin/get/clients',
+        access_token=access_token,
+        debug_label='admin-get-clients',
+    )
+    status = str(payload.get('status', '')).lower()
+    if status in {'unauthorised', 'unauthorized', 'error', 'fail', 'failed'}:
+        message = payload.get('message') or 'Failed to load clients'
+        raise TpmsAuthError(str(message), payload=payload)
+    return _extract_rows(payload, 'clients', 'client_data', 'patients', 'data', 'result')
+
+
+def admin_list_providers(access_token: str) -> list[dict[str, Any]]:
+    """GET /api/v1/admin/get/providers — practice providers for Integrations Pull."""
+    payload = _request(
+        'GET',
+        '/api/v1/admin/get/providers',
+        access_token=access_token,
+        debug_label='admin-get-providers',
+    )
+    status = str(payload.get('status', '')).lower()
+    if status in {'unauthorised', 'unauthorized', 'error', 'fail', 'failed'}:
+        message = payload.get('message') or 'Failed to load providers'
+        raise TpmsAuthError(str(message), payload=payload)
+    return _extract_rows(payload, 'providers', 'provider_data', 'employees', 'staff', 'data', 'result')
+
+
+def admin_list_appointments(
+    access_token: str,
+    *,
+    from_date: str,
+    to_date: str,
+    patient_ids: list[int] | None = None,
+    staff_ids: list[int] | None = None,
+) -> list[dict[str, Any]]:
+    """POST /api/v1/admin/get/appointment — practice sessions for Integrations Pull.
+
+    from_date / to_date are mandatory (YYYY-MM-DD). patient_ids and staff_ids
+    are optional filters forwarded when non-empty.
+    """
+    body: dict[str, Any] = {
+        'from_date': from_date,
+        'to_date': to_date,
+    }
+    if patient_ids:
+        body['patient_ids'] = [int(p) for p in patient_ids]
+    if staff_ids:
+        body['staff_ids'] = [int(s) for s in staff_ids]
+
+    payload = _request(
+        'POST',
+        '/api/v1/admin/get/appointment',
+        body=body,
+        access_token=access_token,
+        debug_label='admin-get-appointment',
+    )
+    status = str(payload.get('status', '')).lower()
+    if status in {'unauthorised', 'unauthorized', 'error', 'fail', 'failed'}:
+        message = payload.get('message') or 'Failed to load appointments'
+        raise TpmsAuthError(str(message), payload=payload)
+    return _extract_rows(
+        payload,
+        'appointments',
+        'appointment',
+        'appointment_list',
+        'sessions',
+        'data_all',
+        'data',
+        'result',
     )

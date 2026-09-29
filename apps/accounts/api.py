@@ -1,6 +1,9 @@
+import hashlib
 import logging
+from datetime import datetime
 import jwt
 from ninja import Router, Body
+from django.conf import settings
 from django.contrib.auth import authenticate
 from django.utils import timezone
 
@@ -10,7 +13,7 @@ from django.db import transaction
 from django.db.models import Q
 
 from . import mfa
-from .models import User, UserMFA
+from .models import PasswordSetLink, User, UserMFA
 from .auth import create_access_token, create_refresh_token, decode_token, jwt_auth, jwt_auth_any_role, token_tenant_mismatch
 from .permissions import get_user_permissions, require_permission, resolve_permission_organization
 from .schemas import (
@@ -33,6 +36,10 @@ from .schemas import (
     UserCreateRequest,
     UserUpdateRequest,
     ErrorResponse,
+    PasswordSetLinkGenerateRequest,
+    PasswordSetLinkGenerateResponse,
+    PasswordSetLinkInfoResponse,
+    PasswordSetLinkSubmitRequest,
     StaffSchema,
 )
 from apps.clients.models import Client
@@ -40,27 +47,13 @@ from apps.integrations.tpms_auth_client import (
     TpmsAuthError,
     authenticate_raw as tpms_authenticate_raw,
     account_type_of,
-    normalize_login_payload,
     normalize_client_portal_payload,
     clear_tpms_access_token,
     get_ios_personal_info,
     get_ios_time_zone,
     get_tpms_access_token,
-    resolve_practice_admin_id,
     store_tpms_access_token,
 )
-
-
-def _tpms_role_for_employee_type(employee_type: str | None, *, is_admin: bool = False) -> str:
-    """Map a TPMS employee_type / admin flag to a DCM role."""
-    if is_admin:
-        return User.Role.ADMIN
-    if not employee_type:
-        return User.Role.STAFF
-    et = employee_type.lower()
-    if 'bcba' in et or 'supervisor' in et or 'admin' in et:
-        return User.Role.SUPERVISOR
-    return User.Role.STAFF
 
 
 _CLIENT_ACCOUNT_TYPES = {'client', 'patient'}
@@ -69,6 +62,13 @@ router = Router()
 
 
 def _issue_tokens(user: User, tenant_id: int) -> TokenResponse:
+    # This app issues JWTs directly rather than calling django.contrib.auth's
+    # login(), so the user_logged_in signal that normally stamps last_login
+    # never fires — do it here instead, since every login/token-issuing path
+    # (password login, MFA verify, password-set-link) already funnels
+    # through this one function. Downstream: the provider admin screen's
+    # "Active" status is keyed off last_login being non-null.
+    User.objects.filter(pk=user.pk).update(last_login=timezone.now())
     return TokenResponse(
         access_token=create_access_token(user, tenant_id),
         refresh_token=create_refresh_token(user, tenant_id),
@@ -82,38 +82,36 @@ def _issue_tokens(user: User, tenant_id: int) -> TokenResponse:
 @router.post('/login', response=LoginResponse, auth=None)
 def login(request, data: LoginRequest):
     """
-    Authenticate exclusively via TherapyPMS HTTP APIs (encrypt → login).
+    Staff/provider accounts authenticate locally against their DCM password
+    — no TherapyPMS round trip. That password only exists once an admin has
+    shared a password-set link and the provider has used it (see
+    generate_password_set_link / submit_password_set_link below); a synced
+    provider who hasn't done that yet cannot log in here, by design — sync
+    (apps.integrations.tpms_pull.pull_providers) is now the only place a
+    staff-side DCM User gets provisioned, not this endpoint.
 
-    No DCM local-password check and no direct TherapyPMS database password
-    verification. A DCM User row is auto-provisioned so JWTs have a subject.
-
-    One TPMS round trip, then dispatch on the response's own account_type —
-    staff/employee accounts and client-portal (parent/caregiver) accounts
-    hit the same TPMS endpoint but need entirely different DCM provisioning
-    (practice-scoped staff vs. single-client-scoped caregiver).
-
-    Staff is the default path, not an allowlisted one — TPMS's account_type
-    for staff/admin logins varies more than could be reliably enumerated
-    up front (normalize_login_payload already handles that variance via
-    is_admin/isAdmin flags and several account_type/user_type fallbacks),
-    and defaulting to staff here just preserves that existing behavior
-    unconditionally. Only account_type values that positively identify a
-    client-portal login get diverted to the caregiver path — that's the
-    one direction that actually needed fixing (a client-portal payload's
-    patient id previously fell through into the staff provisioning path
-    and got misread as an employee id — see _CLIENT_ACCOUNT_TYPES usage
-    below and TpmsClientPortalProfile's docstring).
+    Caregiver/client-portal accounts are unaffected by that cutover and
+    still authenticate live through TherapyPMS's /ios/login — see
+    _tpms_caregiver_auth. A caregiver never has a usable DCM password, so
+    the local_user lookup below deliberately excludes that role and falls
+    through to the TPMS path unchanged.
     """
     tenant = getattr(request, 'tenant', None)
     if tenant is None:
         raise HttpError(401, 'Invalid email or password')
 
+    local_user = User.objects.filter(email__iexact=data.email).exclude(role=User.Role.CAREGIVER).first()
+    if local_user is not None:
+        if local_user.is_superuser:
+            superuser_tokens = _superadmin_local_auth(request, tenant, data.email, data.password)
+            if superuser_tokens is None:
+                raise HttpError(401, 'Invalid email or password')
+            return _mfa_gate(tenant, superuser_tokens)
+        return _mfa_gate(tenant, _staff_local_auth(tenant, local_user, data.password))
+
     try:
         payload = tpms_authenticate_raw(data.email, data.password)
     except TpmsAuthError as exc:
-        superuser_tokens = _superadmin_local_auth(request, tenant, data.email, data.password)
-        if superuser_tokens is not None:
-            return _mfa_gate(tenant, superuser_tokens)
         message = str(exc) or 'Invalid email or password'
         if 'unavailable' in message.lower() or 'invalid response' in message.lower():
             raise HttpError(502, message) from exc
@@ -121,7 +119,7 @@ def login(request, data: LoginRequest):
 
     if account_type_of(payload) in _CLIENT_ACCOUNT_TYPES:
         return _mfa_gate(tenant, _tpms_caregiver_auth(request, tenant, data.email, payload))
-    return _mfa_gate(tenant, _tpms_staff_auth(request, tenant, data.email, payload))
+    raise HttpError(401, 'Invalid email or password')
 
 
 def _mfa_gate(tenant, tokens: TokenResponse):
@@ -229,13 +227,7 @@ def disable_my_mfa(request, data: MfaCodeRequest):
 
 
 def _verify_actor_password(user: User, password: str) -> bool:
-    if user.is_superuser and user.has_usable_password() and user.check_password(password):
-        return True
-    try:
-        tpms_authenticate_raw(user.email, password)
-        return True
-    except TpmsAuthError:
-        return False
+    return user.has_usable_password() and user.check_password(password)
 
 
 @router.post('/users/{user_id}/mfa/remove', response={204: None}, auth=jwt_auth)
@@ -270,112 +262,27 @@ def _superadmin_local_auth(request, tenant, email: str, password: str) -> TokenR
     return _issue_tokens(user, tenant_id)
 
 
-def _tpms_staff_auth(request, tenant, email: str, payload: dict) -> TokenResponse:
-    """Provision/refresh a staff-side DCM session from an already-fetched TPMS login payload."""
-    tenant_admin_ids = set(tenant.tpms_admin_ids.values_list('admin_id', flat=True))
-    if not tenant_admin_ids:
-        # Fail closed — without a practice mapping we cannot safely scope the session.
+def _staff_local_auth(tenant, user: User, password: str) -> TokenResponse:
+    """Local-password staff/provider login — no TherapyPMS round trip.
+
+    The user must already have a DCM password (set via an admin-issued
+    password-set link, or created directly for a native/non-TPMS org — see
+    create_user) and belong to this tenant. Credentials are checked before
+    is_active, same order the old TPMS-proxied path used, so a wrong
+    password never reveals whether the account is merely deactivated.
+    """
+    if not user.has_usable_password() or not user.check_password(password):
         raise HttpError(401, 'Invalid email or password')
-
-    profile = normalize_login_payload(email, payload)
-
-    if not profile.is_active:
+    if not user.is_active:
         raise HttpError(403, 'Account is inactive')
 
-    external_admin_id = profile.external_admin_id
-    if external_admin_id is None:
-        existing = User.objects.filter(email__iexact=profile.email or email).first()
-        if existing and existing.external_admin_id is not None:
-            external_admin_id = existing.external_admin_id
-        elif profile.access_token:
-            try:
-                external_admin_id = resolve_practice_admin_id(profile.access_token)
-            except Exception:
-                external_admin_id = None
-
-        if external_admin_id is None and not profile.is_admin and len(tenant_admin_ids) == 1:
-            # Staff/provider tokens are already practice-scoped by TherapyPMS;
-            # bind first-time staff to this hostname's mapped practice — only
-            # safe to guess when the org fronts exactly one TPMS practice.
-            external_admin_id = next(iter(tenant_admin_ids))
-
-        if external_admin_id is None:
-            logger.warning(
-                'TPMS login succeeded but practice id missing for email=%s keys=%s',
-                email,
-                sorted(profile.raw.keys()) if isinstance(profile.raw, dict) else type(profile.raw),
-            )
+    tenant_admin_ids = set(tenant.tpms_admin_ids.values_list('admin_id', flat=True))
+    if tenant_admin_ids:
+        if user.external_admin_id not in tenant_admin_ids:
             raise HttpError(401, 'Invalid email or password')
-
-    # Tenant binding (C-01): only accept users belonging to one of this org's practices.
-    if external_admin_id not in tenant_admin_ids:
+    elif user.organization_id != tenant.pk:
+        # Native (non-TPMS) org — bind by Organization membership instead.
         raise HttpError(401, 'Invalid email or password')
-
-    dcm_role = _tpms_role_for_employee_type(
-        profile.employee_type,
-        is_admin=profile.is_admin,
-    )
-    first_name = profile.first_name or ''
-    last_name = profile.last_name or ''
-    external_employee_id = profile.external_employee_id
-    provision_email = profile.email or email
-
-    # A caregiver-role row already owns this email — never let a staff-side
-    # login silently reuse/overwrite it (mirrors the equivalent guard in
-    # _tpms_caregiver_auth for the opposite direction).
-    existing_row = User.objects.filter(email__iexact=provision_email).first()
-    if existing_row and existing_row.role == User.Role.CAREGIVER:
-        logger.error('Staff TPMS login email collides with a caregiver-role user id=%s', existing_row.id)
-        raise HttpError(409, 'This email is already registered as a caregiver portal account.')
-
-    # Auto-provision DCM user on first TPMS login; keep external ids + role current.
-    # Bind organization to the login tenant so facility-scoped RolePermission
-    # rows resolve correctly (privileges are per Organization).
-    login_org = request.tenant
-    with transaction.atomic():
-        user, created = User.objects.get_or_create(
-            email=provision_email,
-            defaults={
-                'first_name': first_name,
-                'last_name': last_name,
-                'role': dcm_role,
-                'is_active': True,
-                'external_admin_id': external_admin_id,
-                'external_employee_id': external_employee_id,
-                'organization': login_org,
-            },
-        )
-        if created:
-            user.set_unusable_password()
-            user.save(update_fields=['password'])
-        else:
-            update_fields = []
-            if first_name and user.first_name != first_name:
-                user.first_name = first_name
-                update_fields.append('first_name')
-            if last_name and user.last_name != last_name:
-                user.last_name = last_name
-                update_fields.append('last_name')
-            if user.external_admin_id != external_admin_id:
-                user.external_admin_id = external_admin_id
-                update_fields.append('external_admin_id')
-            if user.external_employee_id != external_employee_id:
-                user.external_employee_id = external_employee_id
-                update_fields.append('external_employee_id')
-            if user.role != dcm_role:
-                user.role = dcm_role
-                update_fields.append('role')
-            if login_org is not None and user.organization_id != login_org.pk:
-                user.organization = login_org
-                update_fields.append('organization')
-            if not user.is_active:
-                user.is_active = True
-                update_fields.append('is_active')
-            if update_fields:
-                user.save(update_fields=update_fields)
-
-    if profile.access_token:
-        store_tpms_access_token(user.id, profile.access_token)
 
     return _issue_tokens(user, tenant.pk)
 
@@ -499,6 +406,7 @@ def logout_all(request):
 
 
 
+@router.post('/refresh', response=AccessTokenResponse, auth=None)
 def refresh_token(request, data: RefreshRequest):
     try:
         payload = decode_token(data.refresh_token)
@@ -727,6 +635,25 @@ def list_users(request):
     )
 
 
+def _latest_password_links(user_ids: list[int]) -> dict[int, PasswordSetLink]:
+    """Most recent PasswordSetLink per user, in one query."""
+    latest: dict[int, PasswordSetLink] = {}
+    for link in PasswordSetLink.objects.filter(user_id__in=user_ids).order_by('user_id', '-created_at'):
+        latest.setdefault(link.user_id, link)
+    return latest
+
+
+def _password_link_status(user: User, link: PasswordSetLink | None) -> tuple[str, datetime | None]:
+    """Computed, not stored — see StaffSchema.password_link_status."""
+    if user.last_login is not None:
+        return 'active', None
+    if link is None:
+        return 'not_invited', None
+    if link.used_at is None and link.expires_at > timezone.now():
+        return 'invited', link.expires_at
+    return 'expired', link.expires_at
+
+
 @router.get('/admin/staffs', response=list[StaffSchema], auth=jwt_auth)
 def list_admin_staffs(request, include_inactive: bool = False):
     """Return staff for the logged-in admin's practice.
@@ -742,8 +669,12 @@ def list_admin_staffs(request, include_inactive: bool = False):
     qs = User.objects.filter(external_admin_id=request.user.external_admin_id).exclude(role=User.Role.CAREGIVER).select_related('mfa')
     if not include_inactive:
         qs = qs.filter(is_active=True)
-    return [
-        StaffSchema(
+    users = list(qs.order_by('last_name', 'first_name'))
+    links = _latest_password_links([u.id for u in users])
+    results = []
+    for u in users:
+        status, expires_at = _password_link_status(u, links.get(u.id))
+        results.append(StaffSchema(
             id=u.external_employee_id or u.id,
             admin_id=u.external_admin_id,
             first_name=u.first_name,
@@ -754,11 +685,13 @@ def list_admin_staffs(request, include_inactive: bool = False):
             employee_type=u.role,
             is_active=u.is_active,
             dcm_user_id=u.id,
+            role=u.role,
             mfa_required=u.mfa_required,
             mfa_enabled=u.mfa_enabled,
-        )
-        for u in qs.order_by('last_name', 'first_name')
-    ]
+            password_link_status=status,
+            password_link_expires_at=expires_at,
+        ))
+    return results
 
 
 def _list_native_staffs(request, include_inactive: bool) -> list[StaffSchema]:
@@ -769,8 +702,12 @@ def _list_native_staffs(request, include_inactive: bool) -> list[StaffSchema]:
     qs = User.objects.filter(organization_id=request.user.organization_id).select_related('mfa')
     if not include_inactive:
         qs = qs.filter(is_active=True)
-    return [
-        StaffSchema(
+    users = list(qs.order_by('last_name', 'first_name'))
+    links = _latest_password_links([u.id for u in users])
+    results = []
+    for u in users:
+        status, expires_at = _password_link_status(u, links.get(u.id))
+        results.append(StaffSchema(
             id=u.id,
             admin_id=None,
             first_name=u.first_name,
@@ -781,11 +718,85 @@ def _list_native_staffs(request, include_inactive: bool) -> list[StaffSchema]:
             employee_type=u.role,
             is_active=u.is_active,
             dcm_user_id=u.id,
+            role=u.role,
             mfa_required=u.mfa_required,
             mfa_enabled=u.mfa_enabled,
+            password_link_status=status,
+            password_link_expires_at=expires_at,
+        ))
+    return results
+
+
+@router.post('/users/{user_id}/password-link', response=PasswordSetLinkGenerateResponse, auth=jwt_auth)
+def generate_password_set_link(request, user_id: int, data: PasswordSetLinkGenerateRequest):
+    """Admin-generated one-time link so a synced provider can set their DCM
+    login password, instead of relying on TherapyPMS's /ios/login. See
+    PasswordSetLink for why generating a new link expires any prior one."""
+    require_permission(request, 'admin_users_edit')
+    try:
+        user = User.objects.get(_same_practice_q(request.user), id=user_id)
+    except User.DoesNotExist:
+        raise HttpError(404, 'User not found')
+    if user.role == User.Role.CAREGIVER:
+        raise HttpError(400, 'Caregiver accounts sign in through the client portal, not this flow.')
+    if data.expires_at <= timezone.now():
+        raise HttpError(400, 'Expiration must be in the future')
+
+    link, raw_token = PasswordSetLink.generate(user, created_by=request.user, expires_at=data.expires_at)
+    base_url = getattr(settings, 'FRONTEND_BASE_URL', '').rstrip('/')
+    url = f'{base_url}/set-password?token={raw_token}'
+    return PasswordSetLinkGenerateResponse(url=url, expires_at=link.expires_at)
+
+
+@router.post('/password-link/set-password', response=LoginResponse, auth=None)
+def submit_password_set_link(request, data: PasswordSetLinkSubmitRequest):
+    """Registered before GET /password-link/{token} below — Ninja/Django
+    tries url patterns in registration order and the {token} converter
+    matches any string including the literal "set-password", so this route
+    must come first or POSTs here 405 against the {token} route instead."""
+    tenant = getattr(request, 'tenant', None)
+    if tenant is None:
+        raise HttpError(401, 'Invalid or expired link')
+    if data.password != data.password_confirm:
+        raise HttpError(400, 'Passwords do not match')
+
+    if not data.token.startswith('pwl_'):
+        raise HttpError(404, 'This link is invalid or has expired')
+    token_hash = hashlib.sha256(data.token.encode()).hexdigest()
+
+    with transaction.atomic():
+        # select_for_update + a fresh used_at/expires_at check inside the
+        # transaction — not just PasswordSetLink.verify() up front — so two
+        # concurrent requests for the same token can't both pass the check
+        # and both consume it.
+        link = (
+            PasswordSetLink.objects.select_for_update()
+            .select_related('user')
+            .filter(token_hash=token_hash)
+            .first()
         )
-        for u in qs.order_by('last_name', 'first_name')
-    ]
+        if link is None or link.used_at is not None or link.expires_at < timezone.now():
+            raise HttpError(404, 'This link is invalid or has expired')
+
+        user = link.user
+        user.set_password(data.password)
+        user.save(update_fields=['password'])
+        link.used_at = timezone.now()
+        link.save(update_fields=['used_at'])
+
+    return _mfa_gate(tenant, _issue_tokens(user, tenant.pk))
+
+
+@router.get('/password-link/{token}', response=PasswordSetLinkInfoResponse, auth=None)
+def get_password_set_link(request, token: str):
+    link = PasswordSetLink.verify(token)
+    if link is None:
+        raise HttpError(404, 'This link is invalid or has expired')
+    return PasswordSetLinkInfoResponse(
+        first_name=link.user.first_name,
+        email_masked=mfa.mask_email(link.user.email),
+        expires_at=link.expires_at,
+    )
 
 
 _ROLE_RANK = {

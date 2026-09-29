@@ -149,6 +149,27 @@ class ErrorResponse(Schema):
     detail: str
 
 
+class PasswordSetLinkGenerateRequest(Schema):
+    expires_at: datetime
+
+
+class PasswordSetLinkGenerateResponse(Schema):
+    url: str
+    expires_at: datetime
+
+
+class PasswordSetLinkInfoResponse(Schema):
+    first_name: str
+    email_masked: str
+    expires_at: datetime
+
+
+class PasswordSetLinkSubmitRequest(Schema):
+    token: str
+    password: str = Field(min_length=8)
+    password_confirm: str
+
+
 class StaffSchema(Schema):
     id: int
     admin_id: int | None
@@ -160,5 +181,11 @@ class StaffSchema(Schema):
     employee_type: str | None
     is_active: bool
     dcm_user_id: int | None = None
+    # DCM's own role (admin/supervisor/staff/reporting) — distinct from
+    # employee_type above, which is TPMS's free-text job title and isn't
+    # what permissions are keyed on. None only when dcm_user_id is None.
+    role: str | None = None
     mfa_required: bool = False
     mfa_enabled: bool = False
+    password_link_status: str = 'not_invited'
+    password_link_expires_at: datetime | None = None

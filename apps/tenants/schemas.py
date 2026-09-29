@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from ninja import Schema
 
@@ -11,6 +11,34 @@ class OrganizationAuthenticationSettingsSchema(Schema):
 class OrganizationAuthenticationSettingsUpdate(Schema):
     automatic_logout_enabled: bool | None = None
     automatic_logout_minutes: int | None = None
+
+
+class OrganizationIntegrationSettingsSchema(Schema):
+    integration_platform: str
+    organization_name: str
+
+
+class OrganizationIntegrationSettingsUpdate(Schema):
+    integration_platform: str | None = None
+
+
+class TherapyPmsConnectRequest(Schema):
+    email: str
+    password: str
+
+
+class TherapyPmsPullResultSchema(Schema):
+    created: int
+    updated: int
+    skipped: int
+    errors: list[str] = []
+
+
+class TherapyPmsPullAppointmentsRequest(Schema):
+    from_date: date
+    to_date: date
+    patient_ids: list[int] | None = None
+    staff_ids: list[int] | None = None
 
 
 class TpmsAdminEmailSettingSchema(Schema):
@@ -97,3 +125,32 @@ class SuperadminAPIKeySchema(Schema):
 class SuperadminAPIKeyCreatedSchema(SuperadminAPIKeySchema):
     raw_key: str
     message: str = 'Store this key securely — it will not be shown again.'
+
+
+class SuperadminUserCreate(Schema):
+    organization_id: int
+    email: str
+    first_name: str
+    last_name: str
+    password: str
+    role: str = 'admin'
+    # An Administrator (or supervisor/staff) is scoped to one organization's
+    # TPMS practice, not the organization alone — required whenever the
+    # target org has any practices mapped (OrganizationTpmsAdminId); ignored
+    # for a native (non-TPMS) org. See create_superadmin_user.
+    external_admin_id: int | None = None
+
+
+class SuperadminUserSchema(Schema):
+    id: int
+    email: str
+    first_name: str
+    last_name: str
+    full_name: str
+    role: str
+    is_active: bool
+    organization_id: int | None
+    organization_name: str
+    external_admin_id: int | None
+    tpms_facility_name: str | None
+    created_at: datetime
