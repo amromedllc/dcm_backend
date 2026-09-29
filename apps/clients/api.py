@@ -541,6 +541,14 @@ def update_client(request, client_id: int, data: ClientUpdateRequest):
     return client
 
 
+@router.delete('/{client_id}', response={204: None})
+def delete_client(request, client_id: int):
+    require_permission(request, 'clients_edit')
+    client = _get_client_or_404(request, client_id)
+    client.delete()
+    return 204, None
+
+
 # ---------------------------------------------------------------------------
 # Treatment plans
 # ---------------------------------------------------------------------------
