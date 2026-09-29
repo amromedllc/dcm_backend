@@ -524,7 +524,8 @@ def revoke_superadmin_api_key(request, key_id: int):
 _SUPERADMIN_ASSIGNABLE_ROLES = {User.Role.ADMIN, User.Role.SUPERVISOR, User.Role.STAFF}
 
 
-def _serialize_superadmin_user(user: User) -> dict:
+def _serialize_superadmin_user(user: User, facility_names: dict[int, str] | None = None) -> dict:
+    facility_names = facility_names or {}
     return {
         'id': user.id,
         'email': user.email,
@@ -535,6 +536,11 @@ def _serialize_superadmin_user(user: User) -> dict:
         'is_active': user.is_active,
         'organization_id': user.organization_id,
         'organization_name': user.organization.name if user.organization_id else '',
+        'external_admin_id': user.external_admin_id,
+        'tpms_facility_name': (
+            facility_names.get(user.external_admin_id) or None
+            if user.external_admin_id is not None else None
+        ),
         'created_at': user.created_at,
     }
 
@@ -549,7 +555,9 @@ def list_superadmin_users(request, organization_id: int | None = None):
     )
     if organization_id is not None:
         qs = qs.filter(organization_id=organization_id)
-    return [_serialize_superadmin_user(u) for u in qs]
+    users = list(qs)
+    facility_names = _facility_name_map({u.external_admin_id for u in users if u.external_admin_id is not None})
+    return [_serialize_superadmin_user(u, facility_names) for u in users]
 
 
 @router.post('/superadmin/users', response={201: SuperadminUserSchema})
@@ -567,6 +575,31 @@ def create_superadmin_user(request, data: SuperadminUserCreate):
     if User.objects.filter(email__iexact=data.email).exists():
         raise HttpError(400, 'A user with this email already exists')
 
+    # Local-password login binds a TPMS-linked org's users by external_admin_id
+    # (see accounts.api._staff_local_auth) — a user created without one could
+    # never log in for such an org, so this is required (not inferred) here,
+    # per an explicit org+admin_id pairing rather than org alone. Native
+    # (non-TPMS) orgs have no mapped practices and don't need one at all.
+    org_admin_ids = set(
+        OrganizationTpmsAdminId.objects.filter(organization=org).values_list('admin_id', flat=True)
+    )
+    external_admin_id = data.external_admin_id
+    if org_admin_ids:
+        if external_admin_id is None:
+            raise HttpError(
+                400,
+                f'"{org.name}" has mapped TPMS practices — specify which admin ID this user belongs to: '
+                f'{sorted(org_admin_ids)}.',
+            )
+        if external_admin_id not in org_admin_ids:
+            raise HttpError(
+                400,
+                f'TPMS admin ID {external_admin_id} is not mapped to "{org.name}". '
+                f'Mapped: {sorted(org_admin_ids)}.',
+            )
+    else:
+        external_admin_id = None
+
     user = User.objects.create_user(
         email=data.email,
         first_name=data.first_name,
@@ -574,8 +607,11 @@ def create_superadmin_user(request, data: SuperadminUserCreate):
         role=data.role,
         password=data.password,
         organization=org,
+        external_admin_id=external_admin_id,
     )
-    return 201, _serialize_superadmin_user(user)
+    return 201, _serialize_superadmin_user(
+        user, _facility_name_map({external_admin_id} if external_admin_id is not None else set()),
+    )
 
 
 @router.patch('/superadmin/users/{user_id}/deactivate', response={204: None})
