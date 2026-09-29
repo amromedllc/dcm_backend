@@ -1,5 +1,6 @@
 import hashlib
 import logging
+from datetime import datetime
 import jwt
 from ninja import Router, Body
 from django.conf import settings
@@ -76,6 +77,13 @@ router = Router()
 
 
 def _issue_tokens(user: User, tenant_id: int) -> TokenResponse:
+    # This app issues JWTs directly rather than calling django.contrib.auth's
+    # login(), so the user_logged_in signal that normally stamps last_login
+    # never fires — do it here instead, since every login/token-issuing path
+    # (password login, MFA verify, password-set-link) already funnels
+    # through this one function. Downstream: the provider admin screen's
+    # "Active" status is keyed off last_login being non-null.
+    User.objects.filter(pk=user.pk).update(last_login=timezone.now())
     return TokenResponse(
         access_token=create_access_token(user, tenant_id),
         refresh_token=create_refresh_token(user, tenant_id),
@@ -742,6 +750,25 @@ def list_users(request):
     )
 
 
+def _latest_password_links(user_ids: list[int]) -> dict[int, PasswordSetLink]:
+    """Most recent PasswordSetLink per user, in one query."""
+    latest: dict[int, PasswordSetLink] = {}
+    for link in PasswordSetLink.objects.filter(user_id__in=user_ids).order_by('user_id', '-created_at'):
+        latest.setdefault(link.user_id, link)
+    return latest
+
+
+def _password_link_status(user: User, link: PasswordSetLink | None) -> tuple[str, datetime | None]:
+    """Computed, not stored — see StaffSchema.password_link_status."""
+    if user.last_login is not None:
+        return 'active', None
+    if link is None:
+        return 'not_invited', None
+    if link.used_at is None and link.expires_at > timezone.now():
+        return 'invited', link.expires_at
+    return 'expired', link.expires_at
+
+
 @router.get('/admin/staffs', response=list[StaffSchema], auth=jwt_auth)
 def list_admin_staffs(request, include_inactive: bool = False):
     """Return staff for the logged-in admin's practice.
@@ -757,8 +784,12 @@ def list_admin_staffs(request, include_inactive: bool = False):
     qs = User.objects.filter(external_admin_id=request.user.external_admin_id).exclude(role=User.Role.CAREGIVER).select_related('mfa')
     if not include_inactive:
         qs = qs.filter(is_active=True)
-    return [
-        StaffSchema(
+    users = list(qs.order_by('last_name', 'first_name'))
+    links = _latest_password_links([u.id for u in users])
+    results = []
+    for u in users:
+        status, expires_at = _password_link_status(u, links.get(u.id))
+        results.append(StaffSchema(
             id=u.external_employee_id or u.id,
             admin_id=u.external_admin_id,
             first_name=u.first_name,
@@ -771,9 +802,10 @@ def list_admin_staffs(request, include_inactive: bool = False):
             dcm_user_id=u.id,
             mfa_required=u.mfa_required,
             mfa_enabled=u.mfa_enabled,
-        )
-        for u in qs.order_by('last_name', 'first_name')
-    ]
+            password_link_status=status,
+            password_link_expires_at=expires_at,
+        ))
+    return results
 
 
 def _list_native_staffs(request, include_inactive: bool) -> list[StaffSchema]:
@@ -784,8 +816,12 @@ def _list_native_staffs(request, include_inactive: bool) -> list[StaffSchema]:
     qs = User.objects.filter(organization_id=request.user.organization_id).select_related('mfa')
     if not include_inactive:
         qs = qs.filter(is_active=True)
-    return [
-        StaffSchema(
+    users = list(qs.order_by('last_name', 'first_name'))
+    links = _latest_password_links([u.id for u in users])
+    results = []
+    for u in users:
+        status, expires_at = _password_link_status(u, links.get(u.id))
+        results.append(StaffSchema(
             id=u.id,
             admin_id=None,
             first_name=u.first_name,
@@ -798,9 +834,10 @@ def _list_native_staffs(request, include_inactive: bool) -> list[StaffSchema]:
             dcm_user_id=u.id,
             mfa_required=u.mfa_required,
             mfa_enabled=u.mfa_enabled,
-        )
-        for u in qs.order_by('last_name', 'first_name')
-    ]
+            password_link_status=status,
+            password_link_expires_at=expires_at,
+        ))
+    return results
 
 
 @router.post('/users/{user_id}/password-link', response=PasswordSetLinkGenerateResponse, auth=jwt_auth)

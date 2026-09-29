@@ -183,3 +183,5 @@ class StaffSchema(Schema):
     dcm_user_id: int | None = None
     mfa_required: bool = False
     mfa_enabled: bool = False
+    password_link_status: str = 'not_invited'
+    password_link_expires_at: datetime | None = None
