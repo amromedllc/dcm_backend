@@ -22,6 +22,8 @@ from .schemas import (
     SuperadminAPIKeyCreate,
     SuperadminAPIKeyCreatedSchema,
     SuperadminAPIKeySchema,
+    SuperadminUserCreate,
+    SuperadminUserSchema,
     TpmsAdminIdCreate,
     TpmsAdminEmailSettingSchema,
     TpmsAdminEmailSettingUpdate,
@@ -508,4 +510,78 @@ def revoke_superadmin_api_key(request, key_id: int):
     key.save(update_fields=['is_active'])
     if key.service_user_id:
         User.objects.filter(id=key.service_user_id).update(is_active=False)
+    return 204, None
+
+# ---------------------------------------------------------------------------
+# Superadmin: create login accounts (Administrator/Supervisor/Staff) for any
+# organization. Distinct from accounts.api.create_user, which scopes to the
+# calling admin's own organization and caps role at the caller's own rank —
+# a superadmin instead picks the target org explicitly and may grant any of
+# these three roles regardless of their own (superuser accounts have no
+# `role`/organization of their own to rank against).
+# ---------------------------------------------------------------------------
+
+_SUPERADMIN_ASSIGNABLE_ROLES = {User.Role.ADMIN, User.Role.SUPERVISOR, User.Role.STAFF}
+
+
+def _serialize_superadmin_user(user: User) -> dict:
+    return {
+        'id': user.id,
+        'email': user.email,
+        'first_name': user.first_name,
+        'last_name': user.last_name,
+        'full_name': user.full_name,
+        'role': user.role,
+        'is_active': user.is_active,
+        'organization_id': user.organization_id,
+        'organization_name': user.organization.name if user.organization_id else '',
+        'created_at': user.created_at,
+    }
+
+
+@router.get('/superadmin/users', response=list[SuperadminUserSchema])
+def list_superadmin_users(request, organization_id: int | None = None):
+    _require_superadmin(request)
+    qs = (
+        User.objects.filter(role__in=_SUPERADMIN_ASSIGNABLE_ROLES)
+        .select_related('organization')
+        .order_by('-created_at')
+    )
+    if organization_id is not None:
+        qs = qs.filter(organization_id=organization_id)
+    return [_serialize_superadmin_user(u) for u in qs]
+
+
+@router.post('/superadmin/users', response={201: SuperadminUserSchema})
+def create_superadmin_user(request, data: SuperadminUserCreate):
+    _require_superadmin(request)
+    try:
+        org = Organization.objects.get(id=data.organization_id)
+    except Organization.DoesNotExist:
+        raise HttpError(404, 'Organization not found')
+
+    if data.role not in _SUPERADMIN_ASSIGNABLE_ROLES:
+        raise HttpError(400, 'Role must be one of: admin, supervisor, staff')
+    if len(data.password) < 8:
+        raise HttpError(400, 'Password must be at least 8 characters')
+    if User.objects.filter(email__iexact=data.email).exists():
+        raise HttpError(400, 'A user with this email already exists')
+
+    user = User.objects.create_user(
+        email=data.email,
+        first_name=data.first_name,
+        last_name=data.last_name,
+        role=data.role,
+        password=data.password,
+        organization=org,
+    )
+    return 201, _serialize_superadmin_user(user)
+
+
+@router.patch('/superadmin/users/{user_id}/deactivate', response={204: None})
+def deactivate_superadmin_user(request, user_id: int):
+    _require_superadmin(request)
+    updated = User.objects.filter(id=user_id, role__in=_SUPERADMIN_ASSIGNABLE_ROLES).update(is_active=False)
+    if not updated:
+        raise HttpError(404, 'User not found')
     return 204, None

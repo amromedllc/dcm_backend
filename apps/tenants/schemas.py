@@ -125,3 +125,25 @@ class SuperadminAPIKeySchema(Schema):
 class SuperadminAPIKeyCreatedSchema(SuperadminAPIKeySchema):
     raw_key: str
     message: str = 'Store this key securely — it will not be shown again.'
+
+
+class SuperadminUserCreate(Schema):
+    organization_id: int
+    email: str
+    first_name: str
+    last_name: str
+    password: str
+    role: str = 'admin'
+
+
+class SuperadminUserSchema(Schema):
+    id: int
+    email: str
+    first_name: str
+    last_name: str
+    full_name: str
+    role: str
+    is_active: bool
+    organization_id: int | None
+    organization_name: str
+    created_at: datetime
