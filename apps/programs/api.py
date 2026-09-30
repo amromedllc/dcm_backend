@@ -47,6 +47,7 @@ from .schemas import (
     LessonSchema, LessonCreateRequest, LessonUpdateRequest, AddProgramToLessonRequest,
     LessonProgramSchema,
     OrgProgramSchema, OrgProgramCreateRequest, AssignOrgProgramRequest,
+    AssignOrgProgramBulkRequest, DuplicateOrgProgramRequest, SetOrgProgramLockRequest,
     ProgramFolderSchema, ProgramFolderRequest, SetProgramFolderRequest,
     CentralProgramFolderSchema, CentralProgramFolderRequest, ImportCentralFolderResult,
     CentralProgramRequest, CentralProgramUpdateRequest,
@@ -2092,6 +2093,7 @@ def _serialize_org_program(program: Program, request, include_targets: bool = Fa
     return {
         'id': program.id,
         'is_template': program.is_template,
+        'is_locked': program.is_locked,
         'name': program.name,
         'category': program.category,
         'status': program.status,
@@ -2379,6 +2381,8 @@ def update_org_program(request, program_id: int, data: ProgramUpdateRequest):
         program = _org_qs(request).get(id=program_id)
     except Program.DoesNotExist:
         raise HttpError(404, 'Program not found')
+    if program.is_locked:
+        raise HttpError(400, 'This program is locked. Unlock it before making changes.')
     updates = data.dict(exclude_none=True)
     if 'treatment_area' in updates or 'tags' in updates:
         _validate_treatment_area_and_tags(
@@ -2419,10 +2423,24 @@ def archive_org_program(request, program_id: int):
         program = _org_qs(request).get(id=program_id)
     except Program.DoesNotExist:
         raise HttpError(404, 'Program not found')
+    if program.is_locked:
+        raise HttpError(400, 'This program is locked. Unlock it before deleting.')
     program.status = Program.Status.ARCHIVED
     program.archived_at = timezone.now()
     program.save(update_fields=['status', 'archived_at'])
     return 204, None
+
+
+@router.post('/org-programs/{program_id}/lock', response=OrgProgramSchema)
+def set_org_program_lock(request, program_id: int, data: SetOrgProgramLockRequest):
+    require_permission(request, 'org_programs_edit')
+    try:
+        program = _org_qs(request).get(id=program_id)
+    except Program.DoesNotExist:
+        raise HttpError(404, 'Program not found')
+    program.is_locked = data.locked
+    program.save(update_fields=['is_locked'])
+    return _serialize_org_program(program, request, include_targets=True)
 
 
 def _copy_image(source_image, dest) -> None:
@@ -2538,6 +2556,22 @@ def assign_org_program_to_client(request, program_id: int, data: AssignOrgProgra
     return 201, {**_serialize_program(dest, request, include_targets=True)}
 
 
+@router.post('/org-programs/{program_id}/assign-bulk', response={201: list[ProgramSchema]})
+def assign_org_program_to_clients_bulk(request, program_id: int, data: AssignOrgProgramBulkRequest):
+    """Copy a facility-level program template to several clients at once."""
+    require_permission(request, 'client_programs_create')
+    try:
+        template = _org_qs(request).prefetch_related('targets').get(id=program_id)
+    except Program.DoesNotExist:
+        raise HttpError(404, 'Program not found')
+    client_ids = list(dict.fromkeys(data.client_ids))  # de-dupe, keep order
+    for client_id in client_ids:
+        _assert_client_accessible(request, client_id)
+    with transaction.atomic():
+        dests = [_copy_program_to_client(template, client_id, request.user) for client_id in client_ids]
+    return 201, [_serialize_program(dest, request, include_targets=True) for dest in dests]
+
+
 @router.post('/programs/{program_id}/copy', response={201: ProgramSchema})
 def copy_program_to_client(request, program_id: int, data: AssignOrgProgramRequest):
     """Copy any client program to another client."""
@@ -2548,6 +2582,93 @@ def copy_program_to_client(request, program_id: int, data: AssignOrgProgramReque
         raise HttpError(404, 'Program not found')
     dest = _copy_program_to_client(source, data.client_id, request.user)
     return 201, {**_serialize_program(dest, request, include_targets=True)}
+
+
+def _duplicate_org_program(source: Program, user, name: str | None = None) -> Program:
+    """Deep-copy an org-template program into a new template row, same shape
+    as _copy_program_to_client but staying a template (no client)."""
+    dest = Program.objects.create(
+        is_template=True,
+        external_client_id=None,
+        name=name or f'{source.name} (Copy)',
+        category=source.category,
+        phase=source.phase,
+        status=Program.Status.ACTIVE,
+        treatment_area=source.treatment_area,
+        tags=source.tags,
+        objective=source.objective,
+        instructions=source.instructions,
+        instructions_html=source.instructions_html,
+        professional_instructions_html=source.professional_instructions_html,
+        custom_field_values=source.custom_field_values,
+        prompting_template=source.prompting_template,
+        workflow_template=source.workflow_template,
+        display_order=source.display_order,
+        folder=source.folder,
+        created_by=user,
+    )
+    _copy_image(source.image, dest)
+    _copy_materials(source, dest, user)
+    module_map: dict[int, ProgramModule] = {}
+    submodule_map: dict[int, ProgramSubmodule] = {}
+    for mod in source.modules.prefetch_related('submodules').all():
+        dest_mod = ProgramModule.objects.create(
+            program=dest, name=mod.name, display_order=mod.display_order, created_by=user,
+        )
+        module_map[mod.id] = dest_mod
+        for sub in mod.submodules.all():
+            dest_sub = ProgramSubmodule.objects.create(
+                module=dest_mod, name=sub.name, display_order=sub.display_order, created_by=user,
+            )
+            submodule_map[sub.id] = dest_sub
+    for t in source.targets.all():
+        copied = Target.objects.create(
+            program=dest,
+            name=t.name,
+            measurement_type=t.measurement_type,
+            measurement=t.measurement,
+            timer_type=t.timer_type,
+            sub_items=t.sub_items,
+            sub_item_progression=t.sub_item_progression,
+            default_sub_measurement_type=t.default_sub_measurement_type,
+            default_sub_measurement=t.default_sub_measurement,
+            default_sub_prompting_template=t.default_sub_prompting_template,
+            default_sub_workflow_template=t.default_sub_workflow_template,
+            prompting_template=t.prompting_template,
+            sd_text=t.sd_text,
+            teaching_instructions=t.teaching_instructions,
+            instructions_html=t.instructions_html,
+            interval_seconds=t.interval_seconds,
+            interval_sync_with_session=t.interval_sync_with_session,
+            interval_warn_before_end=t.interval_warn_before_end,
+            interval_pause_on_warning=t.interval_pause_on_warning,
+            interval_warn_seconds_before=t.interval_warn_seconds_before,
+            interval_warning_sound=t.interval_warning_sound,
+            status=t.status,
+            display_order=t.display_order,
+            is_visible_to_staff=t.is_visible_to_staff,
+            module=module_map.get(t.module_id) if t.module_id else None,
+            submodule=submodule_map.get(t.submodule_id) if t.submodule_id else None,
+            created_by=user,
+        )
+        if copied.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
+            _sync_target_sub_items(None, copied, copied.sub_items, user)
+    dest.refresh_from_db()
+    return dest
+
+
+@router.post('/org-programs/{program_id}/duplicate', response={201: OrgProgramSchema})
+def duplicate_org_program(request, program_id: int, data: DuplicateOrgProgramRequest):
+    """Create a new template program in the Library from an existing one.
+    Allowed even if the source is locked — locking only blocks edits to the
+    source row itself, not making copies of it."""
+    require_permission(request, 'org_programs_create')
+    try:
+        template = _org_qs(request).prefetch_related('targets').get(id=program_id)
+    except Program.DoesNotExist:
+        raise HttpError(404, 'Program not found')
+    dest = _duplicate_org_program(template, request.user, name=data.name)
+    return 201, _serialize_org_program(dest, request, include_targets=True)
 
 
 # ---------------------------------------------------------------------------
