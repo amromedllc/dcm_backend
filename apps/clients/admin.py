@@ -1,7 +1,7 @@
 from django.contrib import admin
 from unfold.admin import ModelAdmin, TabularInline
 from shared.admin import OrganizationScopedAdminMixin
-from .models import Client, ClientStaffAssignment, TreatmentPlan
+from .models import Client, ClientStaffAssignment, ClientDirectoryView, TreatmentPlan
 
 
 class StaffAssignmentInline(OrganizationScopedAdminMixin, TabularInline):
@@ -32,3 +32,10 @@ class TreatmentPlanAdmin(OrganizationScopedAdminMixin, ModelAdmin):
     list_filter = ['status', 'plan_date']
     search_fields = ['title', 'client__first_name', 'client__last_name']
     readonly_fields = ['created_at', 'updated_at', 'finalized_at']
+
+
+@admin.register(ClientDirectoryView)
+class ClientDirectoryViewAdmin(OrganizationScopedAdminMixin, ModelAdmin):
+    list_display = ['name', 'visibility', 'visibility_role', 'created_by']
+    list_filter = ['visibility']
+    search_fields = ['name']

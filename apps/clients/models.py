@@ -168,3 +168,32 @@ class TreatmentPlanSignature(OrganizationScopedMixin):
 
     def __str__(self) -> str:
         return f'{self.signer_name} signed plan {self.plan_id} @ {self.signed_at:%Y-%m-%d %H:%M}'
+
+
+class ClientDirectoryView(OrganizationScopedMixin):
+    class Visibility(models.TextChoices):
+        ME = 'me', 'Only me'
+        ALL = 'all', 'All users'
+        ROLE = 'role', 'Specific role'
+
+    name = models.CharField(max_length=200)
+    visibility = models.CharField(max_length=10, choices=Visibility.choices, default=Visibility.ME)
+    visibility_role = models.CharField(max_length=20, blank=True)
+    columns = models.JSONField(default=list)
+    status_filter = models.CharField(max_length=20, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='client_directory_views',
+        db_constraint=False,
+    )
+
+    class Meta:
+        app_label = 'clients'
+        ordering = ['-id']
+
+    def _derive_organization_id(self) -> int | None:
+        return getattr(self.created_by, 'organization_id', None)
+
+    def __str__(self) -> str:
+        return f'{self.name} ({self.created_by_id})'

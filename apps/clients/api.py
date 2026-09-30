@@ -53,7 +53,7 @@ def _cached_list_patients(access_token: str, external_admin_id: int) -> list[dic
 
     return patients
 from apps.sessions.schemas import AppointmentSchema
-from .models import Client, ClientFavorite, ClientStaffAssignment, TreatmentPlan, TreatmentPlanSignature
+from .models import Client, ClientFavorite, ClientDirectoryView, ClientStaffAssignment, TreatmentPlan, TreatmentPlanSignature
 from .schemas import (
     SignTreatmentPlanRequest,
     ClientFilterOptionSchema,
@@ -69,6 +69,9 @@ from .schemas import (
     TelehealthConnectRequest,
     TelehealthConnectionDetailsSchema,
     TelehealthAdmitRequest,
+    ClientDirectoryViewSchema,
+    ClientDirectoryViewRequest,
+    ClientDirectoryViewUpdateRequest,
 )
 from apps.integrations.telehealth_client import TelehealthError, get_connection_details, admit_participant
 
@@ -418,6 +421,68 @@ def _sync_clients_from_tpms(
         search=search,
     )
 
+
+
+# ---------------------------------------------------------------------------
+# Client directory views — declared before /{client_id} routes so Django
+# Ninja doesn't swallow /directory-views as a client_id path param.
+# ---------------------------------------------------------------------------
+
+def _visible_views_qs(request):
+    """Return views visible to the requesting user."""
+    user = request.user
+    org_id = getattr(user, 'organization_id', None)
+    from django.db.models import Q
+    qs = ClientDirectoryView.objects.filter(organization_id=org_id)
+    return qs.filter(
+        Q(created_by=user)
+        | Q(visibility='all')
+        | Q(visibility='role', visibility_role=user.role)
+    )
+
+
+@router.get('/directory-views', response=list[ClientDirectoryViewSchema])
+def list_directory_views(request):
+    return list(_visible_views_qs(request).order_by('-id'))
+
+
+@router.post('/directory-views', response={201: ClientDirectoryViewSchema})
+def create_directory_view(request, data: ClientDirectoryViewRequest):
+    from shared.tenancy import current_org_id_or_none
+    org_id = current_org_id_or_none()
+    view = ClientDirectoryView.objects.create(
+        created_by=request.user,
+        organization_id=org_id,
+        **data.dict(),
+    )
+    return 201, view
+
+
+@router.patch('/directory-views/{view_id}', response=ClientDirectoryViewSchema)
+def update_directory_view(request, view_id: int, data: ClientDirectoryViewUpdateRequest):
+    try:
+        view = ClientDirectoryView.objects.get(id=view_id, created_by=request.user)
+    except ClientDirectoryView.DoesNotExist:
+        raise HttpError(404, 'View not found')
+    for field, value in data.dict(exclude_none=True).items():
+        setattr(view, field, value)
+    view.save()
+    return view
+
+
+@router.delete('/directory-views/{view_id}', response={204: None})
+def delete_directory_view(request, view_id: int):
+    try:
+        view = ClientDirectoryView.objects.get(id=view_id, created_by=request.user)
+    except ClientDirectoryView.DoesNotExist:
+        raise HttpError(404, 'View not found')
+    view.delete()
+    return 204, None
+
+
+# ---------------------------------------------------------------------------
+# Client CRUD
+# ---------------------------------------------------------------------------
 
 @router.get('/filter-options', response=list[ClientFilterOptionSchema])
 def list_client_filter_options(request, search: str | None = None):

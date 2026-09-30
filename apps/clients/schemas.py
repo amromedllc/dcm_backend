@@ -44,7 +44,6 @@ class ClientUpdateRequest(Schema):
     first_name: NonEmptyStr | None = None
     last_name: NonEmptyStr | None = None
     preferred_name: str | None = None
-    external_id: str | None = None
     date_of_birth: date | None = None
     status: Client.Status | None = None
     intake_date: date | None = None
@@ -140,3 +139,29 @@ class TreatmentPlanUpdateRequest(Schema):
     date_to: date | None = None
     status: str | None = None
     sections: dict | None = None
+
+
+class ClientDirectoryViewSchema(Schema):
+    id: int
+    name: str
+    visibility: str
+    visibility_role: str
+    columns: list
+    status_filter: str
+    created_by_id: int
+
+
+class ClientDirectoryViewRequest(Schema):
+    name: str
+    visibility: str = 'me'
+    visibility_role: str = ''
+    columns: list = []
+    status_filter: str = ''
+
+
+class ClientDirectoryViewUpdateRequest(Schema):
+    name: str | None = None
+    visibility: str | None = None
+    visibility_role: str | None = None
+    columns: list | None = None
+    status_filter: str | None = None
