@@ -179,6 +179,7 @@ class ProgramMaterialSchema(Schema):
 class ProgramSchema(Schema):
     id: int
     client_id: int | None = None
+    is_locked: bool = False
     name: str
     category: str
     status: str

@@ -891,6 +891,7 @@ def _serialize_program(program: Program, request=None, include_targets: bool = F
     data = {
         'id': program.id,
         'client_id': program.external_client_id,
+        'is_locked': program.is_locked,
         'name': program.name,
         'category': program.category,
         'status': program.status,
@@ -1038,6 +1039,8 @@ def update_program(request, program_id: int, data: ProgramUpdateRequest):
     _require_program_write(request, 'edit')
     program = _get_program_or_404(request, program_id)
     _check_program_write(request, program, 'edit')
+    if program.is_locked:
+        raise HttpError(400, 'This program is locked. Unlock it before making changes.')
     updates = data.dict(exclude_none=True)
     _validate_template_refs(request, updates.get('prompting_template_id'), updates.get('workflow_template_id'))
     if updates.get('category') == Program.Category.INSTRUCTIONS_ONLY and program.targets.exists():
