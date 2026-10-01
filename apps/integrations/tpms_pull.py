@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime
-from typing import Any
+from datetime import date, datetime, timedelta
+from typing import Any, Callable
 
 from django.db import transaction
 from django.utils import timezone
@@ -669,6 +669,8 @@ def _map_admin_appointment(
     authorization_id = str(_dig(row, 'authorization_id') or '')[:100]
     payor_id = _as_int(_dig(row, 'payor_id'))
     time_duration = _as_int(_dig(row, 'time_duration', 'duration'))
+    if time_duration is not None and time_duration < 0:
+        time_duration = None
     cpt_code = str(_dig(row, 'cpt_code') or '')[:20]
 
     external_created_at = _aware(_parse_datetime(_dig(row, 'created_at')))
@@ -701,7 +703,58 @@ def _map_admin_appointment(
     }
 
 
+def _month_windows(from_date: date, to_date: date) -> list[tuple[date, date]]:
+    """Splits [from_date, to_date] into calendar-month windows (inclusive),
+    so a multi-year pull is many small TPMS requests instead of one
+    unbounded one that risks both TPMS's own response time and the web
+    server's request timeout."""
+    windows: list[tuple[date, date]] = []
+    cur = from_date
+    while cur <= to_date:
+        next_month_start = date(cur.year + 1, 1, 1) if cur.month == 12 else date(cur.year, cur.month + 1, 1)
+        window_end = min(to_date, next_month_start - timedelta(days=1))
+        windows.append((cur, window_end))
+        cur = next_month_start
+    return windows
+
+
 def pull_appointments(
+    org: Organization,
+    *,
+    from_date: date,
+    to_date: date,
+    patient_ids: list[int] | None = None,
+    staff_ids: list[int] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> PullResult:
+    """Pulls appointments for [from_date, to_date] one calendar month at a
+    time via _pull_appointments_window, aggregating the results. Chunking
+    makes a years-long backfill tractable (each TPMS request covers at most
+    one month) and gives on_progress something meaningful to report when
+    this runs as a long Celery task."""
+    if to_date < from_date:
+        raise HttpError(400, 'to_date must be on or after from_date')
+
+    windows = _month_windows(from_date, to_date)
+    total = PullResult()
+    for i, (window_start, window_end) in enumerate(windows, start=1):
+        chunk = _pull_appointments_window(
+            org,
+            from_date=window_start,
+            to_date=window_end,
+            patient_ids=patient_ids,
+            staff_ids=staff_ids,
+        )
+        total.created += chunk.created
+        total.updated += chunk.updated
+        total.skipped += chunk.skipped
+        total.errors.extend(chunk.errors)
+        if on_progress:
+            on_progress(i, len(windows))
+    return total
+
+
+def _pull_appointments_window(
     org: Organization,
     *,
     from_date: date,

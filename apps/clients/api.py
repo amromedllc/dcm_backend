@@ -53,9 +53,10 @@ def _cached_list_patients(access_token: str, external_admin_id: int) -> list[dic
 
     return patients
 from apps.sessions.schemas import AppointmentSchema
-from .models import Client, ClientStaffAssignment, TreatmentPlan, TreatmentPlanSignature
+from .models import Client, ClientFavorite, ClientDirectoryView, ClientStaffAssignment, TreatmentPlan, TreatmentPlanSignature
 from .schemas import (
     SignTreatmentPlanRequest,
+    ClientFilterOptionSchema,
     ClientSchema,
     ClientCreateRequest,
     ClientUpdateRequest,
@@ -68,6 +69,9 @@ from .schemas import (
     TelehealthConnectRequest,
     TelehealthConnectionDetailsSchema,
     TelehealthAdmitRequest,
+    ClientDirectoryViewSchema,
+    ClientDirectoryViewRequest,
+    ClientDirectoryViewUpdateRequest,
 )
 from apps.integrations.telehealth_client import TelehealthError, get_connection_details, admit_participant
 
@@ -418,28 +422,152 @@ def _sync_clients_from_tpms(
     )
 
 
+
+# ---------------------------------------------------------------------------
+# Client directory views — declared before /{client_id} routes so Django
+# Ninja doesn't swallow /directory-views as a client_id path param.
+# ---------------------------------------------------------------------------
+
+def _visible_views_qs(request):
+    """Return views visible to the requesting user."""
+    user = request.user
+    org_id = getattr(user, 'organization_id', None)
+    from django.db.models import Q
+    qs = ClientDirectoryView.objects.filter(organization_id=org_id)
+    return qs.filter(
+        Q(created_by=user)
+        | Q(visibility='all')
+        | Q(visibility='role', visibility_role=user.role)
+    )
+
+
+@router.get('/directory-views', response=list[ClientDirectoryViewSchema])
+def list_directory_views(request):
+    return list(_visible_views_qs(request).order_by('-id'))
+
+
+@router.post('/directory-views', response={201: ClientDirectoryViewSchema})
+def create_directory_view(request, data: ClientDirectoryViewRequest):
+    from shared.tenancy import current_org_id_or_none
+    org_id = current_org_id_or_none()
+    view = ClientDirectoryView.objects.create(
+        created_by=request.user,
+        organization_id=org_id,
+        **data.dict(),
+    )
+    return 201, view
+
+
+@router.patch('/directory-views/{view_id}', response=ClientDirectoryViewSchema)
+def update_directory_view(request, view_id: int, data: ClientDirectoryViewUpdateRequest):
+    try:
+        view = ClientDirectoryView.objects.get(id=view_id, created_by=request.user)
+    except ClientDirectoryView.DoesNotExist:
+        raise HttpError(404, 'View not found')
+    for field, value in data.dict(exclude_none=True).items():
+        setattr(view, field, value)
+    view.save()
+    return view
+
+
+@router.delete('/directory-views/{view_id}', response={204: None})
+def delete_directory_view(request, view_id: int):
+    try:
+        view = ClientDirectoryView.objects.get(id=view_id, created_by=request.user)
+    except ClientDirectoryView.DoesNotExist:
+        raise HttpError(404, 'View not found')
+    view.delete()
+    return 204, None
+
+
+# ---------------------------------------------------------------------------
+# Client CRUD
+# ---------------------------------------------------------------------------
+
+@router.get('/filter-options', response=list[ClientFilterOptionSchema])
+def list_client_filter_options(request, search: str | None = None):
+    """Dedicated, DB-only endpoint for filter dropdowns (e.g. the sidebar's
+    central client switcher) — deliberately separate from list_clients
+    below, which has a sync=True mode that calls TherapyPMS live and (per
+    its own docstring) actually fetches *providers*, not patients. This
+    endpoint never touches TPMS and always reflects exactly what
+    Integrations -> Pull Clients synced, with no sync param to misuse.
+
+    Favorited clients (ClientFavorite, per-user) sort first, each group
+    alphabetical — mirrors the client switcher's "favorites float to the
+    top" behavior.
+    """
+    qs = _get_accessible_clients(request).filter(status=Client.Status.ACTIVE)
+    if search:
+        qs = qs.filter(
+            Q(first_name__icontains=search)
+            | Q(last_name__icontains=search)
+            | Q(preferred_name__icontains=search)
+        )
+    favorite_ids = set(
+        ClientFavorite.objects.filter(user=request.user, client__in=qs).values_list('client_id', flat=True)
+    )
+    clients = list(qs.order_by('last_name', 'first_name'))
+    clients.sort(key=lambda c: c.id not in favorite_ids)
+    return [
+        {
+            'id': c.id,
+            'external_id': c.external_id,
+            'full_name': c.full_name,
+            'is_favorite': c.id in favorite_ids,
+        }
+        for c in clients
+    ]
+
+
+@router.post('/{client_id}/favorite', response=ClientFilterOptionSchema)
+def toggle_client_favorite(request, client_id: int):
+    """Toggle the calling user's own favorite on a client — per-user, not
+    shared with teammates. Returns the client's new favorite state."""
+    client = _get_client_or_404(request, client_id)
+    favorite, created = ClientFavorite.objects.get_or_create(user=request.user, client=client)
+    if not created:
+        favorite.delete()
+    return {
+        'id': client.id,
+        'external_id': client.external_id,
+        'full_name': client.full_name,
+        'is_favorite': created,
+    }
+
+
 @router.get('', response=list[ClientSchema])
 def list_clients(
     request,
     include_inactive: bool = False,
     search: str | None = None,
-    sync: bool = True,
+    sync: bool = False,
 ):
     """
-    Returns providers scoped to the logged-in user's TherapyPMS session.
+    DB-only by default: returns DCM's own Client rows (populated by
+    Integrations → Pull Clients, or created natively) — same list every
+    caller (web, mobile) sees, deterministic, no live TherapyPMS dependency.
 
-    Uses GET /api/v1/ios/appointment/filter/providers with the TPMS Bearer
-    token captured at login, then upserts DCM Client rows so
-    programs/sessions keep a stable id. Note: Client.external_id now holds a
-    TPMS *provider* id, not a patient id — the client-sessions endpoint below
-    still treats it as a patient id and has not been updated to match.
+    sync=True opts into a live TherapyPMS round trip instead, which — despite
+    the name — actually fetches *providers*, not patients, via GET
+    /api/v1/ios/appointment/filter/providers with the TPMS Bearer token
+    captured at login, then upserts them into this same Client table
+    (Client.external_id ends up holding a TPMS *provider* id in that case,
+    not a patient id — every other endpoint in this app, including
+    list_client_sessions below, expects a patient id there). Defaulting this to True
+    used to mean every plain "list my clients" call — from the web sidebar's
+    client switcher, the dashboard's recent-clients cards, and the mobile
+    app, none of which ever pass sync explicitly — silently overwrote real
+    pulled-client data with provider rows on every page load. Nothing in
+    this codebase opts into sync=True; it's kept only in case an external
+    caller (e.g. a partner API key) relies on it.
 
-    Falls back to DB-cached Client rows (same as native/non-TPMS orgs) when
-    there's no cached TPMS Bearer token for this session — staff/provider
-    logins no longer go through TherapyPMS at all (see accounts.api.login),
-    so that cache is never populated for them; same graceful-degradation
-    pattern already used by account_profile and the notifications provider
-    list, rather than hard-failing with 401.
+    Falls back to this same DB-only path when there's no cached TPMS Bearer
+    token for this session even with sync=True — staff/provider logins no
+    longer go through TherapyPMS at all (see accounts.api.login), so that
+    cache is never populated for them; same graceful-degradation pattern
+    already used by account_profile and the notifications provider list,
+    rather than hard-failing with 401.
     """
     if request.user.external_admin_id is None or not sync or not get_tpms_access_token(request.user.id):
         return _list_native_clients(request, include_inactive, search)
@@ -476,6 +604,14 @@ def update_client(request, client_id: int, data: ClientUpdateRequest):
         raise HttpError(400, 'discharge_date cannot be before intake_date')
     client.save()
     return client
+
+
+@router.delete('/{client_id}', response={204: None})
+def delete_client(request, client_id: int):
+    require_permission(request, 'clients_edit')
+    client = _get_client_or_404(request, client_id)
+    client.delete()
+    return 204, None
 
 
 # ---------------------------------------------------------------------------
@@ -1000,23 +1136,32 @@ def list_client_sessions(
     Return appointments for a client from DCM's own synced data
     (Integrations → Pull Appointments) — no live TherapyPMS call.
 
-    /clients rows are now TPMS providers (see list_providers in
-    tpms_auth_client.py), so `Client.external_id` here is a provider id, not
-    a patient id. Matched against the local Appointment table via
-    Appointment.staff's external_employee_id (set for every appointment
-    pulled for that provider — see integrations.tpms_pull.pull_appointments).
+    Matched against the local Appointment table via external_client_id,
+    which integrations.tpms_pull.pull_appointments populates with the TPMS
+    *patient* id (see pull_appointments's external_client_id: patient_id) —
+    the same convention _list_native_client_sessions below already uses for
+    native-mode appointments, just keyed by client.external_id (the TPMS
+    patient id) instead of client.id (the local pk) for a TPMS-linked org.
+
+    (This used to join through Appointment.staff's external_employee_id
+    instead, on the assumption that Client rows held TPMS *providers* — that
+    assumption no longer holds now that Client is patient data again; see
+    accounts.api.login's cutover and the Pull Clients / central-filter fixes
+    from the same day. Matching on external_client_id directly is also
+    simpler: no dependency on Appointment.staff being resolved at all.)
 
     Access is scoped the same way _get_client_or_404/_get_accessible_clients
     scopes everything else in this app: any TPMS-linked staff can reach any
-    provider's schedule within their own practice (external_admin_id) — see
+    client's schedule within their own practice (external_admin_id) — see
     _get_accessible_clients's "TPMS-linked staff — practice-scoped" branch.
-    There is deliberately no extra "only your own provider id" restriction
-    here on top of that: staff routinely need to view/assign programs on a
-    colleague's sessions (e.g. covering another provider's client), and an
-    earlier version of this endpoint added that restriction, which silently
-    emptied the list for exactly that legitimate case instead of raising an
-    error — a program-assign call would succeed, but the very next refetch
-    of this endpoint (to show it) came back empty.
+    There is deliberately no extra "only your own assigned clients"
+    restriction here on top of that: staff routinely need to view/assign
+    programs on a colleague's sessions (e.g. covering another provider's
+    client), and an earlier version of this endpoint added an analogous
+    provider-ownership restriction, which silently emptied the list for
+    exactly that legitimate case instead of raising an error — a
+    program-assign call would succeed, but the very next refetch of this
+    endpoint (to show it) came back empty.
     """
     from django.db.models import Count as _Count
     from apps.sessions.models import Appointment as DcmAppointment
@@ -1027,11 +1172,11 @@ def list_client_sessions(
         return _list_native_client_sessions(request, client, status, from_date, to_date)
 
     try:
-        tpms_provider_id = int(client.external_id)
+        tpms_patient_id = int(client.external_id)
     except (TypeError, ValueError):
-        raise HttpError(400, 'Client is missing a valid TherapyPMS provider id')
+        raise HttpError(400, 'Client is missing a valid TherapyPMS patient id')
 
-    qs = DcmAppointment.objects.filter(staff__external_employee_id=tpms_provider_id).annotate(
+    qs = DcmAppointment.objects.filter(external_client_id=tpms_patient_id).annotate(
         assigned_program_count=_Count('lesson__lesson_programs', distinct=True),
     )
     if status:

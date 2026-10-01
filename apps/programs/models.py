@@ -134,6 +134,7 @@ class Program(TenantAwareModel):
     image = models.ImageField(upload_to=_program_upload_path, max_length=500, blank=True, null=True)
     display_order = models.PositiveIntegerField(default=0, db_index=True)
     archived_at = models.DateTimeField(null=True, blank=True)
+    is_locked = models.BooleanField(default=False)
     folder = models.ForeignKey(
         'ProgramFolder',
         on_delete=models.SET_NULL,

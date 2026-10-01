@@ -179,6 +179,7 @@ class ProgramMaterialSchema(Schema):
 class ProgramSchema(Schema):
     id: int
     client_id: int | None = None
+    is_locked: bool = False
     name: str
     category: str
     status: str
@@ -499,6 +500,7 @@ class AddProgramToLessonRequest(Schema):
 class OrgProgramSchema(Schema):
     id: int
     is_template: bool
+    is_locked: bool = False
     name: str
     category: str
     status: str
@@ -547,6 +549,18 @@ class OrgProgramCreateRequest(Schema):
 
 class AssignOrgProgramRequest(Schema):
     client_id: int
+
+
+class AssignOrgProgramBulkRequest(Schema):
+    client_ids: list[int] = Field(min_length=1, max_length=200)
+
+
+class DuplicateOrgProgramRequest(Schema):
+    name: str | None = Field(default=None, max_length=200)
+
+
+class SetOrgProgramLockRequest(Schema):
+    locked: bool
 
 
 # ---------------------------------------------------------------------------

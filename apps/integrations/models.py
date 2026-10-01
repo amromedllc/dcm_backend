@@ -60,3 +60,50 @@ class Provider(TenantAwareModel):
 
     def __str__(self) -> str:
         return self.full_name or self.email or f'Provider #{self.external_employee_id}'
+
+
+class PullJob(TenantAwareModel):
+    """
+    Tracks one TherapyPMS pull (clients/providers/appointments) dispatched as
+    a Celery task — appointments in particular can span years, so the pull
+    is chunked month by month inside the task and this row's progress_* is
+    updated after each chunk, letting the admin UI poll instead of blocking
+    on one request that would exceed the web server's timeout.
+    """
+
+    class JobType(models.TextChoices):
+        CLIENTS = 'clients', 'Clients'
+        PROVIDERS = 'providers', 'Providers'
+        APPOINTMENTS = 'appointments', 'Appointments'
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        RUNNING = 'running', 'Running'
+        COMPLETED = 'completed', 'Completed'
+        FAILED = 'failed', 'Failed'
+
+    job_type = models.CharField(max_length=20, choices=JobType.choices, db_index=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True)
+
+    # e.g. {"from_date": "2022-01-01", "to_date": "2026-10-01"} for appointments
+    params = models.JSONField(default=dict, blank=True)
+
+    # Progress is in chunks (months) for appointments; 0/0 for clients/providers,
+    # which pull in a single request and just flip pending -> running -> done.
+    progress_current = models.IntegerField(default=0)
+    progress_total = models.IntegerField(default=0)
+
+    created_count = models.IntegerField(default=0)
+    updated_count = models.IntegerField(default=0)
+    skipped_count = models.IntegerField(default=0)
+    error_message = models.TextField(blank=True)
+
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        app_label = 'integrations'
+        ordering = ['-created_at']
+
+    def __str__(self) -> str:
+        return f'{self.job_type} pull [{self.status}] — {self.created_at:%Y-%m-%d}'

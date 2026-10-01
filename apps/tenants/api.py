@@ -7,6 +7,7 @@ from ninja import Router
 from ninja.errors import HttpError
 
 from apps.accounts.models import APIKey, User
+from apps.integrations.models import PullJob
 from .models import Domain, Organization, OrganizationTpmsAdminId
 from .schemas import (
     OrganizationAuthenticationSettingsSchema,
@@ -14,9 +15,9 @@ from .schemas import (
     OrganizationIntegrationSettingsSchema,
     OrganizationIntegrationSettingsUpdate,
     OrganizationPracticeEmailSettingsSchema,
+    PullJobSchema,
     TherapyPmsConnectRequest,
     TherapyPmsPullAppointmentsRequest,
-    TherapyPmsPullResultSchema,
     OrganizationSuperadminCreate,
     OrganizationSuperadminUpdate,
     SuperadminAPIKeyCreate,
@@ -356,46 +357,89 @@ def disconnect_integration(request):
     return 204, None
 
 
+def _dispatch_pull_job(request, job_type: str, params: dict) -> PullJob:
+    """Creates a PullJob row and hands it to Celery. A pull (appointments
+    especially, which can span years) used to run inline in this request and
+    could exceed the web server's own timeout; it now returns immediately
+    and the caller polls /pull-jobs/{id} for progress."""
+    from apps.integrations.tasks import run_pull_job
+
+    org = _organization(request)
+    job = PullJob.objects.create(
+        job_type=job_type,
+        params=params,
+        created_by=request.user,
+    )
+    run_pull_job.delay(job_id=job.id, org_id=org.id)
+    return job
+
+
 @router.post(
     '/settings/integrations/therapy-pms/pull/clients',
-    response=TherapyPmsPullResultSchema,
+    response={202: PullJobSchema},
 )
 def pull_therapy_pms_clients(request):
-    """Pull clients from TherapyPMS admin API into this organization only."""
+    """Queue a background pull of clients from TherapyPMS into this org."""
     _require_manager(request)
-    from apps.integrations.tpms_pull import pull_clients
-
-    return pull_clients(_organization(request)).as_dict()
+    return 202, _dispatch_pull_job(request, PullJob.JobType.CLIENTS, {})
 
 
 @router.post(
     '/settings/integrations/therapy-pms/pull/providers',
-    response=TherapyPmsPullResultSchema,
+    response={202: PullJobSchema},
 )
 def pull_therapy_pms_providers(request):
-    """Pull providers from TherapyPMS admin API into this organization's users."""
+    """Queue a background pull of providers from TherapyPMS into this org's users."""
     _require_manager(request)
-    from apps.integrations.tpms_pull import pull_providers
-
-    return pull_providers(_organization(request)).as_dict()
+    return 202, _dispatch_pull_job(request, PullJob.JobType.PROVIDERS, {})
 
 
 @router.post(
     '/settings/integrations/therapy-pms/pull/appointments',
-    response=TherapyPmsPullResultSchema,
+    response={202: PullJobSchema},
 )
 def pull_therapy_pms_appointments(request, data: TherapyPmsPullAppointmentsRequest):
-    """Pull appointments/sessions for a date range into this organization only."""
+    """Queue a background pull of appointments/sessions for a date range.
+    Chunked month-by-month inside the task, so a multi-year backfill (e.g.
+    2022 to today) no longer needs to finish inside one HTTP request."""
     _require_manager(request)
-    from apps.integrations.tpms_pull import pull_appointments
+    if data.to_date < data.from_date:
+        raise HttpError(400, 'to_date must be on or after from_date')
+    params = {
+        'from_date': data.from_date.isoformat(),
+        'to_date': data.to_date.isoformat(),
+        'patient_ids': data.patient_ids,
+        'staff_ids': data.staff_ids,
+    }
+    return 202, _dispatch_pull_job(request, PullJob.JobType.APPOINTMENTS, params)
 
-    return pull_appointments(
-        _organization(request),
-        from_date=data.from_date,
-        to_date=data.to_date,
-        patient_ids=data.patient_ids,
-        staff_ids=data.staff_ids,
-    ).as_dict()
+
+@router.get(
+    '/settings/integrations/pull-jobs/{job_id}',
+    response=PullJobSchema,
+)
+def get_pull_job(request, job_id: int):
+    """Poll a pull job's progress/result — the admin UI calls this instead of
+    blocking on the pull itself."""
+    _require_manager(request)
+    try:
+        return PullJob.objects.get(id=job_id)
+    except PullJob.DoesNotExist:
+        raise HttpError(404, 'Pull job not found')
+
+
+@router.get(
+    '/settings/integrations/pull-jobs',
+    response=list[PullJobSchema],
+)
+def list_pull_jobs(request, job_type: str | None = None, limit: int = 5):
+    """Most recent pull jobs for this org, optionally filtered by type — lets
+    the admin UI resume showing an in-progress job after a page reload."""
+    _require_manager(request)
+    qs = PullJob.objects.all()
+    if job_type:
+        qs = qs.filter(job_type=job_type)
+    return list(qs[:max(1, min(limit, 20))])
 
 
 # ---------------------------------------------------------------------------
