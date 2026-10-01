@@ -41,6 +41,22 @@ class TherapyPmsPullAppointmentsRequest(Schema):
     staff_ids: list[int] | None = None
 
 
+class PullJobSchema(Schema):
+    id: int
+    job_type: str
+    status: str
+    params: dict
+    progress_current: int
+    progress_total: int
+    created_count: int
+    updated_count: int
+    skipped_count: int
+    error_message: str
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
 class TpmsAdminEmailSettingSchema(Schema):
     id: int
     admin_id: int
