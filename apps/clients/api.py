@@ -235,9 +235,8 @@ def _get_accessible_clients(request):
     Return the client queryset visible to the requesting user.
 
     - Admins/supervisors: all clients in their TPMS practice scope.
-    - TPMS-linked staff: same practice scope (patient list is already
-      token-scoped by TherapyPMS; appointment history no longer comes from DB).
-    - Native staff: clients via ClientStaffAssignment.
+    - Staff (native or TPMS-linked): only clients assigned to them via
+      ClientStaffAssignment (set up in Manage Users / client-directory).
     """
     qs = Client.objects.all()
 
@@ -247,11 +246,8 @@ def _get_accessible_clients(request):
     if request.user.role in ('admin', 'supervisor'):
         return qs
 
-    if request.user.external_admin_id is not None:
-        # TPMS-linked staff — practice-scoped (TherapyPMS DB removed)
-        return qs
-
-    # Native staff: derive accessible clients from ClientStaffAssignment
+    # Staff: derive accessible clients from ClientStaffAssignment, whether
+    # they are native users or TPMS-linked.
     assigned_client_ids = ClientStaffAssignment.objects.filter(
         user=request.user, is_active=True,
     ).values_list('client_id', flat=True)
@@ -591,7 +587,14 @@ def create_client(request, data: ClientCreateRequest):
 
 @router.get('/{client_id}', response=ClientSchema)
 def get_client(request, client_id: int):
-    return _get_client_or_404(request, client_id)
+    client = _get_client_or_404(request, client_id)
+    client.is_assigned_provider = (
+        request.user.role in ('admin', 'supervisor')
+        or ClientStaffAssignment.objects.filter(
+            client=client, user=request.user, is_active=True,
+        ).exists()
+    )
+    return client
 
 
 @router.patch('/{client_id}', response=ClientSchema)

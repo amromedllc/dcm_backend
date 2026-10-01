@@ -28,6 +28,7 @@ class ClientSchema(Schema):
     discharge_date: date | None
     created_at: datetime
     updated_at: datetime
+    is_assigned_provider: bool = True
 
 
 class ClientCreateRequest(Schema):
