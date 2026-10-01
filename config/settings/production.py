@@ -13,15 +13,12 @@ APPEND_SLASH = False
 if DEBUG:
     ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=['localhost', '127.0.0.1'])
 else:
-    # No default in production — fail loudly at startup rather than silently
-    # accepting requests for an unconfigured Host header.
     ALLOWED_HOSTS = env.list('ALLOWED_HOSTS')
 
 
 
 CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=['https://api.progressly.io'])
 
-# Multi-tenant setup (django-tenants, schema-based isolation)
 SHARED_APPS = [
     'django_tenants',
     'corsheaders',
@@ -145,15 +142,10 @@ JWT_ALGORITHM = 'HS256'
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES = env.int('JWT_ACCESS_TOKEN_EXPIRE_MINUTES', default=15)
 JWT_REFRESH_TOKEN_EXPIRE_DAYS = env.int('JWT_REFRESH_TOKEN_EXPIRE_DAYS', default=7)
 
-# TherapyPMS HTTP API (auth — encrypt → login; no direct DB password checks)
 TPMS_API_BASE_URL = env('TPMS_API_BASE_URL', default='https://app.therapypms.com')
 TPMS_API_TIMEOUT_SECONDS = env.int('TPMS_API_TIMEOUT_SECONDS', default=20)
 
-# AI drafting (assessment builder). Any OpenAI-compatible chat-completions service works;
-# the defaults point at NVIDIA's free developer API (key from build.nvidia.com).
-# AI is used only when AI_ENABLED is true AND AI_API_KEY is set.
 AI_API_BASE_URL = env('AI_API_BASE_URL', default='https://integrate.api.nvidia.com/v1')
-# Master switch. When False, AI is refused by the server and its buttons are hidden in the web app.
 AI_ENABLED = env.bool('AI_ENABLED', default=False)
 AI_API_KEY = env('AI_API_KEY', default='')
 AI_MODEL = env('AI_MODEL', default='nvidia/nemotron-3-super-120b-a12b')
