@@ -865,7 +865,10 @@ def list_sessions(
         qs = qs.filter(started_at__gte=day_bound(date_from, time.min))
     if date_to:
         qs = qs.filter(started_at__lte=day_bound(date_to, time.max))
-    if request.user.role == 'staff':
+    if client_id:
+        if staff_id:
+            qs = qs.filter(staff_id=staff_id)
+    elif request.user.role == 'staff':
         qs = qs.filter(staff_id=request.user.id)
     elif staff_id:
         qs = qs.filter(staff_id=staff_id)
