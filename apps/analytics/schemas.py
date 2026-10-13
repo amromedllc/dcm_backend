@@ -255,3 +255,29 @@ class DurationOccurrenceSchema(Schema):
     target_name: str
     index: int
     duration_seconds: int
+
+
+class AssessmentSkillSummarySchema(Schema):
+    target_id: int
+    target_name: str
+    latest_pct: float | None = None
+    previous_pct: float | None = None
+    change: float | None = None
+    last_date: Date | None = None
+    sessions_scored: int = 0
+
+
+class AssessmentAreaSummarySchema(Schema):
+    module_id: int | None = None
+    module_name: str
+    total_skills: int
+    scored_skills: int
+    latest_avg_pct: float | None = None
+    change: float | None = None
+    last_date: Date | None = None
+    skills: list[AssessmentSkillSummarySchema]
+
+
+class AssessmentProgramSummarySchema(Schema):
+    program_id: int
+    areas: list[AssessmentAreaSummarySchema]

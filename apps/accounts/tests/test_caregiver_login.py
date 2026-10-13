@@ -99,12 +99,19 @@ class LoginDispatchTests(TestCase):
             self.assertIsNone(user.external_employee_id)
             self.assertEqual(user.external_admin_id, 501)
 
-    def test_staff_login_still_works(self):
+    def test_staff_login_with_local_password_works(self):
+        """Staff/provider login no longer goes through TherapyPMS at all —
+        it authenticates locally against a password set via an admin-issued
+        password-set link (see submit_password_set_link)."""
+        staff = User.objects.create_user(
+            email='jane@example.com', password='secret-pass',
+            first_name='Jane', last_name='Smith', role=User.Role.STAFF,
+            external_admin_id=501, organization=self.org,
+        )
         with schema_context(self.org.schema_name), tenant_context(self.org.pk):
-            tokens = self._login(STAFF_LOGIN_PAYLOAD)
+            tokens = login(self.request, LoginRequest(email='jane@example.com', password='secret-pass'))
             self.assertEqual(tokens.role, User.Role.STAFF)
-            user = User.objects.get(id=tokens.user_id)
-            self.assertIsNone(user.external_client_id)
+            self.assertEqual(tokens.user_id, staff.id)
 
     def test_client_portal_login_without_local_client_row_is_403(self):
         with schema_context(self.org.schema_name), tenant_context(self.org.pk):
@@ -112,7 +119,7 @@ class LoginDispatchTests(TestCase):
                 self._login(CLIENT_PORTAL_LOGIN_PAYLOAD)
             self.assertEqual(ctx.exception.status_code, 403)
 
-    def test_superuser_can_login_with_local_password_when_tpms_rejects(self):
+    def test_superuser_can_login_with_local_password(self):
         superuser = User.objects.create_superuser(
             email='super@example.com',
             password='secret-pass',
@@ -120,27 +127,42 @@ class LoginDispatchTests(TestCase):
             last_name='Admin',
         )
         with schema_context(self.org.schema_name), tenant_context(self.org.pk):
-            with patch('apps.accounts.api.tpms_authenticate_raw', side_effect=TpmsAuthError('Credentials do not match our records')):
-                tokens = login(self.request, LoginRequest(email=superuser.email, password='secret-pass'))
+            tokens = login(self.request, LoginRequest(email=superuser.email, password='secret-pass'))
 
             self.assertEqual(tokens.user_id, superuser.id)
             self.assertEqual(tokens.role, User.Role.ADMIN)
             self.assertTrue(decode_token(tokens.access_token)['is_superuser'])
 
-    def test_regular_local_user_cannot_login_when_tpms_rejects(self):
+    def test_local_staff_user_bound_to_practice_can_login(self):
         local_user = User.objects.create_user(
             email='local@example.com',
             password='secret-pass',
             first_name='Local',
             last_name='User',
             role=User.Role.ADMIN,
+            external_admin_id=501,  # matches self.org's OrganizationTpmsAdminId
             organization=self.org,
         )
         with schema_context(self.org.schema_name), tenant_context(self.org.pk):
-            with patch('apps.accounts.api.tpms_authenticate_raw', side_effect=TpmsAuthError('Credentials do not match our records')):
-                with self.assertRaises(HttpError) as ctx:
-                    login(self.request, LoginRequest(email=local_user.email, password='secret-pass'))
+            tokens = login(self.request, LoginRequest(email=local_user.email, password='secret-pass'))
+            self.assertEqual(tokens.user_id, local_user.id)
 
+    def test_local_staff_user_not_bound_to_this_practice_is_401(self):
+        """Tenant binding (C-01's local-auth equivalent) — a local password
+        alone isn't enough; the user must belong to one of this tenant's
+        mapped TPMS practices, same as the old TPMS-proxied check did."""
+        local_user = User.objects.create_user(
+            email='local@example.com',
+            password='secret-pass',
+            first_name='Local',
+            last_name='User',
+            role=User.Role.ADMIN,
+            external_admin_id=999,  # not in self.org's tpms_admin_ids
+            organization=self.org,
+        )
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            with self.assertRaises(HttpError) as ctx:
+                login(self.request, LoginRequest(email=local_user.email, password='secret-pass'))
             self.assertEqual(ctx.exception.status_code, 401)
 
     def test_client_portal_login_wrong_practice_is_401(self):

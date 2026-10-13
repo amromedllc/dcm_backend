@@ -17,6 +17,9 @@ class Organization(TenantMixin):
         TWENTY_FOUR_HOURS = 24 * 60, '24 hours'
         ONE_WEEK = 7 * 24 * 60, '1 week'
 
+    class IntegrationPlatform(models.TextChoices):
+        THERAPY_PMS = 'therapy_pms', 'TherapyPMS'
+
     name = models.CharField(max_length=200)
     slug = models.SlugField(unique=True)
     plan = models.CharField(max_length=20, choices=Plan.choices, default=Plan.STARTER)

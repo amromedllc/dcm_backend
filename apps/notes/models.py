@@ -50,6 +50,28 @@ class NoteTemplate(TenantAwareModel):
         return self.name
 
 
+class NoteLayoutSettings(TenantAwareModel):
+    """One row per organization per template type (notes / forms) — an optional
+    rich-text page header and/or footer, added to every PDF export of that
+    type of note in addition to the standard note content. Supports the same
+    ``[data-dynamic-field]`` tokens as a template's ``body_template``
+    (see ``apps.notes.services.resolve_template_tokens``)."""
+    template_type = models.CharField(max_length=20, choices=NoteTemplate.TEMPLATE_TYPES, default='notes')
+    header_enabled = models.BooleanField(default=False)
+    header_html = models.TextField(blank=True, default='')
+    footer_enabled = models.BooleanField(default=False)
+    footer_html = models.TextField(blank=True, default='')
+
+    class Meta:
+        app_label = 'notes'
+        constraints = [
+            models.UniqueConstraint(fields=['organization', 'template_type'], name='uniq_note_layout_per_org_type'),
+        ]
+
+    def __str__(self) -> str:
+        return f'Layout settings for {self.template_type} (org {self.organization_id})'
+
+
 class LessonNote(TenantAwareModel):
     class Status(models.TextChoices):
         DRAFT = 'draft', 'Draft'

@@ -16,6 +16,8 @@ class NoteTemplateFieldSchema(Schema):
     required: bool = False
     placeholder: str = ''
     options: list[str] = []           # for select / multiselect
+    # Fill this field automatically from the session's recorded program data when the note is created.
+    auto_fill: Literal['', 'program.names', 'program.targets_results', 'program.targets_advanced', 'program.prompt_changes'] = ''
 
 
 class NoteTemplateSchema(Schema):
@@ -68,6 +70,25 @@ class NoteTemplateUpdateRequest(Schema):
     lock_content: bool | None = None
     enable_time_change_requests: bool | None = None
     show_only_user_collected_data: bool | None = None
+
+
+# ---------------------------------------------------------------------------
+# Note/form layout settings (PDF export header & footer)
+# ---------------------------------------------------------------------------
+
+class NoteLayoutSettingsSchema(Schema):
+    template_type: str
+    header_enabled: bool
+    header_html: str
+    footer_enabled: bool
+    footer_html: str
+
+
+class NoteLayoutSettingsUpdateRequest(Schema):
+    header_enabled: bool = False
+    header_html: str = ''
+    footer_enabled: bool = False
+    footer_html: str = ''
 
 
 # ---------------------------------------------------------------------------
@@ -192,3 +213,14 @@ class ReviewQueueItem(Schema):
     submitted_at: datetime | None
     template_name: str | None
     session_run_id: int | None
+
+
+class NoteTemplateDraftRequest(Schema):
+    program_id: int
+    instruction: str = ''
+
+
+class NoteTemplateDraftSchema(Schema):
+    name: str
+    description: str
+    fields: list[NoteTemplateFieldSchema]

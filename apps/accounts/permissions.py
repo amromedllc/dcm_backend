@@ -145,10 +145,11 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'admin_users_edit': True,
         'admin_privileges': True,
         'admin_authentication_settings': True,
+        'admin_integrations_settings': True,
     },
     User.Role.SUPERVISOR: {
         # Dashboard
-        'dashboard': True,
+        'dashboard': True,  
         # Clients
         'clients_view': True,
         'clients_create': True,
@@ -258,6 +259,7 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'admin_users_edit': True,
         'admin_privileges': True,
         'admin_authentication_settings': True,
+        'admin_integrations_settings': True,
     },
     User.Role.STAFF: {
         # Dashboard
@@ -371,6 +373,7 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'admin_users_edit': False,
         'admin_privileges': False,
         'admin_authentication_settings': False,
+        'admin_integrations_settings': False,
     },
 }
 
@@ -381,6 +384,7 @@ _SUPERVISOR_ORG_MANAGEMENT_KEYS = (
     'admin_users_edit',
     'admin_privileges',
     'admin_authentication_settings',
+    'admin_integrations_settings',
 )
 
 

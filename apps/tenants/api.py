@@ -7,16 +7,24 @@ from ninja import Router
 from ninja.errors import HttpError
 
 from apps.accounts.models import APIKey, User
+from apps.integrations.models import PullJob
 from .models import Domain, Organization, OrganizationTpmsAdminId
 from .schemas import (
     OrganizationAuthenticationSettingsSchema,
     OrganizationAuthenticationSettingsUpdate,
+    OrganizationIntegrationSettingsSchema,
+    OrganizationIntegrationSettingsUpdate,
     OrganizationPracticeEmailSettingsSchema,
+    PullJobSchema,
+    TherapyPmsConnectRequest,
+    TherapyPmsPullAppointmentsRequest,
     OrganizationSuperadminCreate,
     OrganizationSuperadminUpdate,
     SuperadminAPIKeyCreate,
     SuperadminAPIKeyCreatedSchema,
     SuperadminAPIKeySchema,
+    SuperadminUserCreate,
+    SuperadminUserSchema,
     TpmsAdminIdCreate,
     TpmsAdminEmailSettingSchema,
     TpmsAdminEmailSettingUpdate,
@@ -306,6 +314,139 @@ def update_authentication_settings(request, data: OrganizationAuthenticationSett
     }
 
 
+@router.get('/settings/integrations', response=OrganizationIntegrationSettingsSchema)
+def get_integration_settings(request):
+    _require_manager(request)
+    org = _organization(request)
+    return {'integration_platform': org.integration_platform, 'organization_name': org.name}
+
+
+@router.patch('/settings/integrations', response=OrganizationIntegrationSettingsSchema)
+def update_integration_settings(request, data: OrganizationIntegrationSettingsUpdate):
+    _require_manager(request)
+    org = _organization(request)
+
+    if data.integration_platform is not None:
+        valid_platforms = {choice.value for choice in Organization.IntegrationPlatform}
+        if data.integration_platform not in valid_platforms:
+            raise HttpError(400, 'Unsupported practice management platform')
+        org.integration_platform = data.integration_platform
+        org.save(update_fields=['integration_platform', 'updated_at'])
+
+    return {'integration_platform': org.integration_platform, 'organization_name': org.name}
+
+
+@router.post('/settings/integrations/therapy-pms/connect', response={204: None})
+def connect_therapy_pms(request, data: TherapyPmsConnectRequest):
+    """Verify TherapyPMS admin credentials, bind this org to that practice, and
+    store encrypted credentials for later Pull sync. The password is never
+    returned to the client."""
+    _require_manager(request)
+    from apps.integrations.tpms_pull import bind_therapy_pms_connection
+
+    if not data.email.strip() or not data.password:
+        raise HttpError(400, 'Email and password are required.')
+
+    org = _organization(request)
+    bind_therapy_pms_connection(org, data.email.strip(), data.password)
+    return 204, None
+
+
+@router.post('/settings/integrations/disconnect', response={204: None})
+def disconnect_integration(request):
+    _require_manager(request)
+    from apps.integrations.tpms_pull import clear_therapy_pms_connection
+
+    org = _organization(request)
+    clear_therapy_pms_connection(org)
+    return 204, None
+
+
+def _dispatch_pull_job(request, job_type: str, params: dict) -> PullJob:
+    """Creates a PullJob row and hands it to Celery. A pull (appointments
+    especially, which can span years) used to run inline in this request and
+    could exceed the web server's own timeout; it now returns immediately
+    and the caller polls /pull-jobs/{id} for progress."""
+    from apps.integrations.tasks import run_pull_job
+
+    org = _organization(request)
+    job = PullJob.objects.create(
+        job_type=job_type,
+        params=params,
+        created_by=request.user,
+    )
+    run_pull_job.delay(job_id=job.id, org_id=org.id)
+    return job
+
+
+@router.post(
+    '/settings/integrations/therapy-pms/pull/clients',
+    response={202: PullJobSchema},
+)
+def pull_therapy_pms_clients(request):
+    """Queue a background pull of clients from TherapyPMS into this org."""
+    _require_manager(request)
+    return 202, _dispatch_pull_job(request, PullJob.JobType.CLIENTS, {})
+
+
+@router.post(
+    '/settings/integrations/therapy-pms/pull/providers',
+    response={202: PullJobSchema},
+)
+def pull_therapy_pms_providers(request):
+    """Queue a background pull of providers from TherapyPMS into this org's users."""
+    _require_manager(request)
+    return 202, _dispatch_pull_job(request, PullJob.JobType.PROVIDERS, {})
+
+
+@router.post(
+    '/settings/integrations/therapy-pms/pull/appointments',
+    response={202: PullJobSchema},
+)
+def pull_therapy_pms_appointments(request, data: TherapyPmsPullAppointmentsRequest):
+    """Queue a background pull of appointments/sessions for a date range.
+    Chunked month-by-month inside the task, so a multi-year backfill (e.g.
+    2022 to today) no longer needs to finish inside one HTTP request."""
+    _require_manager(request)
+    if data.to_date < data.from_date:
+        raise HttpError(400, 'to_date must be on or after from_date')
+    params = {
+        'from_date': data.from_date.isoformat(),
+        'to_date': data.to_date.isoformat(),
+        'patient_ids': data.patient_ids,
+        'staff_ids': data.staff_ids,
+    }
+    return 202, _dispatch_pull_job(request, PullJob.JobType.APPOINTMENTS, params)
+
+
+@router.get(
+    '/settings/integrations/pull-jobs/{job_id}',
+    response=PullJobSchema,
+)
+def get_pull_job(request, job_id: int):
+    """Poll a pull job's progress/result — the admin UI calls this instead of
+    blocking on the pull itself."""
+    _require_manager(request)
+    try:
+        return PullJob.objects.get(id=job_id)
+    except PullJob.DoesNotExist:
+        raise HttpError(404, 'Pull job not found')
+
+
+@router.get(
+    '/settings/integrations/pull-jobs',
+    response=list[PullJobSchema],
+)
+def list_pull_jobs(request, job_type: str | None = None, limit: int = 5):
+    """Most recent pull jobs for this org, optionally filtered by type — lets
+    the admin UI resume showing an in-progress job after a page reload."""
+    _require_manager(request)
+    qs = PullJob.objects.all()
+    if job_type:
+        qs = qs.filter(job_type=job_type)
+    return list(qs[:max(1, min(limit, 20))])
+
+
 # ---------------------------------------------------------------------------
 # Superadmin: partner API keys for any organization
 #
@@ -418,4 +559,114 @@ def revoke_superadmin_api_key(request, key_id: int):
     key.save(update_fields=['is_active'])
     if key.service_user_id:
         User.objects.filter(id=key.service_user_id).update(is_active=False)
+    return 204, None
+
+# ---------------------------------------------------------------------------
+# Superadmin: create login accounts (Administrator/Supervisor/Staff) for any
+# organization. Distinct from accounts.api.create_user, which scopes to the
+# calling admin's own organization and caps role at the caller's own rank —
+# a superadmin instead picks the target org explicitly and may grant any of
+# these three roles regardless of their own (superuser accounts have no
+# `role`/organization of their own to rank against).
+# ---------------------------------------------------------------------------
+
+_SUPERADMIN_ASSIGNABLE_ROLES = {User.Role.ADMIN, User.Role.SUPERVISOR, User.Role.STAFF}
+
+
+def _serialize_superadmin_user(user: User, facility_names: dict[int, str] | None = None) -> dict:
+    facility_names = facility_names or {}
+    return {
+        'id': user.id,
+        'email': user.email,
+        'first_name': user.first_name,
+        'last_name': user.last_name,
+        'full_name': user.full_name,
+        'role': user.role,
+        'is_active': user.is_active,
+        'organization_id': user.organization_id,
+        'organization_name': user.organization.name if user.organization_id else '',
+        'external_admin_id': user.external_admin_id,
+        'tpms_facility_name': (
+            facility_names.get(user.external_admin_id) or None
+            if user.external_admin_id is not None else None
+        ),
+        'created_at': user.created_at,
+    }
+
+
+@router.get('/superadmin/users', response=list[SuperadminUserSchema])
+def list_superadmin_users(request, organization_id: int | None = None):
+    _require_superadmin(request)
+    qs = (
+        User.objects.filter(role__in=_SUPERADMIN_ASSIGNABLE_ROLES)
+        .select_related('organization')
+        .order_by('-created_at')
+    )
+    if organization_id is not None:
+        qs = qs.filter(organization_id=organization_id)
+    users = list(qs)
+    facility_names = _facility_name_map({u.external_admin_id for u in users if u.external_admin_id is not None})
+    return [_serialize_superadmin_user(u, facility_names) for u in users]
+
+
+@router.post('/superadmin/users', response={201: SuperadminUserSchema})
+def create_superadmin_user(request, data: SuperadminUserCreate):
+    _require_superadmin(request)
+    try:
+        org = Organization.objects.get(id=data.organization_id)
+    except Organization.DoesNotExist:
+        raise HttpError(404, 'Organization not found')
+
+    if data.role not in _SUPERADMIN_ASSIGNABLE_ROLES:
+        raise HttpError(400, 'Role must be one of: admin, supervisor, staff')
+    if len(data.password) < 8:
+        raise HttpError(400, 'Password must be at least 8 characters')
+    if User.objects.filter(email__iexact=data.email).exists():
+        raise HttpError(400, 'A user with this email already exists')
+
+    # Local-password login binds a TPMS-linked org's users by external_admin_id
+    # (see accounts.api._staff_local_auth) — a user created without one could
+    # never log in for such an org, so this is required (not inferred) here,
+    # per an explicit org+admin_id pairing rather than org alone. Native
+    # (non-TPMS) orgs have no mapped practices and don't need one at all.
+    org_admin_ids = set(
+        OrganizationTpmsAdminId.objects.filter(organization=org).values_list('admin_id', flat=True)
+    )
+    external_admin_id = data.external_admin_id
+    if org_admin_ids:
+        if external_admin_id is None:
+            raise HttpError(
+                400,
+                f'"{org.name}" has mapped TPMS practices — specify which admin ID this user belongs to: '
+                f'{sorted(org_admin_ids)}.',
+            )
+        if external_admin_id not in org_admin_ids:
+            raise HttpError(
+                400,
+                f'TPMS admin ID {external_admin_id} is not mapped to "{org.name}". '
+                f'Mapped: {sorted(org_admin_ids)}.',
+            )
+    else:
+        external_admin_id = None
+
+    user = User.objects.create_user(
+        email=data.email,
+        first_name=data.first_name,
+        last_name=data.last_name,
+        role=data.role,
+        password=data.password,
+        organization=org,
+        external_admin_id=external_admin_id,
+    )
+    return 201, _serialize_superadmin_user(
+        user, _facility_name_map({external_admin_id} if external_admin_id is not None else set()),
+    )
+
+
+@router.patch('/superadmin/users/{user_id}/deactivate', response={204: None})
+def deactivate_superadmin_user(request, user_id: int):
+    _require_superadmin(request)
+    updated = User.objects.filter(id=user_id, role__in=_SUPERADMIN_ASSIGNABLE_ROLES).update(is_active=False)
+    if not updated:
+        raise HttpError(404, 'User not found')
     return 204, None

@@ -296,6 +296,7 @@ _PROGRAM_CATEGORY_MAP = {
     'abc_recording': CentralProgram.Category.ABC_RECORDING,
     'abc recording': CentralProgram.Category.ABC_RECORDING,
     'telehealth': CentralProgram.Category.TELEHEALTH,
+    'assessment': CentralProgram.Category.ASSESSMENT,
 }
 
 _PROGRAM_PHASE_MAP = {

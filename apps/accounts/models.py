@@ -256,6 +256,69 @@ class APIKey(models.Model):
         return f'{self.name} ({self.key_prefix}...)'
 
 
+class PasswordSetLink(models.Model):
+    """
+    One-time, expiring link an admin generates to let a synced provider set
+    their DCM login password, instead of relying on TherapyPMS's /ios/login
+    at sign-in time.
+
+    Same shape as APIKey above: the raw token is shown once at generation
+    and only its SHA-256 hash is stored. token_prefix speeds up lookup the
+    same way APIKey.key_prefix does. Generating a new link for a user
+    expires any prior unused link for that user (see generate()) so at most
+    one is ever live — the admin screen always shows the single current
+    status for a provider, not a history of overlapping invites.
+    """
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='password_set_links')
+    token_prefix = models.CharField(max_length=8, db_index=True)
+    token_hash = models.CharField(max_length=64, unique=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='+')
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        app_label = 'accounts'
+        ordering = ['-created_at']
+
+    @classmethod
+    def generate(cls, user: User, *, created_by: User, expires_at) -> tuple['PasswordSetLink', str]:
+        cls.objects.filter(user=user, used_at__isnull=True, expires_at__gt=timezone.now()).update(
+            expires_at=timezone.now()
+        )
+
+        raw_token = f'pwl_{secrets.token_urlsafe(32)}'
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        instance = cls.objects.create(
+            user=user,
+            token_prefix=raw_token[:8],
+            token_hash=token_hash,
+            created_by=created_by,
+            expires_at=expires_at,
+        )
+        return instance, raw_token
+
+    @classmethod
+    def verify(cls, raw_token: str) -> 'PasswordSetLink | None':
+        if not raw_token.startswith('pwl_'):
+            return None
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        try:
+            link = cls.objects.select_related('user').get(
+                token_prefix=raw_token[:8],
+                token_hash=token_hash,
+            )
+        except cls.DoesNotExist:
+            return None
+
+        if link.used_at is not None or link.expires_at < timezone.now():
+            return None
+        return link
+
+    def __str__(self) -> str:
+        return f'PasswordSetLink for {self.user_id} ({self.token_prefix}...)'
+
+
 class RolePermission(models.Model):
     """
     Facility-scoped permission matrix for a role.
@@ -284,14 +347,24 @@ class RolePermission(models.Model):
 
 
 class UserMFA(models.Model):
-    """Authenticator-app (TOTP) enrolment for one user. The secret is stored
-    encrypted (see accounts.mfa). A row with is_active=False is a setup that
-    was started but never confirmed with a valid code."""
+    """MFA enrolment for one user — either an authenticator app (TOTP) or a
+    code emailed at sign-in time. The TOTP secret is stored encrypted (see
+    accounts.mfa); the email method instead stores a hash of the current
+    one-time code. A row with is_active=False is a setup that was started
+    but never confirmed with a valid code."""
+    class Method(models.TextChoices):
+        TOTP = 'totp', 'Authenticator app'
+        EMAIL = 'email', 'Email'
+
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='mfa')
-    secret_encrypted = models.TextField()
+    method = models.CharField(max_length=10, choices=Method.choices, default=Method.TOTP)
+    secret_encrypted = models.TextField(null=True, blank=True)
     is_active = models.BooleanField(default=False)
     confirmed_at = models.DateTimeField(null=True, blank=True)
     last_used_step = models.BigIntegerField(null=True, blank=True)
+    otp_code_hash = models.CharField(max_length=64, null=True, blank=True)
+    otp_expires_at = models.DateTimeField(null=True, blank=True)
+    otp_last_sent_at = models.DateTimeField(null=True, blank=True)
     failed_attempts = models.PositiveIntegerField(default=0)
     locked_until = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

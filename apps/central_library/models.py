@@ -66,6 +66,7 @@ class CentralProgram(models.Model):
         BEHAVIOR_REDUCTION = 'behavior_reduction', 'Behavior Reduction'
         ABC_RECORDING = 'abc_recording', 'ABC Recording'
         TELEHEALTH = 'telehealth', 'Telehealth'
+        ASSESSMENT = 'assessment', 'Assessment'
 
     class Phase(models.TextChoices):
         BASELINE = 'baseline', 'Baseline'

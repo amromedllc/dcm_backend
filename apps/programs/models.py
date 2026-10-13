@@ -75,6 +75,8 @@ class Program(TenantAwareModel):
         BEHAVIOR_REDUCTION = 'behavior_reduction', 'Behavior Reduction'
         ABC_RECORDING = 'abc_recording', 'ABC Recording'
         TELEHEALTH = 'telehealth', 'Telehealth'
+        # A skills assessment (domains = modules, skills = targets, scored in sessions).
+        ASSESSMENT = 'assessment', 'Assessment'
         # Info-only — background/behavior-plan/emergency notes, videos, materials
         # for staff reference. Structurally cannot hold targets (see
         # create_target/update_program in api.py) — there is nothing to collect
@@ -132,6 +134,7 @@ class Program(TenantAwareModel):
     image = models.ImageField(upload_to=_program_upload_path, max_length=500, blank=True, null=True)
     display_order = models.PositiveIntegerField(default=0, db_index=True)
     archived_at = models.DateTimeField(null=True, blank=True)
+    is_locked = models.BooleanField(default=False)
     folder = models.ForeignKey(
         'ProgramFolder',
         on_delete=models.SET_NULL,

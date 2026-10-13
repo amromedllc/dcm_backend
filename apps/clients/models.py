@@ -63,6 +63,33 @@ class ClientStaffAssignment(OrganizationScopedMixin):
         return f'{self.user_id} → {self.client}'
 
 
+class ClientFavorite(OrganizationScopedMixin):
+    """A user's own bookmark on a client, for quick access in the client
+    switcher dropdown — per-user, not shared with teammates."""
+    client = models.ForeignKey(
+        Client,
+        on_delete=models.CASCADE,
+        related_name='favorited_by',
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='favorite_clients',
+        db_constraint=False,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.client.organization_id
+
+    class Meta:
+        app_label = 'clients'
+        unique_together = [['client', 'user']]
+
+    def __str__(self) -> str:
+        return f'{self.user_id} ♥ {self.client}'
+
+
 class TreatmentPlan(TenantAwareModel):
     class Status(models.TextChoices):
         DRAFT = 'draft', 'Draft'
@@ -104,5 +131,69 @@ class TreatmentPlan(TenantAwareModel):
     def client_id_value(self):
         return self.client_id
 
+    @property
+    def is_signed(self) -> bool:
+        return self.signatures.exists()
+
     def __str__(self) -> str:
         return f'{self.title} — {self.client}'
+
+
+class TreatmentPlanSignature(OrganizationScopedMixin):
+    """Clinician sign-off on a finalized treatment plan.
+
+    signer_name/signer_role are snapshots, so the record survives the user
+    being renamed or deactivated. content_hash fingerprints the plan exactly
+    as it was signed; signed plans cannot be edited (see update_treatment_plan)."""
+    plan = models.ForeignKey(TreatmentPlan, on_delete=models.CASCADE, related_name='signatures')
+    signer_id = models.IntegerField(db_index=True)
+    signer_name = models.CharField(max_length=200)
+    signer_role = models.CharField(max_length=50)
+    signature_data = models.CharField(max_length=200)
+    content_hash = models.CharField(max_length=64)
+    signed_at = models.DateTimeField(auto_now_add=True)
+    ip_address_hash = models.CharField(max_length=64, blank=True)
+
+    _org_scoped_fk_fields = ('plan',)
+
+    class Meta:
+        app_label = 'clients'
+        ordering = ['signed_at']
+        constraints = [
+            models.UniqueConstraint(fields=['plan', 'signer_id'], name='one_signature_per_signer_per_plan'),
+        ]
+
+    def _derive_organization_id(self) -> int | None:
+        return self.plan.organization_id
+
+    def __str__(self) -> str:
+        return f'{self.signer_name} signed plan {self.plan_id} @ {self.signed_at:%Y-%m-%d %H:%M}'
+
+
+class ClientDirectoryView(OrganizationScopedMixin):
+    class Visibility(models.TextChoices):
+        ME = 'me', 'Only me'
+        ALL = 'all', 'All users'
+        ROLE = 'role', 'Specific role'
+
+    name = models.CharField(max_length=200)
+    visibility = models.CharField(max_length=10, choices=Visibility.choices, default=Visibility.ME)
+    visibility_role = models.CharField(max_length=20, blank=True)
+    columns = models.JSONField(default=list)
+    status_filter = models.CharField(max_length=20, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='client_directory_views',
+        db_constraint=False,
+    )
+
+    class Meta:
+        app_label = 'clients'
+        ordering = ['-id']
+
+    def _derive_organization_id(self) -> int | None:
+        return getattr(self.created_by, 'organization_id', None)
+
+    def __str__(self) -> str:
+        return f'{self.name} ({self.created_by_id})'
