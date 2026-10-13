@@ -519,6 +519,7 @@ class OrgProgramSchema(Schema):
     professional_instructions_html: str = ''
     custom_field_values: dict[str, Any] = {}
     prompting_template_id: int | None = None
+    prompting_levels: list[dict] = []
     workflow_template_id: int | None = None
     folder_id: int | None = None
     image_url: str | None = None
@@ -636,6 +637,14 @@ class ImportCentralFolderResult(Schema):
     skipped_count: int
 
 
+class ImportCentralProgramsResult(Schema):
+    created_count: int
+    updated_count: int
+    skipped_count: int
+    folder_id: int
+    folder_name: str
+
+
 class CentralProgramFolderRequest(Schema):
     name: NonEmptyStr
     display_order: int = Field(default=0, ge=0)
@@ -650,6 +659,7 @@ class CentralProgramRequest(Schema):
     tags: list[str] = []
     objective: str = ''
     instructions: str = ''
+    prompting_levels: list[dict] = []
     folder_id: int | None = None
     display_order: int = Field(default=0, ge=0)
 
@@ -663,6 +673,7 @@ class CentralProgramUpdateRequest(Schema):
     tags: list[str] | None = None
     objective: str | None = None
     instructions: str | None = None
+    prompting_levels: list[dict] | None = None
     folder_id: int | None = None
     display_order: int | None = Field(default=None, ge=0)
 

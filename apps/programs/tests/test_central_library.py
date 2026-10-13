@@ -28,6 +28,7 @@ from apps.programs.api import (
     superadmin_create_knowledge_base_topic,
     superadmin_delete_knowledge_base_topic_video,
     superadmin_delete_knowledge_base_video,
+    superadmin_import_central_programs,
     superadmin_list_central_programs,
     superadmin_list_knowledge_base_modules,
     superadmin_upload_knowledge_base_media,
@@ -89,6 +90,7 @@ class CentralLibraryImportTests(TestCase):
             # not a shared reference back to any central row.
             self.assertIsNotNone(dest_target.prompting_template_id)
             self.assertEqual(dest_target.prompting_template.organization_id, self.dest_org.pk)
+            self.assertEqual(dest_target.prompting_template.created_by_id, self.user.id)
             self.assertEqual(
                 dest_target.prompting_template.levels,
                 [{'label': 'Independent', 'score': 1}],
@@ -102,6 +104,22 @@ class CentralLibraryImportTests(TestCase):
             dest = _clone_central_program(self.source_program.id, self.user)
             bare_target = dest.targets.get(name='No Prompting Target')
             self.assertIsNone(bare_target.prompting_template_id)
+
+    def test_import_clones_program_prompting_levels_to_org_template(self):
+        self.source_program.prompting_levels = [
+            {'label': 'Independent', 'score': 0, 'abbreviation': 'IND', 'is_success': True},
+            {'label': 'Full Physical', 'score': 1, 'abbreviation': 'FP', 'is_success': False},
+        ]
+        self.source_program.save(update_fields=['prompting_levels'])
+
+        with schema_context(self.dest_org.schema_name), tenant_context(self.dest_org.pk):
+            dest = _clone_central_program(self.source_program.id, self.user)
+
+            self.assertIsNotNone(dest.prompting_template_id)
+            self.assertEqual(dest.prompting_template.organization_id, self.dest_org.pk)
+            self.assertEqual(dest.prompting_template.created_by_id, self.user.id)
+            self.assertEqual(dest.prompting_template.name, 'Central Program Prompting')
+            self.assertEqual(dest.prompting_template.levels, self.source_program.prompting_levels)
 
 
 class SuperadminCentralProgramApiTests(TestCase):
@@ -180,6 +198,29 @@ class SuperadminCentralProgramApiTests(TestCase):
         self.assertIsNone(program.folder_id)
         self.assertEqual(target['measurement'], 'rate_per_minute')
         self.assertEqual(CentralTarget.objects.get().prompting_levels[0]['label'], 'Independent')
+
+    def test_superadmin_can_import_central_programs_file(self):
+        upload = SimpleUploadedFile(
+            'central_programs.csv',
+            (
+                'program_name,clinical_domain,program_type,prompt_levels\n'
+                'Requesting Help,Communication,Skill Acquisition,Independent|Gestural\n'
+            ).encode('utf-8'),
+            content_type='text/csv',
+        )
+
+        _status, result = superadmin_import_central_programs(
+            FakeRequest(self.superadmin),
+            file=upload,
+            folder_name='Imported Programs',
+            replace=False,
+        )
+
+        program = CentralProgram.objects.get(name='Requesting Help')
+        self.assertEqual(result['created_count'], 1)
+        self.assertEqual(result['folder_name'], 'Imported Programs')
+        self.assertEqual(program.treatment_area, 'Communication')
+        self.assertEqual(program.prompting_levels[0]['label'], 'Independent')
 
 
 @override_settings(STORAGES={
