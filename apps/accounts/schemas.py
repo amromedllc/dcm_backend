@@ -111,6 +111,30 @@ class CurrentUserSchema(UserSchema):
     permissions: dict[str, bool]
     automatic_logout_minutes: int | None = None
     caregiver_client: CaregiverClientSchema | None = None
+    pin_lock_allowed: bool = False
+    pin_lock_enabled: bool = False
+    has_pin: bool = False
+    pin_length: int | None = None
+
+
+class SetPinRequest(Schema):
+    pin: str
+    current_pin: str | None = None
+
+
+class VerifyPinRequest(Schema):
+    pin: str
+
+
+class PinStatusResponse(Schema):
+    pin_lock_allowed: bool
+    pin_lock_enabled: bool
+    has_pin: bool
+    pin_length: int | None = None
+
+
+class TogglePinLockRequest(Schema):
+    enabled: bool
 
 
 class AccountTimezoneOptionSchema(Schema):

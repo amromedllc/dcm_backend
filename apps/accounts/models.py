@@ -39,6 +39,11 @@ class User(AbstractBaseUser, PermissionsMixin):
     # Admin-set: this user must sign in with an authenticator code. Users can
     # also turn MFA on for themselves (UserMFA.is_active) without this flag.
     mfa_required = models.BooleanField(default=False)
+    pin_hash = models.CharField(max_length=128, blank=True, default='')
+    pin_length = models.PositiveSmallIntegerField(null=True, blank=True)
+    pin_lock_enabled = models.BooleanField(default=False)
+    pin_failed_attempts = models.PositiveSmallIntegerField(default=0)
+    pin_locked_until = models.DateTimeField(null=True, blank=True)
     # Set when the user authenticates via a linked external PM system — scopes their client/data access
     external_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
     # External system employee pk — set at login for staff/supervisor, null for admin-only logins
@@ -86,6 +91,31 @@ class User(AbstractBaseUser, PermissionsMixin):
     @property
     def is_caregiver(self) -> bool:
         return self.role == self.Role.CAREGIVER and self.external_client_id is not None
+
+    @property
+    def has_pin(self) -> bool:
+        return bool(self.pin_hash)
+
+    def set_pin(self, pin: str) -> None:
+        from django.contrib.auth.hashers import make_password
+        self.pin_hash = make_password(pin)
+        self.pin_length = len(pin)
+        self.pin_lock_enabled = True
+        self.pin_failed_attempts = 0
+        self.pin_locked_until = None
+
+    def check_pin(self, pin: str) -> bool:
+        from django.contrib.auth.hashers import check_password
+        if not self.pin_hash:
+            return False
+        return check_password(pin, self.pin_hash)
+
+    def clear_pin(self) -> None:
+        self.pin_hash = ''
+        self.pin_length = None
+        self.pin_lock_enabled = False
+        self.pin_failed_attempts = 0
+        self.pin_locked_until = None
 
     def has_role(self, *roles: str) -> bool:
         return self.role in roles

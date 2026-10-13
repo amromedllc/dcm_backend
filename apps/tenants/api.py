@@ -112,6 +112,7 @@ def get_authentication_settings(request):
     return {
         'automatic_logout_enabled': org.automatic_logout_enabled,
         'automatic_logout_minutes': org.automatic_logout_minutes,
+        'pin_lock_allowed': getattr(org, 'pin_lock_allowed', False),
     }
 
 
@@ -295,9 +296,12 @@ def update_authentication_settings(request, data: OrganizationAuthenticationSett
     if data.automatic_logout_minutes is not None:
         valid_minutes = {choice.value for choice in Organization.AutomaticLogoutMinutes}
         if data.automatic_logout_minutes not in valid_minutes:
-            raise HttpError(400, 'Automatic logout timer must be 2 minutes, 9 hours, 24 hours, or 1 week')
+            raise HttpError(400, f'Automatic logout timer must be one of: {sorted(valid_minutes)} minutes')
         org.automatic_logout_minutes = data.automatic_logout_minutes
         update_fields.append('automatic_logout_minutes')
+    if data.pin_lock_allowed is not None:
+        org.pin_lock_allowed = data.pin_lock_allowed
+        update_fields.append('pin_lock_allowed')
 
     if update_fields:
         update_fields.append('updated_at')
@@ -306,6 +310,7 @@ def update_authentication_settings(request, data: OrganizationAuthenticationSett
     return {
         'automatic_logout_enabled': org.automatic_logout_enabled,
         'automatic_logout_minutes': org.automatic_logout_minutes,
+        'pin_lock_allowed': org.pin_lock_allowed,
     }
 
 

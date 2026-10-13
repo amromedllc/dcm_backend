@@ -1,6 +1,6 @@
 import hashlib
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import jwt
 from ninja import Router, Body
 from django.conf import settings
@@ -41,6 +41,10 @@ from .schemas import (
     PasswordSetLinkInfoResponse,
     PasswordSetLinkSubmitRequest,
     StaffSchema,
+    PinStatusResponse,
+    SetPinRequest,
+    TogglePinLockRequest,
+    VerifyPinRequest,
 )
 from apps.clients.models import Client
 from apps.integrations.tpms_auth_client import (
@@ -224,6 +228,96 @@ def disable_my_mfa(request, data: MfaCodeRequest):
     mfa.check_code(request.user, data.code)
     UserMFA.objects.filter(user=request.user).delete()
     return 204, None
+
+
+@router.get('/account/pin', response=PinStatusResponse, auth=jwt_auth_any_role)
+def get_my_pin_status(request):
+    tenant = getattr(request, 'tenant', None)
+    pin_lock_allowed = bool(tenant and getattr(tenant, 'pin_lock_allowed', False))
+    return PinStatusResponse(
+        pin_lock_allowed=pin_lock_allowed,
+        pin_lock_enabled=bool(request.user.pin_lock_enabled),
+        has_pin=request.user.has_pin,
+        pin_length=request.user.pin_length,
+    )
+
+
+@router.post('/account/pin', response=PinStatusResponse, auth=jwt_auth_any_role)
+def set_my_pin(request, data: SetPinRequest):
+    tenant = getattr(request, 'tenant', None)
+    if not (tenant and getattr(tenant, 'pin_lock_allowed', False)):
+        raise HttpError(400, 'PIN lock is not allowed by your organization.')
+
+    pin = data.pin.strip()
+    if not (pin.isdigit() and len(pin) in (4, 6)):
+        raise HttpError(400, 'PIN must be exactly 4 or 6 digits.')
+
+    user = request.user
+    if user.has_pin and data.current_pin is not None:
+        if not user.check_pin(data.current_pin.strip()):
+            raise HttpError(403, 'Current PIN is incorrect.')
+
+    user.set_pin(pin)
+    user.save(update_fields=['pin_hash', 'pin_length', 'pin_lock_enabled', 'pin_failed_attempts', 'pin_locked_until'])
+    return PinStatusResponse(
+        pin_lock_allowed=True,
+        pin_lock_enabled=True,
+        has_pin=True,
+        pin_length=user.pin_length,
+    )
+
+
+@router.post('/account/pin/toggle', response=PinStatusResponse, auth=jwt_auth_any_role)
+def toggle_my_pin_lock(request, data: TogglePinLockRequest):
+    tenant = getattr(request, 'tenant', None)
+    if data.enabled and not (tenant and getattr(tenant, 'pin_lock_allowed', False)):
+        raise HttpError(400, 'PIN lock is not allowed by your organization.')
+
+    user = request.user
+    if data.enabled and not user.has_pin:
+        raise HttpError(400, 'You must set a PIN before enabling PIN lock.')
+
+    user.pin_lock_enabled = data.enabled
+    user.save(update_fields=['pin_lock_enabled'])
+    return PinStatusResponse(
+        pin_lock_allowed=bool(tenant and getattr(tenant, 'pin_lock_allowed', False)),
+        pin_lock_enabled=user.pin_lock_enabled,
+        has_pin=user.has_pin,
+        pin_length=user.pin_length,
+    )
+
+
+@router.delete('/account/pin', response={204: None}, auth=jwt_auth_any_role)
+def remove_my_pin(request):
+    user = request.user
+    user.clear_pin()
+    user.save(update_fields=['pin_hash', 'pin_length', 'pin_lock_enabled', 'pin_failed_attempts', 'pin_locked_until'])
+    return 204, None
+
+
+@router.post('/pin/verify', response=dict, auth=jwt_auth_any_role)
+def verify_my_pin(request, data: VerifyPinRequest):
+    user = request.user
+    if not user.has_pin:
+        raise HttpError(400, 'No PIN is set for this account.')
+
+    now = timezone.now()
+    if user.pin_locked_until and user.pin_locked_until > now:
+        raise HttpError(429, 'Too many incorrect attempts. Try again in a few minutes.')
+
+    pin = data.pin.strip()
+    if not user.check_pin(pin):
+        user.pin_failed_attempts += 1
+        if user.pin_failed_attempts >= mfa.MAX_FAILED_ATTEMPTS:
+            user.pin_locked_until = now + timedelta(minutes=mfa.LOCKOUT_MINUTES)
+            user.pin_failed_attempts = 0
+        user.save(update_fields=['pin_failed_attempts', 'pin_locked_until'])
+        raise HttpError(400, 'Incorrect PIN.')
+
+    user.pin_failed_attempts = 0
+    user.pin_locked_until = None
+    user.save(update_fields=['pin_failed_attempts', 'pin_locked_until'])
+    return {'valid': True}
 
 
 def _verify_actor_password(user: User, password: str) -> bool:
@@ -433,6 +527,9 @@ def me(request):
         if tenant is not None and tenant.automatic_logout_enabled
         else None
     )
+    user.pin_lock_allowed = bool(tenant and getattr(tenant, 'pin_lock_allowed', False))
+    user.pin_lock_enabled = bool(getattr(user, 'pin_lock_enabled', False))
+    user.pin_length = getattr(user, 'pin_length', None)
     if user.is_caregiver:
         # Caregiver access is identity-scoped, not permission-key-scoped —
         # no RolePermission lookup, just the linked client's display info.
