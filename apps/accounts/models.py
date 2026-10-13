@@ -42,6 +42,8 @@ class User(AbstractBaseUser, PermissionsMixin):
     pin_hash = models.CharField(max_length=128, blank=True, default='')
     pin_length = models.PositiveSmallIntegerField(null=True, blank=True)
     pin_lock_enabled = models.BooleanField(default=False)
+    pin_failed_attempts = models.PositiveSmallIntegerField(default=0)
+    pin_locked_until = models.DateTimeField(null=True, blank=True)
     # Set when the user authenticates via a linked external PM system — scopes their client/data access
     external_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
     # External system employee pk — set at login for staff/supervisor, null for admin-only logins
@@ -99,6 +101,8 @@ class User(AbstractBaseUser, PermissionsMixin):
         self.pin_hash = make_password(pin)
         self.pin_length = len(pin)
         self.pin_lock_enabled = True
+        self.pin_failed_attempts = 0
+        self.pin_locked_until = None
 
     def check_pin(self, pin: str) -> bool:
         from django.contrib.auth.hashers import check_password
@@ -110,6 +114,8 @@ class User(AbstractBaseUser, PermissionsMixin):
         self.pin_hash = ''
         self.pin_length = None
         self.pin_lock_enabled = False
+        self.pin_failed_attempts = 0
+        self.pin_locked_until = None
 
     def has_role(self, *roles: str) -> bool:
         return self.role in roles
