@@ -1,7 +1,10 @@
+import logging
 import re
+from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
+from django.utils import timezone
 from django_tenants.utils import schema_context
 from ninja import Router
 from ninja.errors import HttpError
@@ -31,6 +34,7 @@ from .schemas import (
 )
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 def _require_manager(request) -> None:
@@ -375,7 +379,31 @@ def _dispatch_pull_job(request, job_type: str, params: dict) -> PullJob:
         params=params,
         created_by=request.user,
     )
-    run_pull_job.delay(job_id=job.id, org_id=org.id)
+    try:
+        run_pull_job.delay(job_id=job.id, org_id=org.id)
+    except Exception as exc:
+        logger.exception('Failed to dispatch pull job %s to Celery', job.id)
+        job.status = PullJob.Status.FAILED
+        job.error_message = f'Failed to dispatch background task: {exc}'
+        job.finished_at = timezone.now()
+        job.save(update_fields=['status', 'error_message', 'finished_at'])
+    return job
+
+
+def _expire_stale_job(job: PullJob) -> PullJob:
+    """Marks pending jobs older than 3 minutes or running jobs older than 30 minutes as failed
+    so the UI is never permanently trapped in an endless polling loop if a worker is offline."""
+    now = timezone.now()
+    if job.status == PullJob.Status.PENDING and (now - job.created_at) > timedelta(minutes=3):
+        job.status = PullJob.Status.FAILED
+        job.error_message = 'Job timed out before worker picked it up. Please ensure Celery worker is running and try again.'
+        job.finished_at = now
+        job.save(update_fields=['status', 'error_message', 'finished_at'])
+    elif job.status == PullJob.Status.RUNNING and job.started_at and (now - job.started_at) > timedelta(minutes=30):
+        job.status = PullJob.Status.FAILED
+        job.error_message = 'Job timed out during execution.'
+        job.finished_at = now
+        job.save(update_fields=['status', 'error_message', 'finished_at'])
     return job
 
 
@@ -428,7 +456,8 @@ def get_pull_job(request, job_id: int):
     blocking on the pull itself."""
     _require_manager(request)
     try:
-        return PullJob.objects.get(id=job_id)
+        job = PullJob.objects.get(id=job_id)
+        return _expire_stale_job(job)
     except PullJob.DoesNotExist:
         raise HttpError(404, 'Pull job not found')
 
@@ -444,7 +473,9 @@ def list_pull_jobs(request, job_type: str | None = None, limit: int = 5):
     qs = PullJob.objects.all()
     if job_type:
         qs = qs.filter(job_type=job_type)
-    return list(qs[:max(1, min(limit, 20))])
+    jobs = list(qs[:max(1, min(limit, 20))])
+    return [_expire_stale_job(j) for j in jobs]
+
 
 
 # ---------------------------------------------------------------------------
