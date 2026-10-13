@@ -50,16 +50,18 @@ def _mark_failed(job: PullJob, error: str) -> None:
 
 @shared_task(bind=True)
 def run_pull_job(self, job_id: int, org_id: int) -> None:
-    """Runs a queued PullJob. org_id must be passed as a keyword argument so
-    config.celery's task_prerun signal can read it and switch the DB schema
-    before this body runs; tenant_context(org_id) below additionally
-    activates the row-level organization scope every TenantAwareModel query
-    here needs (PullJob, Client, Appointment, Provider)."""
+    """Runs a queued PullJob. Explicitly sets tenant connection and tenant_context
+    so tenant-scoped models work safely across all Celery execution pools."""
+    from django.db import connection
+
     org = Organization.objects.get(id=org_id)
+    connection.set_tenant(org)
     with tenant_context(org_id):
-        job = PullJob.objects.get(id=job_id)
-        _mark_running(job)
+        job = None
         try:
+            job = PullJob.objects.get(id=job_id)
+            logger.info('Starting pull job %s (%s) for org %s', job_id, job.job_type, org_id)
+            _mark_running(job)
             if job.job_type == PullJob.JobType.CLIENTS:
                 result = tpms_pull.pull_clients(org)
             elif job.job_type == PullJob.JobType.PROVIDERS:
@@ -86,6 +88,12 @@ def run_pull_job(self, job_id: int, org_id: int) -> None:
             else:
                 raise ValueError(f'Unknown pull job type: {job.job_type}')
             _mark_completed(job, result)
+            logger.info(
+                'Pull job %s (%s) completed: created=%d, updated=%d, skipped=%d',
+                job_id, job.job_type, result.created, result.updated, result.skipped,
+            )
         except Exception as exc:
-            logger.exception('Pull job %s (%s) failed', job_id, job.job_type)
-            _mark_failed(job, str(exc))
+            logger.exception('Pull job %s failed', job_id)
+            if job is not None:
+                _mark_failed(job, str(exc))
+
