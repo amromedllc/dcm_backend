@@ -217,6 +217,8 @@ def _serialize_abc(event: ABCEvent) -> dict:
         'id': event.id,
         'session_run_id': event.session_run_id,
         'client_id': event.external_client_id,
+        'target_id': event.target_id,
+        'target_name': event.target_name,
         'occurred_at': event.occurred_at,
         'ended_at': event.ended_at,
         'duration_seconds': event.duration_seconds,

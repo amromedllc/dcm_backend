@@ -172,6 +172,7 @@ class TrialEventSchema(Schema):
     value_seconds: float | None = None
     recorded_at: datetime
     staff_notes: str
+    cue_at: datetime | None = None
 
 
 class TrialEventCreateRequest(Schema):
@@ -204,6 +205,7 @@ class BehaviorEventSchema(Schema):
     severity: str
     notes: str
     client_event_id: str | None = None
+    denominator_count: int | None = None
 
 
 class BehaviorEventCreateRequest(Schema):
@@ -227,6 +229,8 @@ class ABCEventSchema(Schema):
     id: int
     session_run_id: int | None = None
     client_id: int | None = None
+    target_id: int | None = None
+    target_name: str = ''
     occurred_at: datetime
     ended_at: datetime | None = None
     duration_seconds: int | None = None
@@ -241,12 +245,14 @@ class ABCEventSchema(Schema):
 
 
 class ABCEventCreateRequest(Schema):
+    target_id: int | None = None
+    target_name: str = ''
     occurred_at: datetime
     ended_at: datetime | None = None
     duration_seconds: int | None = Field(default=None, ge=0)
-    antecedent: NonEmptyStr
+    antecedent: str = ''
     behavior_description: NonEmptyStr
-    consequence: NonEmptyStr
+    consequence: str = ''
     setting: str = ''
     staff_response: str = ''
     notes: str = ''

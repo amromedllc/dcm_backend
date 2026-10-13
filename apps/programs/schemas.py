@@ -336,6 +336,8 @@ class TargetSchema(Schema):
     interval_pause_on_warning: bool = False
     interval_warn_seconds_before: int = 10
     interval_warning_sound: str = ''
+    rating_min: int = 1
+    rating_max: int = 5
     status: str
     mastery_mode: str
     current_prompt_level_index: int
@@ -376,6 +378,8 @@ class TargetCreateRequest(Schema):
     interval_pause_on_warning: bool = False
     interval_warn_seconds_before: int = Field(default=10, ge=0)
     interval_warning_sound: str = ''
+    rating_min: int = Field(default=1, ge=1)
+    rating_max: int = Field(default=5, ge=1)
     status: str = ''  # empty = resolve server-side to the org's default TargetStatus
     mastery_mode: Target.MasteryMode = Target.MasteryMode.MANUAL
     display_order: int = Field(default=0, ge=0)
@@ -406,6 +410,8 @@ class TargetUpdateRequest(Schema):
     interval_pause_on_warning: bool | None = None
     interval_warn_seconds_before: int | None = Field(default=None, ge=0)
     interval_warning_sound: str | None = None
+    rating_min: int | None = Field(default=None, ge=1)
+    rating_max: int | None = Field(default=None, ge=1)
     status: str | None = None
     mastery_mode: Target.MasteryMode | None = None
     current_prompt_level_index: int | None = Field(default=None, ge=0)

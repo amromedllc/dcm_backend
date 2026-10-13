@@ -256,6 +256,7 @@ class Target(TenantAwareModel):
         NARRATIVE_EVENT            = 'narrative_event',            'Narrative/Event Recording'
         PERMANENT_PRODUCT          = 'permanent_product',          'Permanent Product'
         FIDELITY                   = 'fidelity',                   'Procedure Fidelity'
+        OPPORTUNITIES              = 'opportunities',               'Opportunities'
 
     class Measurement(models.TextChoices):
         """The metric a target's raw session data rolls up into. Which values are
@@ -383,6 +384,10 @@ class Target(TenantAwareModel):
     interval_warning_sound = models.CharField(
         max_length=20, choices=IntervalWarningSound.choices, blank=True, default='',
     )
+    # Ordinal scale bounds — only meaningful when measurement_type is
+    # 'rating_scale'. The recording screen scores within [rating_min, rating_max].
+    rating_min = models.PositiveSmallIntegerField(default=1)
+    rating_max = models.PositiveSmallIntegerField(default=5)
     # No longer choice-constrained — status keys are org-configurable via TargetStatus.
     status = models.CharField(max_length=20, default='waiting', db_index=True)
     mastery_mode = models.CharField(max_length=10, choices=MasteryMode.choices, default=MasteryMode.MANUAL)
@@ -458,6 +463,10 @@ MEASUREMENTS_BY_TARGET_TYPE: dict[str, list[str]] = {
     Target.MeasurementType.RATING_SCALE: [Target.Measurement.AVG_RATING],
     Target.MeasurementType.PERMANENT_PRODUCT: [Target.Measurement.TOTAL_PRODUCT_COUNT],
     Target.MeasurementType.FIDELITY: [Target.Measurement.FIDELITY_PERCENT],
+    # Discrete response to a defined opportunity, prompt-coded — identical
+    # shape to discrete_trial (TrialEvent + response_score/prompt_level_label),
+    # just scored against opportunities instead of trials.
+    Target.MeasurementType.OPPORTUNITIES: _ACCURACY_MEASUREMENTS,
     # Qualitative/event-log types — no automatic computed metric.
     Target.MeasurementType.ABC: _NO_COMPUTED_MEASUREMENT,
     Target.MeasurementType.NARRATIVE_EVENT: _NO_COMPUTED_MEASUREMENT,
@@ -480,6 +489,7 @@ DEFAULT_MEASUREMENT_BY_TARGET_TYPE: dict[str, str] = {
     Target.MeasurementType.RATING_SCALE: Target.Measurement.AVG_RATING,
     Target.MeasurementType.PERMANENT_PRODUCT: Target.Measurement.TOTAL_PRODUCT_COUNT,
     Target.MeasurementType.FIDELITY: Target.Measurement.FIDELITY_PERCENT,
+    Target.MeasurementType.OPPORTUNITIES: Target.Measurement.PERCENT_CORRECT,
 }
 
 # Target types for which timer_type is surfaced / stored.
