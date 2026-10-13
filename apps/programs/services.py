@@ -43,6 +43,23 @@ EVENT_LOG_MEASUREMENT_TYPES = {
     Target.MeasurementType.SCATTERPLOT,
 }
 
+# Target types scored against a real PromptingTemplate.levels hierarchy — the
+# only types where response_score/prompt_level_label mean "this trial's
+# prompt level" and where automatic prompt-level fading is meaningful.
+# Every other TrialEvent-backed type (rating_scale, yes_no, latency, the
+# interval/sampling types, fidelity) reuses those same two columns for an
+# unrelated value (a rating, a yes/no flag, a timing outcome, an occurred
+# flag, a checklist step result) — fading must never run against them, since
+# PromptingTemplate.levels has no bearing on that data.
+PROMPT_LEVEL_MEASUREMENT_TYPES = {
+    Target.MeasurementType.DISCRETE_TRIAL,
+    Target.MeasurementType.TASK_ANALYSIS,
+    Target.MeasurementType.SET_OF_TARGETS,
+    Target.MeasurementType.SHAPING,
+    Target.MeasurementType.OPPORTUNITIES,
+    'trial_by_trial',
+}
+
 
 def _scorable_sub_items(sub_items: list[dict]) -> list[dict]:
     scorable = [
@@ -179,6 +196,8 @@ def evaluate_session_fading(session_run) -> list[Target]:
     for target in Target.objects.filter(id__in=target_ids).select_related(
         'prompting_template', 'program__prompting_template',
     ):
+        if target.measurement_type not in PROMPT_LEVEL_MEASUREMENT_TYPES:
+            continue
         prompting_template = target.prompting_template or target.program.prompting_template
         if not prompting_template or prompting_template.fading_hint_mode not in {'across_trials', 'across_sessions'}:
             continue
@@ -730,6 +749,8 @@ def _fade_if_criteria_met(target: Target, session_run_id: int) -> bool:
     least-to-most hierarchy) or regresses based on the configured match
     thresholds. Mixed/plateaued performance is a no-op.
     """
+    if target.measurement_type not in PROMPT_LEVEL_MEASUREMENT_TYPES:
+        return False
     prompting_template = target.prompting_template or target.program.prompting_template
     all_levels = prompting_template.levels if prompting_template else []
     levels = [level for level in all_levels if not level.get('exclude_from_fading')]

@@ -202,6 +202,7 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
                 'interval_warning_sound': target.interval_warning_sound,
                 'rating_min': target.rating_min,
                 'rating_max': target.rating_max,
+                'percentage_fixed_denominator': target.percentage_fixed_denominator,
                 'prompting_template': prompting_template,
                 'current_prompt_level_index': current_prompt_level_index,
             })

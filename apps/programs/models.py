@@ -388,6 +388,7 @@ class Target(TenantAwareModel):
     # 'rating_scale'. The recording screen scores within [rating_min, rating_max].
     rating_min = models.PositiveSmallIntegerField(default=1)
     rating_max = models.PositiveSmallIntegerField(default=5)
+    percentage_fixed_denominator = models.PositiveIntegerField(null=True, blank=True)
     # No longer choice-constrained — status keys are org-configurable via TargetStatus.
     status = models.CharField(max_length=20, default='waiting', db_index=True)
     mastery_mode = models.CharField(max_length=10, choices=MasteryMode.choices, default=MasteryMode.MANUAL)
