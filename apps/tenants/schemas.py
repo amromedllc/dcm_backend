@@ -6,11 +6,13 @@ from ninja import Schema
 class OrganizationAuthenticationSettingsSchema(Schema):
     automatic_logout_enabled: bool
     automatic_logout_minutes: int
+    pin_lock_allowed: bool = False
 
 
 class OrganizationAuthenticationSettingsUpdate(Schema):
     automatic_logout_enabled: bool | None = None
     automatic_logout_minutes: int | None = None
+    pin_lock_allowed: bool | None = None
 
 
 class OrganizationIntegrationSettingsSchema(Schema):
