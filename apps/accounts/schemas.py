@@ -114,6 +114,7 @@ class CurrentUserSchema(UserSchema):
     pin_lock_allowed: bool = False
     pin_lock_enabled: bool = False
     has_pin: bool = False
+    pin_length: int | None = None
 
 
 class SetPinRequest(Schema):
@@ -129,6 +130,7 @@ class PinStatusResponse(Schema):
     pin_lock_allowed: bool
     pin_lock_enabled: bool
     has_pin: bool
+    pin_length: int | None = None
 
 
 class TogglePinLockRequest(Schema):
