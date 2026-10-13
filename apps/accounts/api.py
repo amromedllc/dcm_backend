@@ -201,6 +201,7 @@ def get_my_pin_status(request):
         pin_lock_allowed=pin_lock_allowed,
         pin_lock_enabled=bool(request.user.pin_lock_enabled),
         has_pin=request.user.has_pin,
+        pin_length=request.user.pin_length,
     )
 
 
@@ -220,11 +221,12 @@ def set_my_pin(request, data: SetPinRequest):
             raise HttpError(403, 'Current PIN is incorrect.')
 
     user.set_pin(pin)
-    user.save(update_fields=['pin_hash', 'pin_lock_enabled'])
+    user.save(update_fields=['pin_hash', 'pin_length', 'pin_lock_enabled'])
     return PinStatusResponse(
         pin_lock_allowed=True,
         pin_lock_enabled=True,
         has_pin=True,
+        pin_length=user.pin_length,
     )
 
 
@@ -244,6 +246,7 @@ def toggle_my_pin_lock(request, data: TogglePinLockRequest):
         pin_lock_allowed=bool(tenant and getattr(tenant, 'pin_lock_allowed', False)),
         pin_lock_enabled=user.pin_lock_enabled,
         has_pin=user.has_pin,
+        pin_length=user.pin_length,
     )
 
 
@@ -251,7 +254,7 @@ def toggle_my_pin_lock(request, data: TogglePinLockRequest):
 def remove_my_pin(request):
     user = request.user
     user.clear_pin()
-    user.save(update_fields=['pin_hash', 'pin_lock_enabled'])
+    user.save(update_fields=['pin_hash', 'pin_length', 'pin_lock_enabled'])
     return 204, None
 
 
@@ -564,7 +567,7 @@ def me(request):
     )
     user.pin_lock_allowed = bool(tenant and getattr(tenant, 'pin_lock_allowed', False))
     user.pin_lock_enabled = bool(getattr(user, 'pin_lock_enabled', False))
-    user.has_pin = bool(getattr(user, 'has_pin', False))
+    user.pin_length = getattr(user, 'pin_length', None)
     if user.is_caregiver:
         # Caregiver access is identity-scoped, not permission-key-scoped —
         # no RolePermission lookup, just the linked client's display info.

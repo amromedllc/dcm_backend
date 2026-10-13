@@ -40,6 +40,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     # also turn MFA on for themselves (UserMFA.is_active) without this flag.
     mfa_required = models.BooleanField(default=False)
     pin_hash = models.CharField(max_length=128, blank=True, default='')
+    pin_length = models.PositiveSmallIntegerField(null=True, blank=True)
     pin_lock_enabled = models.BooleanField(default=False)
     # Set when the user authenticates via a linked external PM system — scopes their client/data access
     external_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
@@ -96,6 +97,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     def set_pin(self, pin: str) -> None:
         from django.contrib.auth.hashers import make_password
         self.pin_hash = make_password(pin)
+        self.pin_length = len(pin)
         self.pin_lock_enabled = True
 
     def check_pin(self, pin: str) -> bool:
@@ -106,6 +108,7 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def clear_pin(self) -> None:
         self.pin_hash = ''
+        self.pin_length = None
         self.pin_lock_enabled = False
 
     def has_role(self, *roles: str) -> bool:
