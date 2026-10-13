@@ -1,6 +1,6 @@
 import hashlib
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import jwt
 from ninja import Router, Body
 from django.conf import settings
@@ -258,7 +258,7 @@ def set_my_pin(request, data: SetPinRequest):
             raise HttpError(403, 'Current PIN is incorrect.')
 
     user.set_pin(pin)
-    user.save(update_fields=['pin_hash', 'pin_length', 'pin_lock_enabled'])
+    user.save(update_fields=['pin_hash', 'pin_length', 'pin_lock_enabled', 'pin_failed_attempts', 'pin_locked_until'])
     return PinStatusResponse(
         pin_lock_allowed=True,
         pin_lock_enabled=True,
@@ -291,17 +291,32 @@ def toggle_my_pin_lock(request, data: TogglePinLockRequest):
 def remove_my_pin(request):
     user = request.user
     user.clear_pin()
-    user.save(update_fields=['pin_hash', 'pin_length', 'pin_lock_enabled'])
+    user.save(update_fields=['pin_hash', 'pin_length', 'pin_lock_enabled', 'pin_failed_attempts', 'pin_locked_until'])
     return 204, None
 
 
 @router.post('/pin/verify', response=dict, auth=jwt_auth_any_role)
 def verify_my_pin(request, data: VerifyPinRequest):
-    pin = data.pin.strip()
-    if not request.user.has_pin:
+    user = request.user
+    if not user.has_pin:
         raise HttpError(400, 'No PIN is set for this account.')
-    if not request.user.check_pin(pin):
+
+    now = timezone.now()
+    if user.pin_locked_until and user.pin_locked_until > now:
+        raise HttpError(429, 'Too many incorrect attempts. Try again in a few minutes.')
+
+    pin = data.pin.strip()
+    if not user.check_pin(pin):
+        user.pin_failed_attempts += 1
+        if user.pin_failed_attempts >= mfa.MAX_FAILED_ATTEMPTS:
+            user.pin_locked_until = now + timedelta(minutes=mfa.LOCKOUT_MINUTES)
+            user.pin_failed_attempts = 0
+        user.save(update_fields=['pin_failed_attempts', 'pin_locked_until'])
         raise HttpError(400, 'Incorrect PIN.')
+
+    user.pin_failed_attempts = 0
+    user.pin_locked_until = None
+    user.save(update_fields=['pin_failed_attempts', 'pin_locked_until'])
     return {'valid': True}
 
 
