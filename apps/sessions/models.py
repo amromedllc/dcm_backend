@@ -178,6 +178,10 @@ class TrialEvent(OrganizationScopedMixin):
     value_seconds = models.FloatField(null=True, blank=True)
     recorded_at = models.DateTimeField(db_index=True)
     staff_notes = models.TextField(blank=True)
+    # Cue/instruction onset timestamp for a latency target — latency is
+    # recorded_at (response onset) minus this. Null for every other
+    # measurement_type.
+    cue_at = models.DateTimeField(null=True, blank=True)
 
     def _derive_organization_id(self) -> int | None:
         return self.session_run.organization_id
@@ -215,6 +219,9 @@ class BehaviorEvent(OrganizationScopedMixin):
     severity = models.CharField(max_length=10, choices=Severity.choices, blank=True)
     notes = models.TextField(blank=True)
     client_event_id = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+    # Explicit denominator for a `percentage` target (numerator is
+    # frequency_count). Null for every other measurement_type.
+    denominator_count = models.PositiveIntegerField(null=True, blank=True)
 
     def _derive_organization_id(self) -> int | None:
         return self.session_run.organization_id

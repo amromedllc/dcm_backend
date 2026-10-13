@@ -19,6 +19,28 @@ BEHAVIOR_MEASUREMENT_TYPES = {
     Target.MeasurementType.DURATION,
     Target.MeasurementType.RATE,
     'frequency',
+    Target.MeasurementType.PERCENTAGE,
+    Target.MeasurementType.PERMANENT_PRODUCT,
+}
+
+# Target types recorded as TrialEvents but rolled up into a value (rather than
+# a correct/total ratio) via _trial_metric_value — latency averages, interval
+# percentages, and rating-scale averages, mirroring BEHAVIOR_MEASUREMENT_TYPES'
+# role for BehaviorEvent-backed targets.
+TRIAL_METRIC_MEASUREMENT_TYPES = {
+    Target.MeasurementType.LATENCY,
+    Target.MeasurementType.WHOLE_INTERVAL,
+    Target.MeasurementType.PARTIAL_INTERVAL,
+    Target.MeasurementType.MOMENTARY_TIME_SAMPLING,
+    Target.MeasurementType.RATING_SCALE,
+}
+
+# Target types that are pure event logs with no automatic computed metric —
+# mastery/fading criteria never apply to these.
+EVENT_LOG_MEASUREMENT_TYPES = {
+    Target.MeasurementType.ABC,
+    Target.MeasurementType.NARRATIVE_EVENT,
+    Target.MeasurementType.SCATTERPLOT,
 }
 
 
@@ -221,11 +243,20 @@ def _pass_stats(target: Target, trials_qs, *, require_independent: bool = False)
         item.get('key') for item in target.sub_items
         if item.get('measurement_type') == 'duration'
     }
+    # Fidelity checklists use response_score == -1 to mean "N/A" (step not
+    # applicable this observation) — those steps are dropped from both the
+    # expected set and the correct/incorrect tally for that pass, so the
+    # denominator is observed *applicable* steps, not every configured step.
+    is_fidelity = target.measurement_type == Target.MeasurementType.FIDELITY
     scored_keys: dict[int, set] = {}
+    na_keys: dict[int, set] = {}
     correct_keys: dict[int, set] = {}
     for score, trial_number, key, value_seconds in trials_qs.values_list(
         'response_score', 'trial_number', 'sub_item_key', 'value_seconds',
     ):
+        if is_fidelity and score == -1:
+            na_keys.setdefault(trial_number, set()).add(key)
+            continue
         scored_keys.setdefault(trial_number, set()).add(key)
         if key in duration_keys:
             is_correct = value_seconds is not None
@@ -236,11 +267,13 @@ def _pass_stats(target: Target, trials_qs, *, require_independent: bool = False)
 
     total = 0
     correct = 0
-    for trial_number, keys in scored_keys.items():
-        if keys != expected_keys:
+    for trial_number in set(scored_keys) | set(na_keys):
+        keys = scored_keys.get(trial_number, set())
+        pass_expected = expected_keys - na_keys.get(trial_number, set()) if is_fidelity else expected_keys
+        if keys != pass_expected or not pass_expected:
             continue
         total += 1
-        if correct_keys.get(trial_number) == expected_keys:
+        if correct_keys.get(trial_number) == pass_expected:
             correct += 1
     return total, correct
 
@@ -288,6 +321,19 @@ def _behavior_metric_value(target: Target, session, criteria: dict) -> tuple[int
     total_events = events.aggregate(total=Sum('frequency_count'))['total'] or 0
     objective_key = str(criteria.get('objective_key') or '').lower()
 
+    if target.measurement_type == Target.MeasurementType.PERCENTAGE:
+        totals = events.aggregate(
+            numerator=Sum('frequency_count'), denominator=Sum('denominator_count'),
+        )
+        denominator = totals['denominator'] or 0
+        numerator = totals['numerator'] or 0
+        if not denominator:
+            return 0, 0.0
+        return 1, numerator / denominator * 100
+
+    if target.measurement_type == Target.MeasurementType.PERMANENT_PRODUCT:
+        return events.count(), float(total_events)
+
     # No explicit workflow objective_key — the target's own `measurement`
     # fully decides which metric to roll up to (min/max/avg/total duration,
     # rate per hour/minute, or raw frequency).
@@ -331,8 +377,71 @@ def _behavior_metric_value(target: Target, session, criteria: dict) -> tuple[int
     return total_events, float(total_events)
 
 
+def _latency_stats(trials_qs) -> list[float]:
+    """Per-trial cue-to-response seconds, excluding censored timeouts
+    (response_score == -1) and rows missing a cue_at."""
+    return [
+        (recorded_at - cue_at).total_seconds()
+        for recorded_at, cue_at, score in trials_qs.values_list('recorded_at', 'cue_at', 'response_score')
+        if cue_at is not None and score != -1
+    ]
+
+
+def _interval_stats(trials_qs) -> tuple[int, int]:
+    """(observed_count, occurred_count) for whole/partial interval and
+    momentary time sampling targets — one TrialEvent row per observed
+    interval/sample; response_score > 0 means the behavior occurred."""
+    observed_count = trials_qs.count()
+    occurred_count = trials_qs.filter(response_score__gt=0).count()
+    return observed_count, occurred_count
+
+
+def _rating_stats(trials_qs) -> list[float]:
+    """Raw rating-scale values for averaging."""
+    return [v for v in trials_qs.values_list('response_score', flat=True) if v is not None]
+
+
+def _trial_metric_value(target: Target, session, criteria: dict) -> tuple[int, float]:
+    """Returns (sample_count, value) for TrialEvent-backed targets whose
+    value is a direct rollup (latency / interval percent / rating average)
+    rather than a correct/total ratio — the TrialEvent-side counterpart to
+    _behavior_metric_value."""
+    from apps.sessions.models import TrialEvent
+
+    trials = TrialEvent.objects.filter(session_run=session, target_id=target.id)
+    trials = _limit_trials_if_configured(trials, criteria)
+
+    if target.measurement_type == Target.MeasurementType.LATENCY:
+        latencies = _latency_stats(trials)
+        if not latencies:
+            return 0, 0.0
+        measurement = target.measurement or Target.Measurement.AVG_LATENCY_SECONDS
+        return len(latencies), aggregate_measurement(measurement, latencies=latencies)
+
+    if target.measurement_type in {
+        Target.MeasurementType.WHOLE_INTERVAL,
+        Target.MeasurementType.PARTIAL_INTERVAL,
+        Target.MeasurementType.MOMENTARY_TIME_SAMPLING,
+    }:
+        observed_count, occurred_count = _interval_stats(trials)
+        return observed_count, aggregate_measurement(
+            Target.Measurement.PERCENT_INTERVALS, observed_count=observed_count, occurred_count=occurred_count,
+        )
+
+    if target.measurement_type == Target.MeasurementType.RATING_SCALE:
+        ratings = _rating_stats(trials)
+        if not ratings:
+            return 0, 0.0
+        return len(ratings), aggregate_measurement(Target.Measurement.AVG_RATING, ratings=ratings)
+
+    return 0, 0.0
+
+
 def _session_criteria_result(target: Target, session, phase_config: dict, criteria: dict) -> bool | None:
     """Return True/False for eligible sessions, or None when minimum data was not collected."""
+    if target.measurement_type in EVENT_LOG_MEASUREMENT_TYPES:
+        return None  # pure event logs (abc/narrative_event/scatterplot) have no automatic metric
+
     min_trials = criteria.get('minimum_trials', 5)
     threshold = criteria.get('threshold_pct', 80)
     threshold_direction = str(criteria.get('threshold_direction') or 'min').lower()
@@ -359,6 +468,12 @@ def _session_criteria_result(target: Target, session, phase_config: dict, criter
         'increase_avg_duration', 'reduce_avg_duration',
     }:
         total, value = _behavior_metric_value(target, session, criteria)
+        if total < min_trials:
+            return None
+        return value <= threshold if threshold_direction == 'max' else value >= threshold
+
+    if target.measurement_type in TRIAL_METRIC_MEASUREMENT_TYPES:
+        total, value = _trial_metric_value(target, session, criteria)
         if total < min_trials:
             return None
         return value <= threshold if threshold_direction == 'max' else value >= threshold

@@ -185,6 +185,8 @@ class TrialEventCreateRequest(Schema):
     value_seconds: float | None = Field(default=None, ge=0)
     recorded_at: datetime
     staff_notes: str = ''
+    # Cue/instruction onset for a latency target; latency = recorded_at - cue_at.
+    cue_at: datetime | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +215,8 @@ class BehaviorEventCreateRequest(Schema):
     severity: BehaviorEvent.Severity | Literal[''] = ''
     notes: str = ''
     client_event_id: str | None = None
+    # Explicit denominator for a `percentage` target (numerator is frequency_count).
+    denominator_count: int | None = Field(default=None, ge=0)
 
 
 # ---------------------------------------------------------------------------
