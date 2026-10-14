@@ -61,7 +61,7 @@ class Command(BaseCommand):
 
         now = datetime.now(dt_timezone.utc)
         payload = {
-            'sub': user.email,
+            'email': user.email,
             'adminid': user.external_admin_id,
             'user_type': user.role,
             'iat': now,

@@ -210,7 +210,7 @@ def sso_login(request, token: str, redirecturl: str = '/'):
     except jwt.InvalidTokenError:
         return _sso_error_redirect('invalid_token')
 
-    email = payload.get('sub')
+    email = payload.get('email')
     admin_id = payload.get('adminid') or payload.get('user_id')
     if not email or admin_id is None:
         return _sso_error_redirect('invalid_token')
