@@ -166,12 +166,12 @@ def _safe_sso_redirect_target(redirecturl: str) -> str:
 
 
 def _sso_error_redirect(reason: str) -> HttpResponseRedirect:
-    base = getattr(settings, 'FRONTEND_BASE_URL', '').rstrip('/')
+    base = getattr(settings, 'FRONTEND_BASE_URL', 'https://app.progressly.io').rstrip('/')
     return HttpResponseRedirect(f'{base}/login?error={reason}')
 
 
 def _sso_success_redirect(tokens: LoginResponse, redirecturl: str) -> HttpResponseRedirect:
-    base = getattr(settings, 'FRONTEND_BASE_URL', '').rstrip('/')
+    base = getattr(settings, 'FRONTEND_BASE_URL', 'https://app.progressly.io').rstrip('/')
     target = _safe_sso_redirect_target(redirecturl)
     fields = {
         k: (str(v).lower() if isinstance(v, bool) else v)
