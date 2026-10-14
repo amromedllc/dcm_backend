@@ -2,6 +2,8 @@ from collections import Counter, defaultdict
 from datetime import date, datetime
 from typing import TypedDict
 
+from django.utils import timezone as dj_timezone
+
 from apps.programs.models import Program, Target, ProgramModule, ProgramSubmodule, TargetSubItem
 from apps.programs.measurements import (
     aggregate_measurement, MEASUREMENT_LABELS, MEASUREMENT_UNIT,
@@ -1285,8 +1287,8 @@ def compute_program_baseline(program_id: int, sessions: int = 3) -> list[dict]:
             'total_trials': len(used),
             'correct_trials': correct,
             'percent_correct': round(100 * correct / len(used), 1),
-            'first_date': min(e['recorded_at'] for e in used).date(),
-            'last_date': max(e['recorded_at'] for e in used).date(),
+            'first_date': dj_timezone.localtime(min(e['recorded_at'] for e in used)).date(),
+            'last_date': dj_timezone.localtime(max(e['recorded_at'] for e in used)).date(),
         })
     return results
 
