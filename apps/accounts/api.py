@@ -193,6 +193,11 @@ def sso_login(request, token: str, redirecturl: str = '/'):
     provisions one. Any failure redirects to /login with an ?error= code
     rather than raising, since the caller is a browser mid-redirect, not an
     API client.
+
+    `tpms_user_id` in the token is optional — when TPMS includes it, it must
+    match this DCM user's external_employee_id, tightening the match beyond
+    email + admin_id alone (two employees at the same practice could
+    otherwise cross-match on a typo'd or stale email).
     """
     tenant = getattr(request, 'tenant', None)
     if tenant is None:
@@ -219,15 +224,23 @@ def sso_login(request, token: str, redirecturl: str = '/'):
     except (TypeError, ValueError):
         return _sso_error_redirect('invalid_token')
 
+    employee_id = payload.get('tpms_user_id')
+    if employee_id is not None:
+        try:
+            employee_id = int(employee_id)
+        except (TypeError, ValueError):
+            return _sso_error_redirect('invalid_token')
+
     tenant_admin_ids = set(tenant.tpms_admin_ids.values_list('admin_id', flat=True))
     if admin_id not in tenant_admin_ids:
         return _sso_error_redirect('user_not_found')
 
-    user = (
-        User.objects.exclude(role=User.Role.CAREGIVER)
-        .filter(email__iexact=email, external_admin_id=admin_id, is_active=True)
-        .first()
+    user_qs = User.objects.exclude(role=User.Role.CAREGIVER).filter(
+        email__iexact=email, external_admin_id=admin_id, is_active=True,
     )
+    if employee_id is not None:
+        user_qs = user_qs.filter(external_employee_id=employee_id)
+    user = user_qs.first()
     if user is None:
         return _sso_error_redirect('user_not_found')
 

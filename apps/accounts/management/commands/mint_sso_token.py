@@ -29,6 +29,11 @@ class Command(BaseCommand):
         parser.add_argument('--port', default=None, help="Port to append to the domain (e.g. 8001 for `python manage.py runserver 8001`) — the stored Domain row is just the bare hostname, with no port")
         parser.add_argument('--scheme', default='http', choices=['http', 'https'], help='URL scheme (default: http)')
         parser.add_argument('--expires-in', type=int, default=120, help='Token TTL in seconds (default: 120)')
+        parser.add_argument(
+            '--no-employee-id', action='store_true',
+            help="Omit tpms_user_id from the token even if the user has an external_employee_id set "
+                 '(to test the email+admin_id-only match path)',
+        )
 
     def handle(self, *args, **options):
         secret = getattr(settings, 'TPMS_SSO_SECRET_KEY', '')
@@ -67,6 +72,8 @@ class Command(BaseCommand):
             'iat': now,
             'exp': now + timedelta(seconds=options['expires_in']),
         }
+        if user.external_employee_id is not None and not options['no_employee_id']:
+            payload['tpms_user_id'] = user.external_employee_id
         token = jwt.encode(payload, secret, algorithm='HS256')
 
         query = urlencode({'token': token, 'redirecturl': options['redirect']})
@@ -75,6 +82,8 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS('Minted SSO token for:'))
         self.stdout.write(f'  user:        {user.email} (id={user.id}, role={user.role})')
         self.stdout.write(f'  admin_id:    {user.external_admin_id}')
+        if 'tpms_user_id' in payload:
+            self.stdout.write(f'  employee_id: {payload["tpms_user_id"]}')
         self.stdout.write(f'  expires in:  {options["expires_in"]}s')
         self.stdout.write('')
         self.stdout.write('Open this URL in a browser to exercise the full SSO + redirect flow:')
