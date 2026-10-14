@@ -149,6 +149,11 @@ JWT_REFRESH_TOKEN_EXPIRE_DAYS = env.int('JWT_REFRESH_TOKEN_EXPIRE_DAYS', default
 TPMS_API_BASE_URL = env('TPMS_API_BASE_URL', default='https://app.therapypms.com')
 TPMS_API_TIMEOUT_SECONDS = env.int('TPMS_API_TIMEOUT_SECONDS', default=20)
 
+# Shared secret for verifying inbound SSO hand-off JWTs from TherapyPMS (see
+# apps.accounts.api.sso_login). Deliberately distinct from JWT_SECRET_KEY,
+# which signs DCM's own session tokens — TPMS only ever needs to know this one.
+TPMS_SSO_SECRET_KEY = env('TPMS_SSO_SECRET_KEY', default='')
+
 # AI drafting (assessment builder). Any OpenAI-compatible chat-completions service works;
 # the defaults point at NVIDIA's free developer API (key from build.nvidia.com).
 # AI is used only when AI_ENABLED is true AND AI_API_KEY is set.

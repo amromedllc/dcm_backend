@@ -1,10 +1,12 @@
 import hashlib
 import logging
 from datetime import datetime, timedelta
+from urllib.parse import urlencode
 import jwt
 from ninja import Router, Body
 from django.conf import settings
 from django.contrib.auth import authenticate
+from django.http import HttpResponseRedirect
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -153,6 +155,84 @@ def _mfa_gate(tenant, tokens: TokenResponse):
         mfa_method=method,
         mfa_token=mfa.create_mfa_token(user, tenant.pk),
     )
+
+
+def _safe_sso_redirect_target(redirecturl: str) -> str:
+    if not redirecturl or not redirecturl.startswith('/') or redirecturl.startswith('//'):
+        return '/'
+    return redirecturl
+
+
+def _sso_error_redirect(reason: str) -> HttpResponseRedirect:
+    base = getattr(settings, 'FRONTEND_BASE_URL', '').rstrip('/')
+    return HttpResponseRedirect(f'{base}/login?error={reason}')
+
+
+def _sso_success_redirect(tokens: LoginResponse, redirecturl: str) -> HttpResponseRedirect:
+    base = getattr(settings, 'FRONTEND_BASE_URL', '').rstrip('/')
+    target = _safe_sso_redirect_target(redirecturl)
+    fields = {
+        k: (str(v).lower() if isinstance(v, bool) else v)
+        for k, v in tokens.dict().items() if v is not None
+    }
+    fields['redirect'] = target
+    return HttpResponseRedirect(f'{base}/sso-callback#{urlencode(fields)}')
+
+
+@router.get('/sso/login', auth=None)
+def sso_login(request, token: str, redirecturl: str = '/'):
+    """
+    SSO hand-off from TherapyPMS: TPMS has already authenticated this admin/
+    supervisor/staff user and redirects the browser here with a short-lived
+    JWT signed with TPMS_SSO_SECRET_KEY — a secret shared only for this
+    handshake, deliberately never DCM's own JWT_SECRET_KEY (which signs DCM's
+    session tokens).
+
+    This only logs in a DCM User that already exists (synced via
+    apps.integrations.tpms_pull) — unlike _tpms_caregiver_auth, it never
+    provisions one. Any failure redirects to /login with an ?error= code
+    rather than raising, since the caller is a browser mid-redirect, not an
+    API client.
+    """
+    tenant = getattr(request, 'tenant', None)
+    if tenant is None:
+        return _sso_error_redirect('invalid_tenant')
+
+    secret = getattr(settings, 'TPMS_SSO_SECRET_KEY', '')
+    if not secret:
+        logger.error('SSO login attempted but TPMS_SSO_SECRET_KEY is not configured')
+        return _sso_error_redirect('sso_not_configured')
+
+    try:
+        payload = jwt.decode(token, secret, algorithms=['HS256'])
+    except jwt.ExpiredSignatureError:
+        return _sso_error_redirect('expired_token')
+    except jwt.InvalidTokenError:
+        return _sso_error_redirect('invalid_token')
+
+    email = payload.get('sub')
+    admin_id = payload.get('adminid') or payload.get('user_id')
+    if not email or admin_id is None:
+        return _sso_error_redirect('invalid_token')
+    try:
+        admin_id = int(admin_id)
+    except (TypeError, ValueError):
+        return _sso_error_redirect('invalid_token')
+
+    tenant_admin_ids = set(tenant.tpms_admin_ids.values_list('admin_id', flat=True))
+    if admin_id not in tenant_admin_ids:
+        return _sso_error_redirect('user_not_found')
+
+    user = (
+        User.objects.exclude(role=User.Role.CAREGIVER)
+        .filter(email__iexact=email, external_admin_id=admin_id, is_active=True)
+        .first()
+    )
+    if user is None:
+        return _sso_error_redirect('user_not_found')
+
+    tokens = _mfa_gate(tenant, _issue_tokens(user, tenant.pk))
+    return _sso_success_redirect(tokens, redirecturl)
 
 
 @router.post('/mfa/verify', response=TokenResponse, auth=None)
