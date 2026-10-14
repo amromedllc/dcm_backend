@@ -1,4 +1,6 @@
 from datetime import date, timedelta
+from functools import wraps
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from django.db import models
 from django.utils import timezone
 from ninja import Router
@@ -30,9 +32,34 @@ _DEFAULT_DAYS = 90
 
 
 def _resolve_dates(date_from: date | None, date_to: date | None) -> tuple[date, date]:
-    to = date_to or timezone.now().date()
+    to = date_to or timezone.localdate()
     frm = date_from or (to - timedelta(days=_DEFAULT_DAYS))
     return frm, to
+
+
+def with_user_timezone(fn):
+    """
+    Activates the requesting user's chosen display timezone (User.timezone)
+    for the duration of the view — so the `__date` ORM lookups these
+    analytics endpoints rely on for day-bucketing (e.g. `recorded_at__date`)
+    group events by the user's local calendar day instead of the server's
+    UTC day. A user with no preference set sees unchanged (UTC) behavior.
+    """
+    @wraps(fn)
+    def wrapper(request, *args, **kwargs):
+        tz_name = getattr(request.user, 'timezone', None)
+        if not tz_name:
+            return fn(request, *args, **kwargs)
+        try:
+            zone = ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            return fn(request, *args, **kwargs)
+        timezone.activate(zone)
+        try:
+            return fn(request, *args, **kwargs)
+        finally:
+            timezone.deactivate()
+    return wrapper
 
 
 def _require_supervisor(request):
@@ -86,6 +113,7 @@ _VALID_ASSESSMENT_GROUP_BY = {'assessment', 'domain', 'metric'}
 
 
 @router.get('/analytics/programs/{program_id}/trials', response=list[TrialDataPointSchema])
+@with_user_timezone
 def program_trial_data(
     request,
     program_id: int,
@@ -115,6 +143,7 @@ def program_trial_data(
 
 
 @router.get('/analytics/targets/{target_id}/trials', response=list[TrialDataPointSchema])
+@with_user_timezone
 def target_trial_data(
     request,
     target_id: int,
@@ -131,6 +160,7 @@ def target_trial_data(
 # ---------------------------------------------------------------------------
 
 @router.get('/analytics/programs/{program_id}/behaviors', response=list[BehaviorDataPointSchema])
+@with_user_timezone
 def program_behavior_data(
     request,
     program_id: int,
@@ -146,6 +176,7 @@ def program_behavior_data(
 
 
 @router.get('/analytics/programs/{program_id}/assessment-summary', response=AssessmentProgramSummarySchema)
+@with_user_timezone
 def program_assessment_summary(request, program_id: int):
     """Per-area scores for an assessment program: latest score, change since the previous administration."""
     from apps.programs.api import _get_program_or_404
@@ -154,6 +185,7 @@ def program_assessment_summary(request, program_id: int):
 
 
 @router.get('/analytics/programs/{program_id}/duration-occurrences', response=list[DurationOccurrenceSchema])
+@with_user_timezone
 def program_duration_occurrences(
     request,
     program_id: int,
@@ -169,6 +201,7 @@ def program_duration_occurrences(
 
 
 @router.get('/analytics/clients/{client_id}/abc', response=list[ABCDataPointSchema])
+@with_user_timezone
 def client_abc_data(
     request,
     client_id: int,
@@ -243,6 +276,7 @@ def client_assessment_data(
 # ---------------------------------------------------------------------------
 
 @router.get('/analytics/programs/{program_id}/baseline', response=list[TargetBaselineSchema])
+@with_user_timezone
 def program_baseline(request, program_id: int, sessions: int = 3):
     """Baseline % correct per target, from each target's first N sessions of data."""
     from apps.programs.api import _get_program_or_404
@@ -251,6 +285,7 @@ def program_baseline(request, program_id: int, sessions: int = 3):
 
 
 @router.get('/analytics/programs/{program_id}/summary', response=ProgramSummarySchema)
+@with_user_timezone
 def program_summary(
     request,
     program_id: int,
@@ -281,6 +316,7 @@ def program_summary(
 # ---------------------------------------------------------------------------
 
 @router.get('/analytics/clients/{client_id}/report')
+@with_user_timezone
 def client_progress_report(
     request,
     client_id: int,
@@ -365,6 +401,7 @@ def delete_client_annotation(request, annotation_id: int):
 # ---------------------------------------------------------------------------
 
 @router.get('/analytics/programs/{program_id}/modules/{module_id}/summary', response=ModuleSummarySchema)
+@with_user_timezone
 def module_summary(
     request,
     program_id: int,

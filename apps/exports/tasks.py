@@ -15,6 +15,8 @@ import csv
 import io
 import zipfile
 from datetime import date, timedelta
+from functools import wraps
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.utils import timezone
@@ -22,6 +24,35 @@ from django.utils import timezone
 from shared.audit import log_export
 
 _DEFAULT_GRAPH_DAYS = 90  # matches apps.analytics.api._DEFAULT_DAYS
+
+
+def with_export_user_timezone(fn):
+    """
+    Activates the requesting user's chosen display timezone (User.timezone,
+    via Export.created_by) for the duration of file generation — same
+    `timezone.activate()`/`.deactivate()` pattern as
+    `apps.analytics.api.with_user_timezone`, just keyed off `export_id`
+    instead of a live `request.user` since this runs outside any view by
+    the time these functions are called. Makes the `__date` ORM lookups and
+    `timezone.localtime()` calls below (and in note_pdf.py) resolve to the
+    exporting user's zone instead of the server's; no-op if unset.
+    """
+    @wraps(fn)
+    def wrapper(export_id, *args, **kwargs):
+        from .models import Export
+        tz_name = Export.objects.filter(id=export_id).values_list('created_by__timezone', flat=True).first()
+        if not tz_name:
+            return fn(export_id, *args, **kwargs)
+        try:
+            zone = ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            return fn(export_id, *args, **kwargs)
+        timezone.activate(zone)
+        try:
+            return fn(export_id, *args, **kwargs)
+        finally:
+            timezone.deactivate()
+    return wrapper
 
 
 def _mark_processing(export):
@@ -59,6 +90,7 @@ def _save_file(content: bytes, filename: str) -> tuple[str, int]:
 # Trial CSV
 # ---------------------------------------------------------------------------
 
+@with_export_user_timezone
 def generate_trial_csv(export_id: int) -> None:
     from .models import Export
     from apps.sessions.models import TrialEvent
@@ -87,13 +119,13 @@ def generate_trial_csv(export_id: int) -> None:
         for event in qs.iterator(chunk_size=500):
             writer.writerow([
                 event.session_run_id,
-                event.session_run.started_at.date(),
+                timezone.localtime(event.session_run.started_at).date(),
                 event.target_id,
                 event.target_name,
                 event.trial_number,
                 event.response_score,
                 event.prompt_level_label,
-                event.recorded_at.isoformat(),
+                timezone.localtime(event.recorded_at).isoformat(),
                 event.staff_notes,
             ])
             row_count += 1
@@ -111,6 +143,7 @@ def generate_trial_csv(export_id: int) -> None:
 # Behavior CSV
 # ---------------------------------------------------------------------------
 
+@with_export_user_timezone
 def generate_behavior_csv(export_id: int) -> None:
     from .models import Export
     from apps.sessions.models import BehaviorEvent
@@ -141,7 +174,7 @@ def generate_behavior_csv(export_id: int) -> None:
                 event.session_run_id,
                 event.target_id,
                 event.target_name,
-                event.occurred_at.isoformat(),
+                timezone.localtime(event.occurred_at).isoformat(),
                 event.frequency_count,
                 event.duration_seconds or '',
                 event.severity,
@@ -162,6 +195,7 @@ def generate_behavior_csv(export_id: int) -> None:
 # ABC CSV
 # ---------------------------------------------------------------------------
 
+@with_export_user_timezone
 def generate_abc_csv(export_id: int) -> None:
     from .models import Export
     from apps.sessions.models import ABCEvent, SessionRun
@@ -192,7 +226,7 @@ def generate_abc_csv(export_id: int) -> None:
         for event in qs.iterator(chunk_size=500):
             writer.writerow([
                 event.session_run_id,
-                event.occurred_at.isoformat(),
+                timezone.localtime(event.occurred_at).isoformat(),
                 event.antecedent,
                 event.behavior_description,
                 event.consequence,
@@ -215,6 +249,7 @@ def generate_abc_csv(export_id: int) -> None:
 # Raw data ZIP — trials + behaviors + ABC in one archive
 # ---------------------------------------------------------------------------
 
+@with_export_user_timezone
 def generate_raw_zip(export_id: int) -> None:
     from .models import Export
     from apps.sessions.models import TrialEvent, BehaviorEvent, ABCEvent
@@ -244,10 +279,10 @@ def generate_raw_zip(export_id: int) -> None:
             tw.writerow(['session_id', 'session_date', 'target_id', 'target_name',
                          'trial_number', 'response_score', 'prompt_level', 'recorded_at', 'notes'])
             for event in trial_qs.iterator(chunk_size=500):
-                tw.writerow([event.session_run_id, event.session_run.started_at.date(),
+                tw.writerow([event.session_run_id, timezone.localtime(event.session_run.started_at).date(),
                               event.target_id, event.target_name, event.trial_number,
                               event.response_score, event.prompt_level_label,
-                              event.recorded_at.isoformat(), event.staff_notes])
+                              timezone.localtime(event.recorded_at).isoformat(), event.staff_notes])
                 total_rows += 1
             zf.writestr('trials.csv', trial_buf.getvalue())
 
@@ -264,7 +299,7 @@ def generate_raw_zip(export_id: int) -> None:
                          'frequency_count', 'duration_seconds', 'severity', 'notes'])
             for event in behavior_qs.iterator(chunk_size=500):
                 bw.writerow([event.session_run_id, event.target_id, event.target_name,
-                              event.occurred_at.isoformat(), event.frequency_count,
+                              timezone.localtime(event.occurred_at).isoformat(), event.frequency_count,
                               event.duration_seconds or '', event.severity, event.notes])
                 total_rows += 1
             zf.writestr('behaviors.csv', behavior_buf.getvalue())
@@ -282,7 +317,7 @@ def generate_raw_zip(export_id: int) -> None:
                 aw.writerow(['session_id', 'occurred_at', 'antecedent',
                              'behavior', 'consequence', 'setting', 'staff_response', 'notes'])
                 for event in abc_qs.iterator(chunk_size=500):
-                    aw.writerow([event.session_run_id, event.occurred_at.isoformat(),
+                    aw.writerow([event.session_run_id, timezone.localtime(event.occurred_at).isoformat(),
                                  event.antecedent, event.behavior_description, event.consequence,
                                  event.setting, event.staff_response, event.notes])
                     total_rows += 1
@@ -312,6 +347,7 @@ def _target_ids_for_program(program_id: int | None) -> list[int]:
 # Notes CSV — all notes for a client
 # ---------------------------------------------------------------------------
 
+@with_export_user_timezone
 def generate_notes_csv(export_id: int) -> None:
     from .models import Export
     from apps.notes.models import LessonNote
@@ -348,12 +384,12 @@ def generate_notes_csv(export_id: int) -> None:
                 note.staff.email if note.staff else '',
                 note.staff.full_name if note.staff else '',
                 note.template.name if note.template else '',
-                note.submitted_at.isoformat() if note.submitted_at else '',
-                note.approved_at.isoformat() if note.approved_at else '',
-                note.rejected_at.isoformat() if note.rejected_at else '',
+                timezone.localtime(note.submitted_at).isoformat() if note.submitted_at else '',
+                timezone.localtime(note.approved_at).isoformat() if note.approved_at else '',
+                timezone.localtime(note.rejected_at).isoformat() if note.rejected_at else '',
                 note.rejection_reason,
                 note.session_run_id or '',
-                note.created_at.isoformat(),
+                timezone.localtime(note.created_at).isoformat(),
             ])
             row_count += 1
 
@@ -370,6 +406,7 @@ def generate_notes_csv(export_id: int) -> None:
 # Sessions CSV — all sessions for a client
 # ---------------------------------------------------------------------------
 
+@with_export_user_timezone
 def generate_sessions_csv(export_id: int) -> None:
     from .models import Export
     from apps.sessions.models import SessionRun
@@ -408,10 +445,10 @@ def generate_sessions_csv(export_id: int) -> None:
                 session.status,
                 session.staff.email if session.staff else '',
                 session.staff.full_name if session.staff else '',
-                session.started_at.isoformat(),
-                session.ended_at.isoformat() if session.ended_at else '',
-                session.submitted_at.isoformat() if session.submitted_at else '',
-                session.reviewed_at.isoformat() if session.reviewed_at else '',
+                timezone.localtime(session.started_at).isoformat(),
+                timezone.localtime(session.ended_at).isoformat() if session.ended_at else '',
+                timezone.localtime(session.submitted_at).isoformat() if session.submitted_at else '',
+                timezone.localtime(session.reviewed_at).isoformat() if session.reviewed_at else '',
                 session.trial_count,
                 session.behavior_count,
                 session.rejection_reason,
@@ -517,6 +554,7 @@ def _render_program_graph(program, target_ids: list[int], date_from: date, date_
     return buf.getvalue()
 
 
+@with_export_user_timezone
 def _generate_graph(export_id: int, image_format: str) -> None:
     from .models import Export
     from apps.programs.models import Program
@@ -527,7 +565,7 @@ def _generate_graph(export_id: int, image_format: str) -> None:
         params = export.params
 
         program = Program.objects.get(id=params['program_id'])
-        date_to = date.fromisoformat(params['date_to']) if params.get('date_to') else timezone.now().date()
+        date_to = date.fromisoformat(params['date_to']) if params.get('date_to') else timezone.localdate()
         date_from = (
             date.fromisoformat(params['date_from']) if params.get('date_from')
             else date_to - timedelta(days=_DEFAULT_GRAPH_DAYS)
@@ -586,6 +624,7 @@ def _render_note_pdf(note) -> bytes:
     return render_note_pdf(note)
 
 
+@with_export_user_timezone
 def generate_note_pdf(export_id: int) -> None:
     from .models import Export
     from apps.notes.models import LessonNote
