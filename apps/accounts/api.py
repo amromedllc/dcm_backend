@@ -2,6 +2,7 @@ import hashlib
 import logging
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 import jwt
 from ninja import Router, Body
 from django.conf import settings
@@ -46,6 +47,7 @@ from .schemas import (
     PinStatusResponse,
     SetPinRequest,
     TogglePinLockRequest,
+    UpdateAccountTimezoneRequest,
     VerifyPinRequest,
 )
 from apps.clients.models import Client
@@ -719,13 +721,44 @@ def _timezone_options(payload: dict) -> list[dict[str, str]]:
     return options
 
 
+_IANA_ZONE_PREFIXES = (
+    'Africa/', 'America/', 'Antarctica/', 'Arctic/', 'Asia/', 'Atlantic/',
+    'Australia/', 'Europe/', 'Indian/', 'Pacific/', 'UTC',
+)
+
+
+def _common_timezone_options() -> list[dict[str, str]]:
+    """IANA zone names worth offering in the picker — real places, not the
+    legacy Etc/GMT+N or fixed-offset aliases zoneinfo also lists."""
+    now = timezone.now()
+    options = []
+    for name in sorted(available_timezones()):
+        if not name.startswith(_IANA_ZONE_PREFIXES):
+            continue
+        try:
+            offset = now.astimezone(ZoneInfo(name)).strftime('%z')
+        except ZoneInfoNotFoundError:
+            continue
+        offset_label = f'GMT{offset[:3]}:{offset[3:]}' if offset else 'GMT'
+        options.append({'value': name, 'label': f"{name.replace('_', ' ')} ({offset_label})"})
+    return options
+
+
+def _is_valid_timezone(name: str) -> bool:
+    try:
+        ZoneInfo(name)
+        return True
+    except (ZoneInfoNotFoundError, ValueError):
+        return False
+
+
 @router.get('/account/profile', response=AccountProfileSchema, auth=jwt_auth_any_role)
 def account_profile(request):
     user = request.user
     display_name = user.full_name
     email = user.email
-    current_timezone = None
-    timezone_options = []
+    current_timezone = user.timezone
+    timezone_options = _common_timezone_options()
     access_token = get_tpms_access_token(user.id)
 
     if access_token:
@@ -749,7 +782,9 @@ def account_profile(request):
                 or display_name
             )
             email = _tpms_value(personal_info, 'employee_email', 'email', 'login_email', 'loginEmail') or email
-            current_timezone = _tpms_value(
+            # A timezone the user already saved in DCM (user.timezone) wins — TPMS's
+            # value is only a suggested default for a user who hasn't picked one yet.
+            current_timezone = current_timezone or _tpms_value(
                 personal_info,
                 'employee_timezone',
                 'timezone',
@@ -770,7 +805,11 @@ def account_profile(request):
                 'selectedTimezone',
                 'value',
             ) or None
-            timezone_options = _timezone_options(timezone_payload)
+            existing_values = {option['value'] for option in timezone_options}
+            timezone_options = timezone_options + [
+                option for option in _timezone_options(timezone_payload)
+                if option['value'] not in existing_values
+            ]
         except TpmsAuthError as exc:
             if exc.status_code in {401, 403}:
                 raise HttpError(401, 'TherapyPMS session expired. Please log in again.') from exc
@@ -785,6 +824,18 @@ def account_profile(request):
         'timezone': current_timezone,
         'timezone_options': timezone_options,
     }
+
+
+@router.patch('/account/timezone', response=AccountProfileSchema, auth=jwt_auth_any_role)
+def update_account_timezone(request, data: UpdateAccountTimezoneRequest):
+    """Persists the user's display timezone (does not touch TPMS). A null
+    value clears it, reverting display to the device's timezone."""
+    if data.timezone and not _is_valid_timezone(data.timezone):
+        raise HttpError(422, 'Unrecognized timezone')
+
+    User.objects.filter(pk=request.user.pk).update(timezone=data.timezone or None)
+    request.user.timezone = data.timezone or None
+    return account_profile(request)
 
 
 def _same_practice_q(user: User, prefix: str = '') -> Q:

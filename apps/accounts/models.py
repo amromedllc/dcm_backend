@@ -59,6 +59,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         blank=True,
         related_name='users',
     )
+    timezone = models.CharField(max_length=64, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

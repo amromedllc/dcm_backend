@@ -149,6 +149,10 @@ class AccountProfileSchema(Schema):
     timezone_options: list[AccountTimezoneOptionSchema] = []
 
 
+class UpdateAccountTimezoneRequest(Schema):
+    timezone: str | None = None
+
+
 class UserCreateRequest(Schema):
     email: EmailStr
     first_name: NonEmptyStr
