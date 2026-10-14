@@ -235,9 +235,9 @@ def _get_accessible_clients(request):
     Return the client queryset visible to the requesting user.
 
     - Admins/supervisors: all clients in their TPMS practice scope.
-    - TPMS-linked staff: same practice scope (patient list is already
-      token-scoped by TherapyPMS; appointment history no longer comes from DB).
-    - Native staff: clients via ClientStaffAssignment.
+    - Staff (native or TPMS-linked): only clients assigned to them via
+      ClientStaffAssignment. TPMS-linked staff are still further
+      narrowed to their practice via external_admin_id first.
     """
     qs = Client.objects.all()
 
@@ -247,11 +247,7 @@ def _get_accessible_clients(request):
     if request.user.role in ('admin', 'supervisor'):
         return qs
 
-    if request.user.external_admin_id is not None:
-        # TPMS-linked staff — practice-scoped (TherapyPMS DB removed)
-        return qs
-
-    # Native staff: derive accessible clients from ClientStaffAssignment
+    # Staff (both native and TPMS-linked): scope to assigned clients only.
     assigned_client_ids = ClientStaffAssignment.objects.filter(
         user=request.user, is_active=True,
     ).values_list('client_id', flat=True)
