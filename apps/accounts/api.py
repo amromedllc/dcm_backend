@@ -47,6 +47,7 @@ from .schemas import (
     PinStatusResponse,
     SetPinRequest,
     TogglePinLockRequest,
+    UpdateAccountLanguageRequest,
     UpdateAccountTimezoneRequest,
     VerifyPinRequest,
 )
@@ -752,6 +753,27 @@ def _is_valid_timezone(name: str) -> bool:
         return False
 
 
+# The app's UI strings are English-only today — this just records a
+# preference for later use, it doesn't translate anything yet.
+_LANGUAGE_OPTIONS = [
+    {'value': 'en-US', 'label': 'English (US)'},
+    {'value': 'en-GB', 'label': 'English (UK)'},
+    {'value': 'es', 'label': 'Español'},
+    {'value': 'fr', 'label': 'Français'},
+    {'value': 'pt-BR', 'label': 'Português (Brasil)'},
+    {'value': 'de', 'label': 'Deutsch'},
+    {'value': 'zh-CN', 'label': '中文 (简体)'},
+    {'value': 'vi', 'label': 'Tiếng Việt'},
+    {'value': 'tl', 'label': 'Tagalog'},
+    {'value': 'ar', 'label': 'العربية'},
+]
+_VALID_LANGUAGE_CODES = {option['value'] for option in _LANGUAGE_OPTIONS}
+
+
+def _is_valid_language(code: str) -> bool:
+    return code in _VALID_LANGUAGE_CODES
+
+
 @router.get('/account/profile', response=AccountProfileSchema, auth=jwt_auth_any_role)
 def account_profile(request):
     user = request.user
@@ -823,6 +845,8 @@ def account_profile(request):
         'email': email,
         'timezone': current_timezone,
         'timezone_options': timezone_options,
+        'language': user.language,
+        'language_options': _LANGUAGE_OPTIONS,
     }
 
 
@@ -835,6 +859,19 @@ def update_account_timezone(request, data: UpdateAccountTimezoneRequest):
 
     User.objects.filter(pk=request.user.pk).update(timezone=data.timezone or None)
     request.user.timezone = data.timezone or None
+    return account_profile(request)
+
+
+@router.patch('/account/language', response=AccountProfileSchema, auth=jwt_auth_any_role)
+def update_account_language(request, data: UpdateAccountLanguageRequest):
+    """Persists the user's language preference. The app's UI is English-only
+    today, so this records the choice for later use without translating
+    anything yet. A null value clears it back to the app default."""
+    if data.language and not _is_valid_language(data.language):
+        raise HttpError(422, 'Unrecognized language')
+
+    User.objects.filter(pk=request.user.pk).update(language=data.language or None)
+    request.user.language = data.language or None
     return account_profile(request)
 
 

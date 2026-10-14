@@ -142,15 +142,26 @@ class AccountTimezoneOptionSchema(Schema):
     label: str
 
 
+class AccountLanguageOptionSchema(Schema):
+    value: str
+    label: str
+
+
 class AccountProfileSchema(Schema):
     display_name: str
     email: str
     timezone: str | None = None
     timezone_options: list[AccountTimezoneOptionSchema] = []
+    language: str | None = None
+    language_options: list[AccountLanguageOptionSchema] = []
 
 
 class UpdateAccountTimezoneRequest(Schema):
     timezone: str | None = None
+
+
+class UpdateAccountLanguageRequest(Schema):
+    language: str | None = None
 
 
 class UserCreateRequest(Schema):

@@ -60,6 +60,10 @@ class User(AbstractBaseUser, PermissionsMixin):
         related_name='users',
     )
     timezone = models.CharField(max_length=64, null=True, blank=True)
+    # BCP 47 locale tag (e.g. "en-US"), chosen in Account Settings. Null means
+    # "use the app's default" — the UI itself is English-only today, so this
+    # only records the preference for later use, it doesn't translate anything yet.
+    language = models.CharField(max_length=16, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
