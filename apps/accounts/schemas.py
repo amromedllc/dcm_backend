@@ -99,6 +99,7 @@ class UserSchema(Schema):
     external_employee_id: int | None
     mfa_required: bool = False
     mfa_enabled: bool = False
+    avatar_url: str | None = None
     created_at: datetime
 
 
@@ -154,6 +155,7 @@ class AccountProfileSchema(Schema):
     timezone_options: list[AccountTimezoneOptionSchema] = []
     language: str | None = None
     language_options: list[AccountLanguageOptionSchema] = []
+    avatar_url: str | None = None
 
 
 class UpdateAccountTimezoneRequest(Schema):

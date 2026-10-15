@@ -1,8 +1,13 @@
 import secrets
 import hashlib
+import uuid
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
 from django.utils import timezone
+
+
+def _user_avatar_upload_path(instance, filename):
+    return f'avatars/{instance.id}/{uuid.uuid4().hex}/{filename}'
 
 
 class UserManager(BaseUserManager):
@@ -64,6 +69,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     # "use the app's default" — the UI itself is English-only today, so this
     # only records the preference for later use, it doesn't translate anything yet.
     language = models.CharField(max_length=16, null=True, blank=True)
+    avatar = models.ImageField(upload_to=_user_avatar_upload_path, max_length=500, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

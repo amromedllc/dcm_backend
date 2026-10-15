@@ -4,11 +4,14 @@ from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 import jwt
-from ninja import Router, Body
+from ninja import Router, Body, File
+from ninja.files import UploadedFile
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.http import HttpResponseRedirect
 from django.utils import timezone
+
+from shared.uploads import validate_image_upload
 
 logger = logging.getLogger(__name__)
 from ninja.errors import HttpError
@@ -614,6 +617,15 @@ def refresh_token(request, data: RefreshRequest):
         raise HttpError(401, 'Invalid or expired token')
 
 
+def _user_avatar_url(request, user: User) -> str | None:
+    if not user.avatar:
+        return None
+    try:
+        return request.build_absolute_uri(user.avatar.url)
+    except ValueError:
+        return None
+
+
 @router.get('/me', response=CurrentUserSchema, auth=jwt_auth_any_role)
 def me(request):
     user = request.user
@@ -626,6 +638,7 @@ def me(request):
     user.pin_lock_allowed = bool(tenant and getattr(tenant, 'pin_lock_allowed', False))
     user.pin_lock_enabled = bool(getattr(user, 'pin_lock_enabled', False))
     user.pin_length = getattr(user, 'pin_length', None)
+    user.avatar_url = _user_avatar_url(request, user)
     if user.is_caregiver:
         # Caregiver access is identity-scoped, not permission-key-scoped —
         # no RolePermission lookup, just the linked client's display info.
@@ -847,6 +860,7 @@ def account_profile(request):
         'timezone_options': timezone_options,
         'language': user.language,
         'language_options': _LANGUAGE_OPTIONS,
+        'avatar_url': _user_avatar_url(request, user),
     }
 
 
@@ -872,6 +886,30 @@ def update_account_language(request, data: UpdateAccountLanguageRequest):
 
     User.objects.filter(pk=request.user.pk).update(language=data.language or None)
     request.user.language = data.language or None
+    return account_profile(request)
+
+
+@router.post('/account/avatar', response=AccountProfileSchema, auth=jwt_auth_any_role)
+def upload_account_avatar(request, file: UploadedFile = File(...)):
+    """Uploads/replaces the user's own profile picture."""
+    validate_image_upload(file)
+    user = request.user
+    old_avatar = user.avatar
+    user.avatar = file
+    user.save(update_fields=['avatar', 'updated_at'])
+    if old_avatar:
+        old_avatar.delete(save=False)
+    return account_profile(request)
+
+
+@router.delete('/account/avatar', response=AccountProfileSchema, auth=jwt_auth_any_role)
+def delete_account_avatar(request):
+    """Removes the user's profile picture, reverting to the initials avatar."""
+    user = request.user
+    if user.avatar:
+        user.avatar.delete(save=False)
+        user.avatar = None
+        user.save(update_fields=['avatar', 'updated_at'])
     return account_profile(request)
 
 
