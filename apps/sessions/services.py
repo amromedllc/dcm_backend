@@ -182,6 +182,8 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
             if not _target_due_for_session(target):
                 continue
             prompting_template, current_prompt_level_index = _visible_prompting_levels(program, target)
+            phase_config = _workflow_phase_for_target(target, target.status) or {}
+            minimum_trials = (phase_config.get('criteria') or {}).get('minimum_trials')
             targets_data.append({
                 'id': target.id,
                 'name': target.name,
@@ -202,6 +204,12 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
                 'interval_warning_sound': target.interval_warning_sound,
                 'prompting_template': prompting_template,
                 'current_prompt_level_index': current_prompt_level_index,
+                # From the target's current-status workflow phase, if one is
+                # configured — the live recording screen uses this to show
+                # "X / Y trials" and turn the counter green once met. Mirrors
+                # the same `minimum_trials` criteria apps.programs.services
+                # evaluates mastery against after the session is submitted.
+                'minimum_trials': minimum_trials,
             })
 
         snapshot['programs'].append({
