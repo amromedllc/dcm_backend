@@ -255,6 +255,7 @@ class DurationOccurrenceSchema(Schema):
     target_name: str
     index: int
     duration_seconds: int
+    meets_criteria: bool | None = None
 
 
 class AssessmentSkillSummarySchema(Schema):

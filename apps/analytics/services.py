@@ -638,6 +638,34 @@ def _mastered_threshold_for_target(phases: list, measurement: str) -> tuple[floa
     return explicit or fallback
 
 
+def _duration_threshold_for_target(phases: list) -> tuple[float, str] | None:
+    """Same phase-picking rule as `_mastered_threshold_for_target` (prefer the
+    phase whose `on_success == 'mastered'`, else the one with the largest
+    threshold) but returns the raw (threshold_seconds, direction) pair
+    without routing through `_trial_metric_for_objective` — that helper only
+    recognizes pct_correct/count/rate metrics, so duration targets always
+    fell through as unsupported. Used to color the "All Trials" duration
+    table by whether each occurrence met the target's goal."""
+    explicit: tuple[float, str] | None = None
+    fallback: tuple[float, str] | None = None
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        criteria = phase.get('criteria') or {}
+        raw = criteria.get('threshold_pct')
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        direction = str(criteria.get('threshold_direction') or 'min').lower()
+        candidate = (value, direction)
+        if fallback is None or value > fallback[0]:
+            fallback = candidate
+        if phase.get('on_success') == 'mastered':
+            explicit = candidate
+    return explicit or fallback
+
+
 def get_program_mastery_criteria_detail(program_id: int) -> tuple[float | None, str | None, bool]:
     thresholds: list[tuple[float, str]] = []
     for phases, measurement in (
@@ -1299,6 +1327,14 @@ def get_duration_occurrences(target_ids: list[int], date_from: date, date_to: da
     duration view, which shows each occurrence rather than a daily summary."""
     if not target_ids:
         return []
+
+    thresholds: dict[int, tuple[float, str] | None] = {}
+    for target_id, phases in (
+        Target.objects.filter(id__in=target_ids, workflow_template__isnull=False)
+        .values_list('id', 'workflow_template__phases')
+    ):
+        thresholds[target_id] = _duration_threshold_for_target(phases) if isinstance(phases, list) else None
+
     events = (
         BehaviorEvent.objects
         .filter(
@@ -1319,6 +1355,14 @@ def get_duration_occurrences(target_ids: list[int], date_from: date, date_to: da
     for event in events:
         key = (event['session_run_id'], event['target_id'])
         counters[key] += 1
+        threshold = thresholds.get(event['target_id'])
+        meets_criteria = None
+        if threshold is not None:
+            threshold_seconds, direction = threshold
+            meets_criteria = (
+                event['duration_seconds'] <= threshold_seconds if direction == 'max'
+                else event['duration_seconds'] >= threshold_seconds
+            )
         result.append({
             'session_id': event['session_run_id'],
             'session_label': event['session_run__session_name'] or '',
@@ -1327,6 +1371,7 @@ def get_duration_occurrences(target_ids: list[int], date_from: date, date_to: da
             'target_name': event['target_name'],
             'index': counters[key],
             'duration_seconds': event['duration_seconds'],
+            'meets_criteria': meets_criteria,
         })
     return result
 
