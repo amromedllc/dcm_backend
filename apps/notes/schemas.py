@@ -216,6 +216,7 @@ class ReviewQueueItem(Schema):
 
 
 class NoteTemplateDraftRequest(Schema):
+    client_id: int
     program_id: int
     instruction: str = ''
 

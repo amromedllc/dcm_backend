@@ -122,14 +122,28 @@ def create_note_template(request, data: NoteTemplateCreateRequest):
 
 @router.post('/templates/notes/ai-draft', response=NoteTemplateDraftSchema)
 def draft_note_template_with_ai(request, data: NoteTemplateDraftRequest):
-    """Draft a note template from a library program. Nothing is saved: the template form
-    fills in and the person reviews it. Only library programs are accepted, so no client
-    information can reach the model."""
+    """Draft a note template from one of a client's actual assigned programs
+    (not a generic library program), so the drafted fields match what's really
+    being tracked for that client. Nothing is saved: the template form fills
+    in and the person reviews it before saving.
+
+    Note: unlike a library program, a client-assigned program's name/objective/
+    target names can be customized per client, so that text does reach the AI
+    model here — a deliberate tradeoff for drafts that actually match the
+    client's program, not a generic one.
+    """
     _require_template_manager(request, 'create')
-    from apps.programs.api import _org_qs
+    from apps.programs.api import _accessible_external_client_ids
     from apps.programs.models import Program
+    if data.client_id not in _accessible_external_client_ids(request):
+        raise HttpError(403, 'Client not accessible')
     try:
-        program = _org_qs(request).prefetch_related('targets').get(id=data.program_id)
+        program = (
+            Program.objects
+            .filter(external_client_id=data.client_id)
+            .prefetch_related('targets')
+            .get(id=data.program_id)
+        )
     except Program.DoesNotExist:
         raise HttpError(404, 'Program not found')
     try:
