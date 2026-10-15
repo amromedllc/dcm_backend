@@ -79,6 +79,8 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'notes_delete': True,
         'note_submit': True,
         'note_approve': True,
+        # Activities
+        'activities_voice_to_text': False,
         # Review queue
         'review_queue_view': True,
         # Behavior Intervention Plans
@@ -193,6 +195,8 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'notes_delete': True,
         'note_submit': True,
         'note_approve': True,
+        # Activities
+        'activities_voice_to_text': False,
         # Review queue
         'review_queue_view': True,
         # Behavior Intervention Plans
@@ -307,6 +311,8 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'notes_delete': False,
         'note_submit': True,
         'note_approve': False,
+        # Activities
+        'activities_voice_to_text': False,
         # Review queue
         'review_queue_view': False,
         # Behavior Intervention Plans
