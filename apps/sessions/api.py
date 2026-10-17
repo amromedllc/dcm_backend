@@ -1042,7 +1042,13 @@ def delete_session(request, session_id: int):
     session = _require_recording_access(request, session_id)
     if session.status != SessionRun.Status.OPEN:
         raise HttpError(409, 'Only open sessions can be deleted')
+    group_session_id = session.group_session_id
     session.delete()
+    # Discarding the last client's session out of a group leaves an empty,
+    # pointless shell behind otherwise — clean it up rather than cluttering
+    # the group sessions list with 0-client groups.
+    if group_session_id and not SessionRun.objects.filter(group_session_id=group_session_id).exists():
+        GroupSession.objects.filter(id=group_session_id).delete()
     return 204, None
 
 

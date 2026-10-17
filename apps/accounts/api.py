@@ -1066,6 +1066,8 @@ def generate_password_set_link(request, user_id: int, data: PasswordSetLinkGener
     link, raw_token = PasswordSetLink.generate(user, created_by=request.user, expires_at=data.expires_at)
     base_url = getattr(settings, 'FRONTEND_BASE_URL', '').rstrip('/')
     url = f'{base_url}/set-password?token={raw_token}'
+    from apps.notifications.service import send_password_set_invite
+    send_password_set_invite(user.email, user.first_name, url, link.expires_at)
     return PasswordSetLinkGenerateResponse(url=url, expires_at=link.expires_at)
 
 

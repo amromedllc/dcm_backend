@@ -114,6 +114,66 @@ def _send_email(email: str, subject: str, body: str, data: dict | None = None):
         logger.exception('Failed to send notification email to %s', email)
 
 
+def send_password_set_invite(email: str, first_name: str, url: str, expires_at) -> None:
+    """Send the dedicated, branded password setup invitation email."""
+    if not email:
+        return
+    from django.utils import timezone
+
+    expiry = timezone.localtime(expires_at).strftime('%B %-d, %Y at %-I:%M %p %Z')
+    subject = 'Set up your Progressly account'
+    body = (
+        f"Hi {first_name or 'there'},\n\n"
+        'You have been invited to set up your Progressly account. Use the link below to choose your password. '
+        f'This link expires {expiry}.\n\n'
+        f'{url}\n\nIf you were not expecting this invitation, you can ignore this email.'
+    )
+    try:
+        html_body = render_to_string('notifications/password_set_invite.html', {
+            'first_name': first_name,
+            'setup_url': url,
+            'expiry': expiry,
+        })
+        message = EmailMultiAlternatives(
+            subject=subject,
+            body=body,
+            from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', None),
+            to=[email],
+        )
+        message.attach_alternative(html_body, 'text/html')
+        message.send(fail_silently=False)
+    except Exception:
+        logger.exception('Failed to send password setup invitation to %s', email)
+
+
+def send_mfa_verification_code(email: str, first_name: str, code: str, expires_in_minutes: int) -> None:
+    """Send a branded email containing a one-time MFA verification code."""
+    if not email:
+        return
+    subject = 'Your Progressly verification code'
+    body = (
+        f"Hi {first_name or 'there'},\n\n"
+        f'Your verification code is {code}. It expires in {expires_in_minutes} minutes. '
+        'If you did not request this, you can ignore this email.'
+    )
+    try:
+        html_body = render_to_string('notifications/mfa_verification_code.html', {
+            'first_name': first_name,
+            'code': code,
+            'expires_in_minutes': expires_in_minutes,
+        })
+        message = EmailMultiAlternatives(
+            subject=subject,
+            body=body,
+            from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', None),
+            to=[email],
+        )
+        message.attach_alternative(html_body, 'text/html')
+        message.send(fail_silently=False)
+    except Exception:
+        logger.exception('Failed to send MFA verification email to %s', email)
+
+
 def _firebase_app():
     if not getattr(settings, 'FIREBASE_PROJECT_ID', '') and not getattr(settings, 'FIREBASE_CREDENTIALS_JSON', ''):
         return None

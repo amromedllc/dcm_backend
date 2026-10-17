@@ -81,7 +81,7 @@ def _generate_email_otp() -> str:
 def send_email_otp(user: User) -> None:
     """(Re)send a one-time code to the user's account email, subject to a
     resend cooldown so a client can't be used to spam the mailbox."""
-    from apps.notifications.service import _send_email
+    from apps.notifications.service import send_mfa_verification_code
 
     row = UserMFA.objects.filter(user=user).first()
     if row is None or row.method != UserMFA.Method.EMAIL:
@@ -97,12 +97,11 @@ def send_email_otp(user: User) -> None:
     row.otp_last_sent_at = now
     row.save(update_fields=['otp_code_hash', 'otp_expires_at', 'otp_last_sent_at'])
 
-    _send_email(
+    send_mfa_verification_code(
         user.email,
-        'Your Progressly verification code',
-        f'Your verification code is {code}. It expires in {EMAIL_OTP_TTL_MINUTES} minutes. '
-        'If you did not request this, you can ignore this email.',
-        {},
+        user.first_name,
+        code,
+        EMAIL_OTP_TTL_MINUTES,
     )
 
 
