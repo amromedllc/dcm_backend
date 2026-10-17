@@ -149,7 +149,7 @@ def send_password_set_invite(email: str, first_name: str, url: str, expires_at) 
 def send_mfa_verification_code(email: str, first_name: str, code: str, expires_in_minutes: int) -> None:
     """Send a branded email containing a one-time MFA verification code."""
     if not email:
-        return
+        raise ValueError('Cannot send an MFA verification code without a recipient email address')
     subject = 'Your Progressly verification code'
     body = (
         f"Hi {first_name or 'there'},\n\n"
@@ -169,9 +169,12 @@ def send_mfa_verification_code(email: str, first_name: str, code: str, expires_i
             to=[email],
         )
         message.attach_alternative(html_body, 'text/html')
-        message.send(fail_silently=False)
+        sent_count = message.send(fail_silently=False)
+        if sent_count != 1:
+            raise RuntimeError('Email backend did not send the MFA verification message')
     except Exception:
         logger.exception('Failed to send MFA verification email to %s', email)
+        raise
 
 
 def _firebase_app():
