@@ -127,6 +127,16 @@ class VerifyPinRequest(Schema):
     pin: str
 
 
+class PinUnlockRequest(Schema):
+    pin: str
+    refresh_token: str
+
+
+class PinUnlockResponse(Schema):
+    access_token: str
+    refresh_token: str
+
+
 class PinStatusResponse(Schema):
     pin_lock_allowed: bool
     pin_lock_enabled: bool

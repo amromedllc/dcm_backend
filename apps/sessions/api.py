@@ -16,7 +16,7 @@ from apps.programs.measurements import (
 from shared.uploads import validate_media_upload
 from .models import (
     Appointment, SessionRun, GroupSession, TrialEvent, BehaviorEvent, ABCEvent,
-    ABCCategory, ABCItem, SessionMedia, SessionMediaComment,
+    ABCCategory, ABCItem, SessionMedia, SessionMediaComment, SessionSupervisionNote,
 )
 from .schemas import (
     SessionEditImpactSchema,
@@ -35,6 +35,7 @@ from .schemas import (
     TrialSummaryItem,
     SessionMediaSchema, SessionMediaUpdateRequest,
     SessionMediaCommentSchema, SessionMediaCommentCreateRequest,
+    SessionSupervisionNoteSchema, SessionSupervisionNoteCreateRequest,
 )
 from .services import build_program_snapshot, submit_session, approve_session, reject_session
 
@@ -1002,6 +1003,44 @@ def list_sessions(
 def get_session(request, session_id: int):
     session = _get_session_or_404(session_id, request)
     return _serialize_session(session)
+
+
+@router.get('/sessions/{session_id}/supervision-notes', response=list[SessionSupervisionNoteSchema])
+def list_supervision_notes(request, session_id: int):
+    session = _get_session_or_404(session_id, request)
+    return [
+        SessionSupervisionNoteSchema(
+            id=note.id,
+            session_run_id=note.session_run_id,
+            body=note.body,
+            author=note.created_by.get_full_name() or note.created_by.email if note.created_by_id else None,
+            created_at=note.created_at,
+        )
+        for note in session.supervision_notes.select_related('created_by')
+    ]
+
+
+@router.post('/sessions/{session_id}/supervision-notes', response={201: SessionSupervisionNoteSchema})
+def create_supervision_note(request, session_id: int, data: SessionSupervisionNoteCreateRequest):
+    require_permission(request, 'session_approve')
+    session = _get_session_or_404(session_id, request)
+    if session.status != SessionRun.Status.OPEN:
+        raise HttpError(409, 'Supervision notes can only be added while the session is live')
+    body = data.body.strip()
+    if not body:
+        raise HttpError(400, 'Supervision note cannot be empty')
+    note = SessionSupervisionNote.objects.create(
+        session_run=session,
+        body=body,
+        created_by=request.user,
+    )
+    return 201, SessionSupervisionNoteSchema(
+        id=note.id,
+        session_run_id=note.session_run_id,
+        body=note.body,
+        author=request.user.get_full_name() or request.user.email,
+        created_at=note.created_at,
+    )
 
 
 @router.post('/sessions/{session_id}/link-appointment', response=SessionRunSchema)

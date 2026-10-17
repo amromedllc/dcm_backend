@@ -452,3 +452,25 @@ class SessionMediaComment(TenantAwareModel):
 
     def __str__(self) -> str:
         return f'Comment on media {self.session_media_id} @ {self.timestamp_seconds}s'
+
+
+class SessionSupervisionNote(TenantAwareModel):
+    """Persistent supervisor guidance attached to a session, including live sessions."""
+    session_run = models.ForeignKey(
+        SessionRun,
+        on_delete=models.CASCADE,
+        related_name='supervision_notes',
+    )
+    body = models.TextField()
+
+    _org_scoped_fk_fields = ('session_run',)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.session_run.organization_id
+
+    class Meta:
+        app_label = 'dcm_sessions'
+        ordering = ['created_at']
+
+    def __str__(self) -> str:
+        return f'Supervision note on session {self.session_run_id}'

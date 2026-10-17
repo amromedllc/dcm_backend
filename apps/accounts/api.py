@@ -61,6 +61,8 @@ from .schemas import (
     UpdateAccountSignatureRequest,
     UpdateAccountTimezoneRequest,
     VerifyPinRequest,
+    PinUnlockRequest,
+    PinUnlockResponse,
 )
 from apps.clients.models import Client
 from apps.integrations.tpms_auth_client import (
@@ -425,6 +427,60 @@ def verify_my_pin(request, data: VerifyPinRequest):
     user.pin_locked_until = None
     user.save(update_fields=['pin_failed_attempts', 'pin_locked_until'])
     return {'valid': True}
+
+
+@router.post('/pin/unlock', response=PinUnlockResponse, auth=None)
+def unlock_with_pin(request, data: PinUnlockRequest):
+    """Re-authenticate a PIN-locked app after its short-lived tokens expire."""
+    try:
+        payload = jwt.decode(
+            data.refresh_token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
+            options={'verify_exp': False},
+        )
+    except jwt.InvalidTokenError:
+        raise HttpError(401, 'Session expired. Please sign in again.')
+
+    if payload.get('type') != 'refresh' or not payload.get('exp'):
+        raise HttpError(401, 'Session expired. Please sign in again.')
+    if token_tenant_mismatch(payload, request) or is_token_blocked(payload):
+        raise HttpError(401, 'Session expired. Please sign in again.')
+
+    try:
+        user = User.objects.get(id=int(payload['sub']), is_active=True)
+    except (User.DoesNotExist, KeyError, TypeError, ValueError):
+        raise HttpError(401, 'Session expired. Please sign in again.')
+
+    tenant = getattr(request, 'tenant', None)
+    if not (
+        tenant
+        and tenant.pin_lock_allowed
+        and user.pin_lock_enabled
+        and user.has_pin
+    ):
+        raise HttpError(401, 'PIN unlock is not available for this session.')
+
+    now = timezone.now()
+    if user.pin_locked_until and user.pin_locked_until > now:
+        raise HttpError(429, 'Too many incorrect attempts. Try again in a few minutes.')
+
+    if not user.check_pin(data.pin.strip()):
+        user.pin_failed_attempts += 1
+        if user.pin_failed_attempts >= mfa.MAX_FAILED_ATTEMPTS:
+            user.pin_locked_until = now + timedelta(minutes=mfa.LOCKOUT_MINUTES)
+            user.pin_failed_attempts = 0
+        user.save(update_fields=['pin_failed_attempts', 'pin_locked_until'])
+        raise HttpError(400, 'Incorrect PIN.')
+
+    user.pin_failed_attempts = 0
+    user.pin_locked_until = None
+    user.save(update_fields=['pin_failed_attempts', 'pin_locked_until'])
+    tenant_id = payload.get('org_id')
+    return PinUnlockResponse(
+        access_token=create_access_token(user, tenant_id),
+        refresh_token=create_refresh_token(user, tenant_id),
+    )
 
 
 def _verify_actor_password(user: User, password: str) -> bool:

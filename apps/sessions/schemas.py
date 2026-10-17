@@ -363,6 +363,18 @@ class SessionMediaUpdateRequest(Schema):
     review_status: str | None = None
 
 
+class SessionSupervisionNoteSchema(Schema):
+    id: int
+    session_run_id: int
+    body: str
+    author: str | None = None
+    created_at: datetime
+
+
+class SessionSupervisionNoteCreateRequest(Schema):
+    body: NonEmptyStr
+
+
 # ---------------------------------------------------------------------------
 # Offline batch sync — mobile submits everything in one payload
 # ---------------------------------------------------------------------------
