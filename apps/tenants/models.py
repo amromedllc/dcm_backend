@@ -9,13 +9,10 @@ class Organization(TenantMixin):
         ENTERPRISE = 'enterprise', 'Enterprise'
 
     class AutomaticLogoutMinutes(models.IntegerChoices):
-        TWO_MINUTES = 2, '2 minutes'
         FIVE_MINUTES = 5, '5 minutes'
+        TEN_MINUTES = 10, '10 minutes'
         FIFTEEN_MINUTES = 15, '15 minutes'
         THIRTY_MINUTES = 30, '30 minutes'
-        NINE_HOURS = 9 * 60, '9 hours'
-        TWENTY_FOUR_HOURS = 24 * 60, '24 hours'
-        ONE_WEEK = 7 * 24 * 60, '1 week'
 
     class IntegrationPlatform(models.TextChoices):
         THERAPY_PMS = 'therapy_pms', 'TherapyPMS'
@@ -27,7 +24,7 @@ class Organization(TenantMixin):
     automatic_logout_enabled = models.BooleanField(default=False)
     automatic_logout_minutes = models.PositiveIntegerField(
         choices=AutomaticLogoutMinutes.choices,
-        default=AutomaticLogoutMinutes.NINE_HOURS,
+        default=AutomaticLogoutMinutes.FIFTEEN_MINUTES,
     )
     pin_lock_allowed = models.BooleanField(default=False)
     # Blank until the org actually connects (see tenants.api.connect_therapy_pms) —
