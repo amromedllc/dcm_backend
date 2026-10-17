@@ -74,21 +74,15 @@ def _org_id_from_api_key(request) -> int | None:
 class TenantResolverMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
-        self._org_cache: dict[int, Organization] = {}
-        self._fallback_org: Organization | None = None
 
     def _get_org_by_pk(self, pk: int) -> Organization | None:
-        if pk not in self._org_cache:
-            try:
-                self._org_cache[pk] = Organization.objects.get(pk=pk)
-            except Organization.DoesNotExist:
-                return None
-        return self._org_cache[pk]
+        try:
+            return Organization.objects.get(pk=pk)
+        except Organization.DoesNotExist:
+            return None
 
     def _get_fallback_org(self) -> Organization | None:
-        if self._fallback_org is None:
-            self._fallback_org = Organization.objects.order_by('id').first()
-        return self._fallback_org
+        return Organization.objects.order_by('id').first()
 
     def __call__(self, request):
         # Request ID for log correlation
