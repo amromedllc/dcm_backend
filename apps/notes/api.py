@@ -93,6 +93,7 @@ def _serialize_note(note: LessonNote) -> dict:
                 'signer_name': sig.signer_name,
                 'signer_role': sig.signer_role,
                 'signature_type': sig.signature_type,
+                'signature_data': sig.signature_data,
                 'signed_at': sig.signed_at,
             }
             for sig in note.signatures.all()

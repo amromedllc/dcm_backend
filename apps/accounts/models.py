@@ -70,6 +70,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     # only records the preference for later use, it doesn't translate anything yet.
     language = models.CharField(max_length=16, null=True, blank=True)
     avatar = models.ImageField(upload_to=_user_avatar_upload_path, max_length=500, blank=True, null=True)
+    signature_data = models.TextField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

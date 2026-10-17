@@ -1,4 +1,7 @@
+import base64
+import binascii
 import hashlib
+import io
 import logging
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
@@ -40,6 +43,7 @@ from .schemas import (
     RefreshRequest,
     AccessTokenResponse,
     AccountProfileSchema,
+    AccountSignatureSchema,
     UserSchema,
     CurrentUserSchema,
     UserCreateRequest,
@@ -54,6 +58,7 @@ from .schemas import (
     SetPinRequest,
     TogglePinLockRequest,
     UpdateAccountLanguageRequest,
+    UpdateAccountSignatureRequest,
     UpdateAccountTimezoneRequest,
     VerifyPinRequest,
 )
@@ -892,6 +897,49 @@ def update_account_language(request, data: UpdateAccountLanguageRequest):
     User.objects.filter(pk=request.user.pk).update(language=data.language or None)
     request.user.language = data.language or None
     return account_profile(request)
+
+
+def _validate_signature_data(signature_data: str) -> bytes:
+    prefix = 'data:image/png;base64,'
+    if not signature_data.startswith(prefix):
+        raise HttpError(400, 'Signature must be a PNG image.')
+    from PIL import Image, UnidentifiedImageError
+    try:
+        image_bytes = base64.b64decode(signature_data[len(prefix):], validate=True)
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            if image.format != 'PNG' or image.width > 2000 or image.height > 700:
+                raise HttpError(400, 'Signature image dimensions or format are not supported.')
+            image.verify()
+    except HttpError:
+        raise
+    except (binascii.Error, UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError):
+        raise HttpError(400, 'Signature must be a valid PNG image.')
+    if not image_bytes or len(image_bytes) > 300_000:
+        raise HttpError(400, 'Signature image must be smaller than 300 KB.')
+    return image_bytes
+
+
+@router.get('/account/signature', response=AccountSignatureSchema, auth=jwt_auth_any_role)
+def account_signature(request):
+    """Returns the current user's private saved signature."""
+    return {'signature_data': request.user.signature_data}
+
+
+@router.put('/account/signature', response=AccountSignatureSchema, auth=jwt_auth_any_role)
+def save_account_signature(request, data: UpdateAccountSignatureRequest):
+    """Stores a validated signature image for this user only."""
+    _validate_signature_data(data.signature_data)
+    User.objects.filter(pk=request.user.pk).update(signature_data=data.signature_data)
+    request.user.signature_data = data.signature_data
+    return {'signature_data': request.user.signature_data}
+
+
+@router.delete('/account/signature', response=AccountSignatureSchema, auth=jwt_auth_any_role)
+def delete_account_signature(request):
+    """Removes the current user's saved signature; existing signed-note snapshots remain."""
+    User.objects.filter(pk=request.user.pk).update(signature_data='')
+    request.user.signature_data = ''
+    return {'signature_data': ''}
 
 
 @router.post('/account/avatar', response=AccountProfileSchema, auth=jwt_auth_any_role)

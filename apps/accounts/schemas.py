@@ -158,6 +158,14 @@ class AccountProfileSchema(Schema):
     avatar_url: str | None = None
 
 
+class AccountSignatureSchema(Schema):
+    signature_data: str = ''
+
+
+class UpdateAccountSignatureRequest(Schema):
+    signature_data: str = Field(max_length=400_000)
+
+
 class UpdateAccountTimezoneRequest(Schema):
     timezone: str | None = None
 
