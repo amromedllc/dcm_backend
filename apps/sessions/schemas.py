@@ -112,6 +112,28 @@ class SessionRunSchema(Schema):
     created_at: datetime
 
 
+class GroupSessionSchema(Schema):
+    id: int
+    staff_id: int | None
+    staff_name: str | None = None
+    title: str = ''
+    started_at: datetime
+    ended_at: datetime | None = None
+    session_runs: list[SessionRunSchema] = []
+
+
+class GroupSessionClientSelection(Schema):
+    client_id: int
+    program_ids: list[int] = []
+
+
+class GroupSessionStartRequest(Schema):
+    clients: list[GroupSessionClientSelection]
+    title: str = ''
+    latitude: float | None = None
+    longitude: float | None = None
+
+
 class SessionStartRequest(Schema):
     client_id: int
     appointment_id: int | None = None

@@ -127,7 +127,10 @@ def _visible_prompting_levels(program: Program, target) -> tuple[dict | None, in
     }, visible_idx
 
 
-def build_program_snapshot(client_id: int, lesson_id: int | None = None, restrict_to_lesson: bool = False) -> dict:
+def build_program_snapshot(
+    client_id: int, lesson_id: int | None = None, restrict_to_lesson: bool = False,
+    program_ids: list[int] | None = None,
+) -> dict:
     """
     Captures the full program/target configuration as an immutable JSONB snapshot.
     Called once when a SessionRun is created.
@@ -139,6 +142,12 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
 
     This means changes a supervisor makes after a session starts never affect
     historical reporting — the snapshot is the source of truth for that session.
+
+    program_ids, if given, further narrows whichever program set lesson_id/
+    restrict_to_lesson already selected down to just those — used by group
+    sessions, where each client in the group may only need a subset of their
+    assigned programs run (e.g. just the shared social-skills program, not
+    every 1:1 goal they also happen to have).
     """
     snapshot: dict = {
         'captured_at': timezone.now().isoformat(),
@@ -169,6 +178,9 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
         )
     else:
         programs_qs = Program.objects.none()
+
+    if program_ids is not None:
+        programs_qs = programs_qs.filter(id__in=program_ids)
 
     session_fields = list(
         ProgramDataField.objects
