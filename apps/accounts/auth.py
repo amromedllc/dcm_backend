@@ -71,13 +71,20 @@ def create_access_token(user: User, tenant_id: int) -> str:
 
 
 def create_refresh_token(user: User, tenant_id: int) -> str:
+    from apps.tenants.models import Organization
+    org = Organization.objects.filter(pk=tenant_id).only('automatic_logout_enabled', 'automatic_logout_minutes').first()
+    if org and org.automatic_logout_enabled:
+        lifetime = timedelta(minutes=org.automatic_logout_minutes)
+    else:
+        lifetime = timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS)
+
     payload: dict[str, Any] = {
         'sub': str(user.id),
         'org_id': tenant_id,
         'type': 'refresh',
         'jti': secrets.token_hex(16),
         'iat': timezone.now().timestamp(),
-        'exp': (timezone.now() + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS)).timestamp(),
+        'exp': (timezone.now() + lifetime).timestamp(),
     }
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 

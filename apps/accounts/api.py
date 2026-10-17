@@ -21,7 +21,7 @@ from django.db.models import Q
 from . import mfa
 from .models import PasswordSetLink, User, UserMFA
 from .auth import (
-    blocklist_token, create_access_token, create_refresh_token, decode_token, is_token_blocked,
+    create_access_token, create_refresh_token, decode_token, is_token_blocked,
     jwt_auth, jwt_auth_any_role, token_tenant_mismatch,
 )
 from .permissions import get_user_permissions, require_permission, resolve_permission_organization
@@ -51,8 +51,6 @@ from .schemas import (
     PasswordSetLinkSubmitRequest,
     StaffSchema,
     PinStatusResponse,
-    PinVerifyResponse,
-    PinLockRequest,
     SetPinRequest,
     TogglePinLockRequest,
     UpdateAccountLanguageRequest,
@@ -399,7 +397,7 @@ def remove_my_pin(request):
     return 204, None
 
 
-@router.post('/pin/verify', response=PinVerifyResponse, auth=jwt_auth_any_role)
+@router.post('/pin/verify', response=dict, auth=jwt_auth_any_role)
 def verify_my_pin(request, data: VerifyPinRequest):
     user = request.user
     if not user.has_pin:
@@ -421,37 +419,7 @@ def verify_my_pin(request, data: VerifyPinRequest):
     user.pin_failed_attempts = 0
     user.pin_locked_until = None
     user.save(update_fields=['pin_failed_attempts', 'pin_locked_until'])
-
-    # A correct PIN starts a genuinely new session (fresh access + refresh
-    # tokens) rather than just dismissing the lock screen — the old access
-    # token (whatever is left of its short lifetime) is retired immediately
-    # so a screen-lock bypass can't keep riding it. Pairs with pin/lock
-    # below, which kills the refresh token the moment the screen locks.
-    old_payload = getattr(request, '_jwt_payload', None)
-    if old_payload:
-        blocklist_token(old_payload)
-    org_id = old_payload.get('org_id') if old_payload else getattr(getattr(request, 'tenant', None), 'pk', None)
-    return PinVerifyResponse(
-        valid=True,
-        access_token=create_access_token(user, org_id),
-        refresh_token=create_refresh_token(user, org_id),
-    )
-
-
-@router.post('/pin/lock', response={204: None}, auth=jwt_auth_any_role)
-def lock_my_session(request, data: PinLockRequest):
-    """Called the moment the inactivity timer trips and the PIN-lock screen
-    takes over: blocklists the refresh token so no amount of client-side
-    tampering (clearing the lock flag, calling /auth/refresh directly) can
-    keep the session alive without the correct PIN. Best-effort — an
-    already-invalid token just means there's nothing left to revoke."""
-    try:
-        payload = decode_token(data.refresh_token)
-        if payload.get('type') == 'refresh' and str(payload.get('sub')) == str(request.user.id):
-            blocklist_token(payload)
-    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
-        pass
-    return 204, None
+    return {'valid': True}
 
 
 def _verify_actor_password(user: User, password: str) -> bool:
