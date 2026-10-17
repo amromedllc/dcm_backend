@@ -9,6 +9,7 @@ from ninja.errors import HttpError
 
 from apps.accounts.auth import partner_auth
 from apps.accounts.permissions import require_permission, resolve_permission_organization, user_has_permission
+from apps.clients.id_aliases import client_identifier_aliases
 from apps.programs.measurements import (
     aggregate_measurement, MEASUREMENT_LABELS,
     DURATION_MEASUREMENTS, RATE_MEASUREMENTS, BEHAVIOR_STYLE_MEASUREMENTS,
@@ -602,7 +603,12 @@ def list_appointments(
 ):
     qs = _appt_qs().filter(external_client_id__in=_accessible_external_client_ids(request))
     if client_id:
-        qs = qs.filter(external_client_id=client_id)
+        qs = qs.filter(
+            external_client_id__in=(
+                _accessible_external_client_ids(request)
+                & client_identifier_aliases(client_id)
+            )
+        )
     if staff_id:
         qs = qs.filter(staff_id=staff_id)
     if date:
@@ -1013,7 +1019,7 @@ def list_supervision_notes(request, session_id: int):
             id=note.id,
             session_run_id=note.session_run_id,
             body=note.body,
-            author=note.created_by.get_full_name() or note.created_by.email if note.created_by_id else None,
+            author=note.created_by.full_name or note.created_by.email if note.created_by_id else None,
             created_at=note.created_at,
         )
         for note in session.supervision_notes.select_related('created_by')
@@ -1038,7 +1044,7 @@ def create_supervision_note(request, session_id: int, data: SessionSupervisionNo
         id=note.id,
         session_run_id=note.session_run_id,
         body=note.body,
-        author=request.user.get_full_name() or request.user.email,
+        author=request.user.full_name or request.user.email,
         created_at=note.created_at,
     )
 

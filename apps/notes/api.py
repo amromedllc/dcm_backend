@@ -8,6 +8,7 @@ from ninja.errors import HttpError
 from apps.accounts.auth import partner_auth
 from apps.accounts.permissions import require_permission
 from apps.clients.models import Client
+from apps.clients.id_aliases import client_identifier_aliases
 from .models import LessonNote, NoteTemplate, NoteLayoutSettings, NoteSignature, NoteAssignment
 from .schemas import (
     LessonNoteSchema, LessonNoteListSchema, NoteCreateRequest, NoteUpdateRequest,
@@ -141,7 +142,7 @@ def draft_note_template_with_ai(request, data: NoteTemplateDraftRequest):
     try:
         program = (
             Program.objects
-            .filter(external_client_id=data.client_id)
+            .filter(external_client_id__in=client_identifier_aliases(data.client_id))
             .prefetch_related('targets')
             .get(id=data.program_id)
         )
@@ -245,7 +246,7 @@ def list_notes(
         qs = qs.filter(staff_id=staff_id)
 
     if client_id:
-        qs = qs.filter(external_client_id=client_id)
+        qs = qs.filter(external_client_id__in=client_identifier_aliases(client_id))
     if status:
         qs = qs.filter(status=status)
     if session_run_id:
@@ -466,7 +467,7 @@ def review_queue(
         .order_by('submitted_at')
     )
     if client_id:
-        qs = qs.filter(external_client_id=client_id)
+        qs = qs.filter(external_client_id__in=client_identifier_aliases(client_id))
     if date_from:
         qs = qs.filter(note_date__gte=date_from)
     if date_to:

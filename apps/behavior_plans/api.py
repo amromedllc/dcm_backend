@@ -4,6 +4,7 @@ from ninja.errors import HttpError
 from apps.accounts.auth import jwt_auth
 from apps.accounts.permissions import require_permission
 from apps.clients.api import _get_accessible_clients, _get_client_or_404
+from apps.clients.id_aliases import client_identifier_aliases
 from apps.programs.models import Program
 from .models import BehaviorInterventionPlan
 from .schemas import (
@@ -28,7 +29,9 @@ def _require_bip_manager(request, action: str = 'view'):
 
 
 def _get_plan_or_404(request, version_id: int) -> BehaviorInterventionPlan:
-    accessible_client_ids = set(_get_accessible_clients(request).values_list('id', flat=True))
+    accessible_client_ids = set()
+    for client_id, _external_id in _get_accessible_clients(request).values_list('id', 'external_id'):
+        accessible_client_ids.update(client_identifier_aliases(client_id))
     try:
         plan = (
             BehaviorInterventionPlan.objects
@@ -47,7 +50,7 @@ def _get_behavior_reduction_program_or_404(request, client_id: int, program_id: 
         program = Program.objects.get(id=program_id)
     except Program.DoesNotExist:
         raise HttpError(404, 'Program not found')
-    if program.external_client_id != client_id:
+    if program.external_client_id not in client_identifier_aliases(client_id):
         raise HttpError(400, 'Program does not belong to this client')
     if program.category != Program.Category.BEHAVIOR_REDUCTION:
         raise HttpError(400, 'Behavior plans can only be created for behavior-reduction programs')
@@ -112,7 +115,11 @@ def get_active_bip_version(request, program_id: int):
         .filter(program_id=program_id, status=BehaviorInterventionPlan.Status.ACTIVE)
         .first()
     )
-    if plan and plan.program.external_client_id not in set(_get_accessible_clients(request).values_list('id', flat=True)):
+    if plan and plan.program.external_client_id not in {
+        identifier
+        for client_id in _get_accessible_clients(request).values_list('id', flat=True)
+        for identifier in client_identifier_aliases(client_id)
+    }:
         return None
     return _serialize(plan) if plan else None
 
@@ -126,7 +133,7 @@ def list_active_bip_versions(request, client_id: int):
     qs = (
         BehaviorInterventionPlan.objects
         .select_related('author', 'program')
-        .filter(program__external_client_id=client_id, status=BehaviorInterventionPlan.Status.ACTIVE)
+        .filter(program__external_client_id__in=client_identifier_aliases(client_id), status=BehaviorInterventionPlan.Status.ACTIVE)
     )
     return [_serialize(plan) for plan in qs]
 
@@ -138,7 +145,7 @@ def list_bip_versions(request, client_id: int, program_id: int | None = None, st
     qs = (
         BehaviorInterventionPlan.objects
         .select_related('author', 'program')
-        .filter(program__external_client_id=client_id)
+        .filter(program__external_client_id__in=client_identifier_aliases(client_id))
     )
     if program_id:
         qs = qs.filter(program_id=program_id)

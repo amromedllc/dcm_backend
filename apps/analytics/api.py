@@ -8,6 +8,7 @@ from ninja.errors import HttpError
 
 from apps.accounts.api import _same_practice_q
 from apps.accounts.auth import partner_auth
+from apps.clients.id_aliases import client_identifier_aliases
 from apps.programs.models import Program, Target, ProgramModule
 from .models import GraphAnnotation, ClientAnnotation, ClientReportDraft, SavedInsightGraph, AssessmentRecord
 from .schemas import (
@@ -231,7 +232,7 @@ def client_abc_data(
 
 @router.get('/analytics/clients/{client_id}/assessment-records', response=list[AssessmentRecordSchema])
 def list_assessment_records(request, client_id: int):
-    return list(AssessmentRecord.objects.filter(external_client_id=client_id))
+    return list(AssessmentRecord.objects.filter(external_client_id__in=client_identifier_aliases(client_id)))
 
 
 @router.post('/analytics/clients/{client_id}/assessment-records', response={201: AssessmentRecordSchema})
@@ -359,7 +360,7 @@ def client_progress_overview(request, client_id: int):
 
 @router.get('/analytics/clients/{client_id}/annotations', response=list[ClientAnnotationSchema])
 def list_client_annotations(request, client_id: int):
-    return list(ClientAnnotation.objects.filter(external_client_id=client_id))
+    return list(ClientAnnotation.objects.filter(external_client_id__in=client_identifier_aliases(client_id)))
 
 
 @router.post('/analytics/clients/{client_id}/annotations', response={201: ClientAnnotationSchema})
@@ -459,7 +460,9 @@ def get_client_report_draft(request, client_id: int):
     from apps.programs.api import _assert_client_accessible
     _require_any_permission(request, _REPORT_VIEW_PERMISSIONS)
     _assert_client_accessible(request, client_id)
-    draft = ClientReportDraft.objects.select_related('updated_by').filter(external_client_id=client_id).first()
+    draft = ClientReportDraft.objects.select_related('updated_by').filter(
+        external_client_id__in=client_identifier_aliases(client_id)
+    ).first()
     return _report_draft_payload(draft)
 
 

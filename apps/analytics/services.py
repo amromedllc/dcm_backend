@@ -486,9 +486,11 @@ def get_abc_data_by_day(
     setting: str | None = None,
 ) -> list[ABCDataPoint]:
     """Returns daily ABC event counts grouped by one ABC dimension."""
+    from apps.clients.id_aliases import client_identifier_aliases
+
     field = _ABC_GROUP_FIELD.get(group_by, 'behavior_description')
     qs = ABCEvent.objects.filter(
-        external_client_id=external_client_id,
+        external_client_id__in=client_identifier_aliases(external_client_id),
         occurred_at__date__gte=date_from,
         occurred_at__date__lte=date_to,
     )
@@ -544,9 +546,11 @@ def get_assessment_data(
     metric: str | None = None,
 ) -> list[AssessmentDataPoint]:
     """Returns assessment score records grouped by assessment, domain, or metric."""
+    from apps.clients.id_aliases import client_identifier_aliases
+
     field = _ASSESSMENT_GROUP_FIELD.get(group_by, 'domain')
     qs = AssessmentRecord.objects.filter(
-        external_client_id=external_client_id,
+        external_client_id__in=client_identifier_aliases(external_client_id),
         assessed_on__gte=date_from,
         assessed_on__lte=date_to,
     )
@@ -995,6 +999,7 @@ def get_client_progress_report(
     forms need resolving here regardless of which one the caller passed in.
     """
     from apps.clients.models import Client
+    from apps.clients.id_aliases import client_identifier_aliases
     client = Client.objects.filter(id=client_id).first() or Client.objects.filter(external_id=str(client_id)).first()
     dcm_client_id = client.id if client else client_id
     external_client_id = (
@@ -1005,7 +1010,7 @@ def get_client_progress_report(
     # ── 1. Programs and targets ──────────────────────────────────────────────
     programs = list(
         Program.objects
-        .filter(external_client_id=dcm_client_id)
+        .filter(external_client_id__in=client_identifier_aliases(dcm_client_id))
         .prefetch_related('targets__prompting_template', 'targets__module', 'targets__submodule')
         .order_by('display_order', 'name')
     )
@@ -1019,7 +1024,7 @@ def get_client_progress_report(
 
     # ── 2. Session counts ────────────────────────────────────────────────────
     sessions_qs = SessionRun.objects.filter(
-        external_client_id=external_client_id,
+        external_client_id__in=client_identifier_aliases(dcm_client_id),
         started_at__date__gte=date_from,
         started_at__date__lte=date_to,
     ).values('status')
@@ -1181,6 +1186,7 @@ def get_client_progress_overview(client_id: int) -> ClientProgressOverview:
     the local Client.id or the TPMS external id).
     """
     from apps.clients.models import Client
+    from apps.clients.id_aliases import client_identifier_aliases
     from apps.programs.models import TargetStatusChange
 
     client = Client.objects.filter(id=client_id).first() or Client.objects.filter(external_id=str(client_id)).first()
@@ -1188,7 +1194,7 @@ def get_client_progress_overview(client_id: int) -> ClientProgressOverview:
 
     programs = list(
         Program.objects
-        .filter(external_client_id=dcm_client_id)
+        .filter(external_client_id__in=client_identifier_aliases(dcm_client_id))
         .prefetch_related('targets')
         .order_by('display_order', 'name')
     )

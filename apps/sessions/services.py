@@ -4,6 +4,7 @@ from django.utils import timezone
 from ninja.errors import HttpError
 
 from apps.programs.models import Program, Lesson, ProgramDataField
+from apps.clients.id_aliases import client_identifier_aliases
 
 RUNNABLE_PROGRAM_PHASES = {
     Program.Phase.BASELINE,
@@ -172,7 +173,7 @@ def build_program_snapshot(
     elif not restrict_to_lesson:
         programs_qs = (
             Program.objects
-            .filter(external_client_id=client_id, archived_at__isnull=True, phase__in=RUNNABLE_PROGRAM_PHASES)
+            .filter(external_client_id__in=client_identifier_aliases(client_id), archived_at__isnull=True, phase__in=RUNNABLE_PROGRAM_PHASES)
             .select_related('prompting_template')
             .prefetch_related('targets__prompting_template', 'targets__child_items')
         )

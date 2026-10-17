@@ -442,9 +442,9 @@ def unlock_with_pin(request, data: PinUnlockRequest):
     except jwt.InvalidTokenError:
         raise HttpError(401, 'Session expired. Please sign in again.')
 
-    if payload.get('type') != 'refresh' or not payload.get('exp'):
+    if payload.get('type') != 'refresh' or not isinstance(payload.get('exp'), (int, float)):
         raise HttpError(401, 'Session expired. Please sign in again.')
-    if token_tenant_mismatch(payload, request) or is_token_blocked(payload):
+    if not payload.get('org_id') or token_tenant_mismatch(payload, request) or is_token_blocked(payload):
         raise HttpError(401, 'Session expired. Please sign in again.')
 
     try:
