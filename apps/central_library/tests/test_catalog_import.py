@@ -83,3 +83,54 @@ class CatalogImportTests(SimpleTestCase):
         before = copy.deepcopy(self.document)
         build_catalog(self.document)
         self.assertEqual(self.document, before)
+
+
+class CorrectedCatalogTests(SimpleTestCase):
+    def setUp(self):
+        self.document = json.loads((CATALOG.parent / 'progressly_corrected_catalog.json').read_text())
+
+    def test_complete_corrected_catalog_links_and_source_ids(self):
+        from apps.central_library.catalog_import import build_settings
+        catalog = build_catalog(self.document)
+        settings = build_settings(self.document)
+        original = build_catalog(json.loads(CATALOG.read_text()))
+        self.assertEqual([p['source_id'] for p in catalog], [p['source_id'] for p in original])
+        self.assertEqual([t['source_id'] for p in catalog for t in p['targets']], [t['source_id'] for p in original for t in p['targets']])
+        self.assertEqual(len(settings), 31)
+        self.assertEqual(sum(len(p['setting_refs']) for p in catalog), 592)
+        self.assertEqual(sum(len(t['setting_refs']) for p in catalog for t in p['targets']), 0)
+        for program in catalog:
+            for target in program['targets']:
+                if any(settings[ref]['kind'] == 'prompting' for ref in program['setting_refs']):
+                    self.assertEqual(target['fields']['prompting_levels'], [])
+
+    def test_duplicate_or_unknown_link_rejected_before_writes(self):
+        for invalid in [dict(self.document['sheets']['Program Setting Links'][0]), {'program_id': 'missing', 'setting_id': 'SET-0001'}]:
+            doc = copy.deepcopy(self.document)
+            doc['sheets']['Program Setting Links'].append(invalid)
+            with self.assertRaises(ValueError): build_catalog(doc)
+
+    def test_unreviewed_and_singular_conflicts_are_rejected(self):
+        doc = copy.deepcopy(self.document)
+        doc['sheets']['Central Settings'][2]['review_status'] = 'needs_clinician_review'
+        with self.assertRaises(ValueError): build_catalog(doc)
+        doc = copy.deepcopy(self.document)
+        doc['sheets']['Program Setting Links'].append({'program_id': 'PRG-0001', 'setting_id': 'SET-0001'})
+        with self.assertRaises(ValueError): build_catalog(doc)
+
+    def test_invalid_json_and_facility_ids_are_rejected(self):
+        for value in ['{invalid', '{"workflow_template_id":123}']:
+            doc = copy.deepcopy(self.document)
+            doc['sheets']['Targets'][0]['configuration_json'] = value
+            with self.assertRaises(ValueError): build_catalog(doc)
+
+    def test_target_links_cannot_reference_tags(self):
+        self.document['sheets']['Target Setting Links'].append({'target_id': 'PRG-0001-T01', 'setting_id': 'SET-0014'})
+        with self.assertRaises(ValueError): build_catalog(self.document)
+
+    def test_unknown_dependency_or_missing_sheet_rejected(self):
+        doc = copy.deepcopy(self.document)
+        del doc['sheets']['Target Setting Links']
+        with self.assertRaises(ValueError): build_catalog(doc)
+        self.document['sheets']['Central Settings'][0]['dependency_setting_ids'] = 'missing'
+        with self.assertRaises(ValueError): build_catalog(self.document)

@@ -4,7 +4,7 @@ from ninja import Schema
 from pydantic import Field, field_validator
 
 from shared.schema_types import NameStr200, NonEmptyStr, SlugStr
-from .models import Program, Target, PromptingTemplate, ProgramDataField, Lesson
+from .models import Program, Target, PromptingTemplate, ProgramDataField, Lesson, SubTargetMeasurementType
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +151,7 @@ class PromptingTemplateUpdateRequest(Schema):
 # ---------------------------------------------------------------------------
 
 class TargetSummarySchema(Schema):
+    setting_ids: list[int] = []
     id: int
     name: str
     status: str
@@ -498,6 +499,8 @@ class AddProgramToLessonRequest(Schema):
 # ---------------------------------------------------------------------------
 
 class OrgProgramSchema(Schema):
+    setting_ids: list[int] = []
+    configuration: dict[str, Any] = {}
     id: int
     is_template: bool
     is_locked: bool = False
@@ -635,7 +638,33 @@ class CentralProgramFolderRequest(Schema):
     display_order: int = Field(default=0, ge=0)
 
 
+class CentralProgramConfiguration(Schema):
+    model_config = {'extra': 'forbid'}
+    baseline_notes: str = Field(default='', max_length=50000)
+    instructions_html: str = Field(default='', max_length=50000)
+    professional_instructions_html: str = Field(default='', max_length=50000)
+    hidden_prompt_level_labels: list[str] = []
+    custom_field_values: dict[str, str | bool] = {}
+
+
+class CentralTargetConfiguration(Schema):
+    model_config = {'extra': 'forbid'}
+    mastery_mode: Target.MasteryMode = Target.MasteryMode.MANUAL
+    instructions_html: str = Field(default='', max_length=50000)
+    sub_item_progression: Target.SubItemProgression = Target.SubItemProgression.FORWARD
+    default_sub_measurement_type: SubTargetMeasurementType = SubTargetMeasurementType.DISCRETE_TRIAL
+    default_sub_measurement: str = ''
+    interval_seconds: int = Field(default=60, ge=1)
+    interval_sync_with_session: bool = False
+    interval_warn_before_end: bool = False
+    interval_pause_on_warning: bool = False
+    interval_warn_seconds_before: int = Field(default=10, ge=0)
+    interval_warning_sound: str = ''
+
+
 class CentralProgramRequest(Schema):
+    setting_ids: list[int] = []
+    configuration: CentralProgramConfiguration = Field(default_factory=CentralProgramConfiguration)
     name: NonEmptyStr
     category: str = 'skill_acquisition'
     phase: str = 'teaching'
@@ -649,6 +678,8 @@ class CentralProgramRequest(Schema):
 
 
 class CentralProgramUpdateRequest(Schema):
+    setting_ids: list[int] | None = None
+    configuration: CentralProgramConfiguration | None = None
     name: NonEmptyStr | None = None
     category: str | None = None
     phase: str | None = None
@@ -662,6 +693,8 @@ class CentralProgramUpdateRequest(Schema):
 
 
 class CentralTargetSchema(Schema):
+    setting_ids: list[int] = []
+    configuration: dict[str, Any] = {}
     id: int
     program_id: int
     name: str
@@ -677,6 +710,8 @@ class CentralTargetSchema(Schema):
 
 
 class CentralTargetRequest(Schema):
+    setting_ids: list[int] = []
+    configuration: CentralTargetConfiguration = Field(default_factory=CentralTargetConfiguration)
     name: NonEmptyStr
     measurement_type: str = 'discrete_trial'
     measurement: str = ''
@@ -690,6 +725,8 @@ class CentralTargetRequest(Schema):
 
 
 class CentralTargetUpdateRequest(Schema):
+    setting_ids: list[int] | None = None
+    configuration: CentralTargetConfiguration | None = None
     name: NonEmptyStr | None = None
     measurement_type: str | None = None
     measurement: str | None = None
