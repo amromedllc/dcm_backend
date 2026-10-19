@@ -1,0 +1,13 @@
+from django.db import migrations, models
+
+
+class Migration(migrations.Migration):
+    dependencies = [('central_library', '0011_alter_centralprogram_category')]
+
+    operations = [
+        migrations.AddField(
+            model_name='centralprogram',
+            name='prompting_levels',
+            field=models.JSONField(blank=True, default=list),
+        ),
+    ]

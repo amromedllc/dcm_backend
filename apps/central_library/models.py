@@ -88,6 +88,7 @@ class CentralProgram(models.Model):
     tags = models.JSONField(default=list, blank=True)
     objective = models.TextField(blank=True)
     instructions = models.TextField(blank=True)
+    prompting_levels = models.JSONField(default=list, blank=True)
     image = models.ImageField(upload_to=_central_program_upload_path, max_length=500, blank=True, null=True)
     folder = models.ForeignKey(
         CentralProgramFolder,
