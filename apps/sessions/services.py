@@ -4,6 +4,7 @@ from django.utils import timezone
 from ninja.errors import HttpError
 
 from apps.programs.models import Program, Lesson, ProgramDataField
+from apps.clients.id_aliases import client_identifier_aliases
 
 RUNNABLE_PROGRAM_PHASES = {
     Program.Phase.BASELINE,
@@ -127,7 +128,10 @@ def _visible_prompting_levels(program: Program, target) -> tuple[dict | None, in
     }, visible_idx
 
 
-def build_program_snapshot(client_id: int, lesson_id: int | None = None, restrict_to_lesson: bool = False) -> dict:
+def build_program_snapshot(
+    client_id: int, lesson_id: int | None = None, restrict_to_lesson: bool = False,
+    program_ids: list[int] | None = None,
+) -> dict:
     """
     Captures the full program/target configuration as an immutable JSONB snapshot.
     Called once when a SessionRun is created.
@@ -139,6 +143,12 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
 
     This means changes a supervisor makes after a session starts never affect
     historical reporting — the snapshot is the source of truth for that session.
+
+    program_ids, if given, further narrows whichever program set lesson_id/
+    restrict_to_lesson already selected down to just those — used by group
+    sessions, where each client in the group may only need a subset of their
+    assigned programs run (e.g. just the shared social-skills program, not
+    every 1:1 goal they also happen to have).
     """
     snapshot: dict = {
         'captured_at': timezone.now().isoformat(),
@@ -163,12 +173,15 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
     elif not restrict_to_lesson:
         programs_qs = (
             Program.objects
-            .filter(external_client_id=client_id, archived_at__isnull=True, phase__in=RUNNABLE_PROGRAM_PHASES)
+            .filter(external_client_id__in=client_identifier_aliases(client_id), archived_at__isnull=True, phase__in=RUNNABLE_PROGRAM_PHASES)
             .select_related('prompting_template')
             .prefetch_related('targets__prompting_template', 'targets__child_items')
         )
     else:
         programs_qs = Program.objects.none()
+
+    if program_ids is not None:
+        programs_qs = programs_qs.filter(id__in=program_ids)
 
     session_fields = list(
         ProgramDataField.objects
@@ -182,6 +195,8 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
             if not _target_due_for_session(target):
                 continue
             prompting_template, current_prompt_level_index = _visible_prompting_levels(program, target)
+            phase_config = _workflow_phase_for_target(target, target.status) or {}
+            minimum_trials = (phase_config.get('criteria') or {}).get('minimum_trials')
             targets_data.append({
                 'id': target.id,
                 'name': target.name,
@@ -202,6 +217,12 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
                 'interval_warning_sound': target.interval_warning_sound,
                 'prompting_template': prompting_template,
                 'current_prompt_level_index': current_prompt_level_index,
+                # From the target's current-status workflow phase, if one is
+                # configured — the live recording screen uses this to show
+                # "X / Y trials" and turn the counter green once met. Mirrors
+                # the same `minimum_trials` criteria apps.programs.services
+                # evaluates mastery against after the session is submitted.
+                'minimum_trials': minimum_trials,
             })
 
         snapshot['programs'].append({

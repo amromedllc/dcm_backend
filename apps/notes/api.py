@@ -8,6 +8,7 @@ from ninja.errors import HttpError
 from apps.accounts.auth import partner_auth
 from apps.accounts.permissions import require_permission
 from apps.clients.models import Client
+from apps.clients.id_aliases import client_identifier_aliases
 from .models import LessonNote, NoteTemplate, NoteLayoutSettings, NoteSignature, NoteAssignment
 from .schemas import (
     LessonNoteSchema, LessonNoteListSchema, NoteCreateRequest, NoteUpdateRequest,
@@ -93,6 +94,7 @@ def _serialize_note(note: LessonNote) -> dict:
                 'signer_name': sig.signer_name,
                 'signer_role': sig.signer_role,
                 'signature_type': sig.signature_type,
+                'signature_data': sig.signature_data,
                 'signed_at': sig.signed_at,
             }
             for sig in note.signatures.all()
@@ -122,14 +124,28 @@ def create_note_template(request, data: NoteTemplateCreateRequest):
 
 @router.post('/templates/notes/ai-draft', response=NoteTemplateDraftSchema)
 def draft_note_template_with_ai(request, data: NoteTemplateDraftRequest):
-    """Draft a note template from a library program. Nothing is saved: the template form
-    fills in and the person reviews it. Only library programs are accepted, so no client
-    information can reach the model."""
+    """Draft a note template from one of a client's actual assigned programs
+    (not a generic library program), so the drafted fields match what's really
+    being tracked for that client. Nothing is saved: the template form fills
+    in and the person reviews it before saving.
+
+    Note: unlike a library program, a client-assigned program's name/objective/
+    target names can be customized per client, so that text does reach the AI
+    model here — a deliberate tradeoff for drafts that actually match the
+    client's program, not a generic one.
+    """
     _require_template_manager(request, 'create')
-    from apps.programs.api import _org_qs
+    from apps.programs.api import _accessible_external_client_ids
     from apps.programs.models import Program
+    if data.client_id not in _accessible_external_client_ids(request):
+        raise HttpError(403, 'Client not accessible')
     try:
-        program = _org_qs(request).prefetch_related('targets').get(id=data.program_id)
+        program = (
+            Program.objects
+            .filter(external_client_id__in=client_identifier_aliases(data.client_id))
+            .prefetch_related('targets')
+            .get(id=data.program_id)
+        )
     except Program.DoesNotExist:
         raise HttpError(404, 'Program not found')
     try:
@@ -230,7 +246,7 @@ def list_notes(
         qs = qs.filter(staff_id=staff_id)
 
     if client_id:
-        qs = qs.filter(external_client_id=client_id)
+        qs = qs.filter(external_client_id__in=client_identifier_aliases(client_id))
     if status:
         qs = qs.filter(status=status)
     if session_run_id:
@@ -451,7 +467,7 @@ def review_queue(
         .order_by('submitted_at')
     )
     if client_id:
-        qs = qs.filter(external_client_id=client_id)
+        qs = qs.filter(external_client_id__in=client_identifier_aliases(client_id))
     if date_from:
         qs = qs.filter(note_date__gte=date_from)
     if date_to:

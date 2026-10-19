@@ -533,7 +533,7 @@ def pull_providers(org: Organization) -> PullResult:
                 user_changed = True
             else:
                 update_fields: list[str] = []
-                for attr in ('first_name', 'last_name', 'role', 'is_active'):
+                for attr in ('first_name', 'last_name', 'is_active'):
                     if getattr(user, attr) != fields[attr]:
                         setattr(user, attr, fields[attr])
                         update_fields.append(attr)

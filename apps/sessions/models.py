@@ -69,6 +69,36 @@ class Appointment(TenantAwareModel):
         return f'{self.external_client_id} | {self.start_time:%Y-%m-%d %H:%M}'
 
 
+class GroupSession(TenantAwareModel):
+    """
+    A thin shell linking several single-client SessionRuns that were all run
+    together as one group/co-treatment session (e.g. CPT 97154). Deliberately
+    does not duplicate any data-collection concept — each client in the group
+    still gets their own normal SessionRun underneath (own program_snapshot,
+    own TrialEvents, own open/submitted/approved lifecycle, own billing
+    record), unchanged from a solo session. This model only exists so the UI
+    can show/manage them together and reporting can tell which sessions were
+    part of the same physical group.
+    """
+    staff = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='group_sessions',
+        db_constraint=False,
+    )
+    title = models.CharField(max_length=160, blank=True)
+    started_at = models.DateTimeField(default=timezone.now)
+    ended_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        app_label = 'dcm_sessions'
+        ordering = ['-started_at']
+
+    def __str__(self) -> str:
+        return self.title or f'Group session {self.pk}'
+
+
 class SessionRun(TenantAwareModel):
     """
     A single executed session.
@@ -97,6 +127,13 @@ class SessionRun(TenantAwareModel):
         null=True,
         related_name='session_runs',
         db_constraint=False,
+    )
+    group_session = models.ForeignKey(
+        GroupSession,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='session_runs',
     )
     lesson = models.ForeignKey(
         'programs.Lesson',
@@ -415,3 +452,25 @@ class SessionMediaComment(TenantAwareModel):
 
     def __str__(self) -> str:
         return f'Comment on media {self.session_media_id} @ {self.timestamp_seconds}s'
+
+
+class SessionSupervisionNote(TenantAwareModel):
+    """Persistent supervisor guidance attached to a session, including live sessions."""
+    session_run = models.ForeignKey(
+        SessionRun,
+        on_delete=models.CASCADE,
+        related_name='supervision_notes',
+    )
+    body = models.TextField()
+
+    _org_scoped_fk_fields = ('session_run',)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.session_run.organization_id
+
+    class Meta:
+        app_label = 'dcm_sessions'
+        ordering = ['created_at']
+
+    def __str__(self) -> str:
+        return f'Supervision note on session {self.session_run_id}'

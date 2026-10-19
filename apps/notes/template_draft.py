@@ -1,7 +1,8 @@
-"""AI-drafted note templates based on a library program: prompt, and strict validation of the output.
+"""AI-drafted note templates based on a client's assigned program: prompt, and strict validation of the output.
 
-Only the program's own name, category, objective and target names (library programs never hold client
-information) plus an optional short instruction from the person are sent to the model."""
+Only the program's own name, category, objective and target names, plus an optional short instruction
+from the person, are sent to the model — note that unlike a generic library program, these can be
+customized per client (see apps.notes.api.draft_note_template_with_ai for why that's accepted here)."""
 from __future__ import annotations
 
 import re

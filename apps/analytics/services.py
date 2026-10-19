@@ -486,9 +486,11 @@ def get_abc_data_by_day(
     setting: str | None = None,
 ) -> list[ABCDataPoint]:
     """Returns daily ABC event counts grouped by one ABC dimension."""
+    from apps.clients.id_aliases import client_identifier_aliases
+
     field = _ABC_GROUP_FIELD.get(group_by, 'behavior_description')
     qs = ABCEvent.objects.filter(
-        external_client_id=external_client_id,
+        external_client_id__in=client_identifier_aliases(external_client_id),
         occurred_at__date__gte=date_from,
         occurred_at__date__lte=date_to,
     )
@@ -544,9 +546,11 @@ def get_assessment_data(
     metric: str | None = None,
 ) -> list[AssessmentDataPoint]:
     """Returns assessment score records grouped by assessment, domain, or metric."""
+    from apps.clients.id_aliases import client_identifier_aliases
+
     field = _ASSESSMENT_GROUP_FIELD.get(group_by, 'domain')
     qs = AssessmentRecord.objects.filter(
-        external_client_id=external_client_id,
+        external_client_id__in=client_identifier_aliases(external_client_id),
         assessed_on__gte=date_from,
         assessed_on__lte=date_to,
     )
@@ -631,6 +635,34 @@ def _mastered_threshold_for_target(phases: list, measurement: str) -> tuple[floa
         if metric is None:
             continue
         candidate = (value, metric)
+        if fallback is None or value > fallback[0]:
+            fallback = candidate
+        if phase.get('on_success') == 'mastered':
+            explicit = candidate
+    return explicit or fallback
+
+
+def _duration_threshold_for_target(phases: list) -> tuple[float, str] | None:
+    """Same phase-picking rule as `_mastered_threshold_for_target` (prefer the
+    phase whose `on_success == 'mastered'`, else the one with the largest
+    threshold) but returns the raw (threshold_seconds, direction) pair
+    without routing through `_trial_metric_for_objective` — that helper only
+    recognizes pct_correct/count/rate metrics, so duration targets always
+    fell through as unsupported. Used to color the "All Trials" duration
+    table by whether each occurrence met the target's goal."""
+    explicit: tuple[float, str] | None = None
+    fallback: tuple[float, str] | None = None
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        criteria = phase.get('criteria') or {}
+        raw = criteria.get('threshold_pct')
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        direction = str(criteria.get('threshold_direction') or 'min').lower()
+        candidate = (value, direction)
         if fallback is None or value > fallback[0]:
             fallback = candidate
         if phase.get('on_success') == 'mastered':
@@ -967,6 +999,7 @@ def get_client_progress_report(
     forms need resolving here regardless of which one the caller passed in.
     """
     from apps.clients.models import Client
+    from apps.clients.id_aliases import client_identifier_aliases
     client = Client.objects.filter(id=client_id).first() or Client.objects.filter(external_id=str(client_id)).first()
     dcm_client_id = client.id if client else client_id
     external_client_id = (
@@ -977,7 +1010,7 @@ def get_client_progress_report(
     # ── 1. Programs and targets ──────────────────────────────────────────────
     programs = list(
         Program.objects
-        .filter(external_client_id=dcm_client_id)
+        .filter(external_client_id__in=client_identifier_aliases(dcm_client_id))
         .prefetch_related('targets__prompting_template', 'targets__module', 'targets__submodule')
         .order_by('display_order', 'name')
     )
@@ -991,7 +1024,7 @@ def get_client_progress_report(
 
     # ── 2. Session counts ────────────────────────────────────────────────────
     sessions_qs = SessionRun.objects.filter(
-        external_client_id=external_client_id,
+        external_client_id__in=client_identifier_aliases(dcm_client_id),
         started_at__date__gte=date_from,
         started_at__date__lte=date_to,
     ).values('status')
@@ -1153,6 +1186,7 @@ def get_client_progress_overview(client_id: int) -> ClientProgressOverview:
     the local Client.id or the TPMS external id).
     """
     from apps.clients.models import Client
+    from apps.clients.id_aliases import client_identifier_aliases
     from apps.programs.models import TargetStatusChange
 
     client = Client.objects.filter(id=client_id).first() or Client.objects.filter(external_id=str(client_id)).first()
@@ -1160,7 +1194,7 @@ def get_client_progress_overview(client_id: int) -> ClientProgressOverview:
 
     programs = list(
         Program.objects
-        .filter(external_client_id=dcm_client_id)
+        .filter(external_client_id__in=client_identifier_aliases(dcm_client_id))
         .prefetch_related('targets')
         .order_by('display_order', 'name')
     )
@@ -1299,6 +1333,14 @@ def get_duration_occurrences(target_ids: list[int], date_from: date, date_to: da
     duration view, which shows each occurrence rather than a daily summary."""
     if not target_ids:
         return []
+
+    thresholds: dict[int, tuple[float, str] | None] = {}
+    for target_id, phases in (
+        Target.objects.filter(id__in=target_ids, workflow_template__isnull=False)
+        .values_list('id', 'workflow_template__phases')
+    ):
+        thresholds[target_id] = _duration_threshold_for_target(phases) if isinstance(phases, list) else None
+
     events = (
         BehaviorEvent.objects
         .filter(
@@ -1319,6 +1361,14 @@ def get_duration_occurrences(target_ids: list[int], date_from: date, date_to: da
     for event in events:
         key = (event['session_run_id'], event['target_id'])
         counters[key] += 1
+        threshold = thresholds.get(event['target_id'])
+        meets_criteria = None
+        if threshold is not None:
+            threshold_seconds, direction = threshold
+            meets_criteria = (
+                event['duration_seconds'] <= threshold_seconds if direction == 'max'
+                else event['duration_seconds'] >= threshold_seconds
+            )
         result.append({
             'session_id': event['session_run_id'],
             'session_label': event['session_run__session_name'] or '',
@@ -1327,6 +1377,7 @@ def get_duration_occurrences(target_ids: list[int], date_from: date, date_to: da
             'target_name': event['target_name'],
             'index': counters[key],
             'duration_seconds': event['duration_seconds'],
+            'meets_criteria': meets_criteria,
         })
     return result
 

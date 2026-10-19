@@ -9,14 +9,15 @@ from ninja.errors import HttpError
 
 from apps.accounts.auth import partner_auth
 from apps.accounts.permissions import require_permission, resolve_permission_organization, user_has_permission
+from apps.clients.id_aliases import client_identifier_aliases
 from apps.programs.measurements import (
     aggregate_measurement, MEASUREMENT_LABELS,
     DURATION_MEASUREMENTS, RATE_MEASUREMENTS, BEHAVIOR_STYLE_MEASUREMENTS,
 )
 from shared.uploads import validate_media_upload
 from .models import (
-    Appointment, SessionRun, TrialEvent, BehaviorEvent, ABCEvent,
-    ABCCategory, ABCItem, SessionMedia, SessionMediaComment,
+    Appointment, SessionRun, GroupSession, TrialEvent, BehaviorEvent, ABCEvent,
+    ABCCategory, ABCItem, SessionMedia, SessionMediaComment, SessionSupervisionNote,
 )
 from .schemas import (
     SessionEditImpactSchema,
@@ -24,6 +25,7 @@ from .schemas import (
     AssignProgramsRequest, AssignedProgramSchema,
     SessionRunSchema, SessionStartRequest, SessionSubmitRequest, SessionRejectRequest,
     SessionLinkAppointmentRequest,
+    GroupSessionSchema, GroupSessionStartRequest,
     SessionSubmitResponse, TargetAdvancedSchema, TargetFadedSchema,
     TrialEventSchema, TrialEventCreateRequest,
     BehaviorEventSchema, BehaviorEventCreateRequest,
@@ -34,6 +36,7 @@ from .schemas import (
     TrialSummaryItem,
     SessionMediaSchema, SessionMediaUpdateRequest,
     SessionMediaCommentSchema, SessionMediaCommentCreateRequest,
+    SessionSupervisionNoteSchema, SessionSupervisionNoteCreateRequest,
 )
 from .services import build_program_snapshot, submit_session, approve_session, reject_session
 
@@ -600,7 +603,12 @@ def list_appointments(
 ):
     qs = _appt_qs().filter(external_client_id__in=_accessible_external_client_ids(request))
     if client_id:
-        qs = qs.filter(external_client_id=client_id)
+        qs = qs.filter(
+            external_client_id__in=(
+                _accessible_external_client_ids(request)
+                & client_identifier_aliases(client_id)
+            )
+        )
     if staff_id:
         qs = qs.filter(staff_id=staff_id)
     if date:
@@ -841,6 +849,94 @@ def start_session(request, data: SessionStartRequest):
     return 201, _serialize_session(session)
 
 
+# ---------------------------------------------------------------------------
+# Group / co-treatment sessions (e.g. CPT 97154) — a thin shell over several
+# ordinary per-client SessionRuns, so recording/approval/reporting/billing
+# for each client works exactly as it does for a solo session. See
+# GroupSession's docstring.
+# ---------------------------------------------------------------------------
+
+def _serialize_group_session(group: GroupSession, session_runs: list[SessionRun]) -> dict:
+    staff = group.staff
+    staff_name = f'{staff.first_name} {staff.last_name}'.strip() if staff else None
+    return {
+        'id': group.id,
+        'staff_id': group.staff_id,
+        'staff_name': staff_name or (staff.email if staff else None),
+        'title': group.title,
+        'started_at': group.started_at,
+        'ended_at': group.ended_at,
+        'session_runs': [_serialize_session(sr) for sr in session_runs],
+    }
+
+
+@router.post('/group-sessions', response={201: GroupSessionSchema})
+def start_group_session(request, data: GroupSessionStartRequest):
+    """Creates a GroupSession shell plus one normal SessionRun per client in
+    data.clients — each gets its own program_snapshot, narrowed to that
+    client's chosen program_ids if given, otherwise all of their assigned
+    active programs (same default as a solo walk-in session)."""
+    _require_session_start(request)
+    selections = data.clients
+    client_ids = [c.client_id for c in selections]
+    if len(client_ids) < 2:
+        raise HttpError(400, 'A group session needs at least 2 clients.')
+    if len(set(client_ids)) != len(client_ids):
+        raise HttpError(400, 'Duplicate client in group roster.')
+    accessible = _accessible_external_client_ids(request)
+    for client_id in client_ids:
+        if client_id not in accessible:
+            raise HttpError(404, f'Client {client_id} not found')
+
+    from django.db import transaction
+    with transaction.atomic():
+        group = GroupSession.objects.create(
+            staff=request.user,
+            title=data.title,
+            created_by=request.user,
+        )
+        session_runs = []
+        for selection in selections:
+            snapshot = build_program_snapshot(
+                client_id=selection.client_id,
+                lesson_id=None,
+                restrict_to_lesson=False,
+                program_ids=selection.program_ids or None,
+            )
+            session_runs.append(SessionRun.objects.create(
+                external_client_id=_canonical_external_client_id(selection.client_id),
+                staff=request.user,
+                group_session=group,
+                program_snapshot=snapshot,
+                start_latitude=data.latitude,
+                start_longitude=data.longitude,
+                created_by=request.user,
+            ))
+    return 201, _serialize_group_session(group, session_runs)
+
+
+@router.get('/group-sessions/{group_id}', response=GroupSessionSchema)
+def get_group_session(request, group_id: int):
+    group = GroupSession.objects.filter(id=group_id).first()
+    if group is None:
+        raise HttpError(404, 'Group session not found')
+    session_runs = list(group.session_runs.select_related('staff').all())
+    accessible = _accessible_external_client_ids(request)
+    if any(sr.external_client_id not in accessible for sr in session_runs):
+        raise HttpError(404, 'Group session not found')
+    return _serialize_group_session(group, session_runs)
+
+
+@router.get('/group-sessions', response=list[GroupSessionSchema])
+def list_group_sessions(request, date: str | None = None):
+    qs = GroupSession.objects.filter(staff=request.user).prefetch_related('session_runs__staff')
+    if date:
+        day = datetime.strptime(date, '%Y-%m-%d').date()
+        qs = qs.filter(started_at__date=day)
+    groups = list(qs[:50])
+    return [_serialize_group_session(g, list(g.session_runs.all())) for g in groups]
+
+
 @router.get('/sessions', response=list[SessionRunSchema])
 def list_sessions(
     request,
@@ -915,6 +1011,44 @@ def get_session(request, session_id: int):
     return _serialize_session(session)
 
 
+@router.get('/sessions/{session_id}/supervision-notes', response=list[SessionSupervisionNoteSchema])
+def list_supervision_notes(request, session_id: int):
+    session = _get_session_or_404(session_id, request)
+    return [
+        SessionSupervisionNoteSchema(
+            id=note.id,
+            session_run_id=note.session_run_id,
+            body=note.body,
+            author=note.created_by.full_name or note.created_by.email if note.created_by_id else None,
+            created_at=note.created_at,
+        )
+        for note in session.supervision_notes.select_related('created_by')
+    ]
+
+
+@router.post('/sessions/{session_id}/supervision-notes', response={201: SessionSupervisionNoteSchema})
+def create_supervision_note(request, session_id: int, data: SessionSupervisionNoteCreateRequest):
+    require_permission(request, 'session_approve')
+    session = _get_session_or_404(session_id, request)
+    if session.status != SessionRun.Status.OPEN:
+        raise HttpError(409, 'Supervision notes can only be added while the session is live')
+    body = data.body.strip()
+    if not body:
+        raise HttpError(400, 'Supervision note cannot be empty')
+    note = SessionSupervisionNote.objects.create(
+        session_run=session,
+        body=body,
+        created_by=request.user,
+    )
+    return 201, SessionSupervisionNoteSchema(
+        id=note.id,
+        session_run_id=note.session_run_id,
+        body=note.body,
+        author=request.user.full_name or request.user.email,
+        created_at=note.created_at,
+    )
+
+
 @router.post('/sessions/{session_id}/link-appointment', response=SessionRunSchema)
 def link_session_appointment(request, session_id: int, data: SessionLinkAppointmentRequest):
     """
@@ -953,7 +1087,13 @@ def delete_session(request, session_id: int):
     session = _require_recording_access(request, session_id)
     if session.status != SessionRun.Status.OPEN:
         raise HttpError(409, 'Only open sessions can be deleted')
+    group_session_id = session.group_session_id
     session.delete()
+    # Discarding the last client's session out of a group leaves an empty,
+    # pointless shell behind otherwise — clean it up rather than cluttering
+    # the group sessions list with 0-client groups.
+    if group_session_id and not SessionRun.objects.filter(group_session_id=group_session_id).exists():
+        GroupSession.objects.filter(id=group_session_id).delete()
     return 204, None
 
 

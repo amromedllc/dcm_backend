@@ -1,14 +1,20 @@
+import base64
+import binascii
 import hashlib
+import io
 import logging
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 import jwt
-from ninja import Router, Body
+from ninja import Router, Body, File
+from ninja.files import UploadedFile
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.http import HttpResponseRedirect
 from django.utils import timezone
+
+from shared.uploads import validate_image_upload
 
 logger = logging.getLogger(__name__)
 from ninja.errors import HttpError
@@ -17,7 +23,10 @@ from django.db.models import Q
 
 from . import mfa
 from .models import PasswordSetLink, User, UserMFA
-from .auth import create_access_token, create_refresh_token, decode_token, jwt_auth, jwt_auth_any_role, token_tenant_mismatch
+from .auth import (
+    create_access_token, create_refresh_token, decode_token, is_token_blocked,
+    jwt_auth, jwt_auth_any_role, token_tenant_mismatch,
+)
 from .permissions import get_user_permissions, require_permission, resolve_permission_organization
 from .schemas import (
     LoginRequest,
@@ -34,6 +43,7 @@ from .schemas import (
     RefreshRequest,
     AccessTokenResponse,
     AccountProfileSchema,
+    AccountSignatureSchema,
     UserSchema,
     CurrentUserSchema,
     UserCreateRequest,
@@ -47,8 +57,12 @@ from .schemas import (
     PinStatusResponse,
     SetPinRequest,
     TogglePinLockRequest,
+    UpdateAccountLanguageRequest,
+    UpdateAccountSignatureRequest,
     UpdateAccountTimezoneRequest,
     VerifyPinRequest,
+    PinUnlockRequest,
+    PinUnlockResponse,
 )
 from apps.clients.models import Client
 from apps.integrations.tpms_auth_client import (
@@ -415,6 +429,60 @@ def verify_my_pin(request, data: VerifyPinRequest):
     return {'valid': True}
 
 
+@router.post('/pin/unlock', response=PinUnlockResponse, auth=None)
+def unlock_with_pin(request, data: PinUnlockRequest):
+    """Re-authenticate a PIN-locked app after its short-lived tokens expire."""
+    try:
+        payload = jwt.decode(
+            data.refresh_token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
+            options={'verify_exp': False},
+        )
+    except jwt.InvalidTokenError:
+        raise HttpError(401, 'Session expired. Please sign in again.')
+
+    if payload.get('type') != 'refresh' or not isinstance(payload.get('exp'), (int, float)):
+        raise HttpError(401, 'Session expired. Please sign in again.')
+    if not payload.get('org_id') or token_tenant_mismatch(payload, request) or is_token_blocked(payload):
+        raise HttpError(401, 'Session expired. Please sign in again.')
+
+    try:
+        user = User.objects.get(id=int(payload['sub']), is_active=True)
+    except (User.DoesNotExist, KeyError, TypeError, ValueError):
+        raise HttpError(401, 'Session expired. Please sign in again.')
+
+    tenant = getattr(request, 'tenant', None)
+    if not (
+        tenant
+        and tenant.pin_lock_allowed
+        and user.pin_lock_enabled
+        and user.has_pin
+    ):
+        raise HttpError(401, 'PIN unlock is not available for this session.')
+
+    now = timezone.now()
+    if user.pin_locked_until and user.pin_locked_until > now:
+        raise HttpError(429, 'Too many incorrect attempts. Try again in a few minutes.')
+
+    if not user.check_pin(data.pin.strip()):
+        user.pin_failed_attempts += 1
+        if user.pin_failed_attempts >= mfa.MAX_FAILED_ATTEMPTS:
+            user.pin_locked_until = now + timedelta(minutes=mfa.LOCKOUT_MINUTES)
+            user.pin_failed_attempts = 0
+        user.save(update_fields=['pin_failed_attempts', 'pin_locked_until'])
+        raise HttpError(400, 'Incorrect PIN.')
+
+    user.pin_failed_attempts = 0
+    user.pin_locked_until = None
+    user.save(update_fields=['pin_failed_attempts', 'pin_locked_until'])
+    tenant_id = payload.get('org_id')
+    return PinUnlockResponse(
+        access_token=create_access_token(user, tenant_id),
+        refresh_token=create_refresh_token(user, tenant_id),
+    )
+
+
 def _verify_actor_password(user: User, password: str) -> bool:
     return user.has_usable_password() and user.check_password(password)
 
@@ -603,6 +671,8 @@ def refresh_token(request, data: RefreshRequest):
             raise HttpError(401, 'Invalid token type')
         if token_tenant_mismatch(payload, request):
             raise HttpError(401, 'Invalid or expired token')
+        if is_token_blocked(payload):
+            raise HttpError(401, 'Invalid or expired token')
         user = User.objects.get(id=int(payload['sub']), is_active=True)
         # Reuse the tenant this refresh token was issued for — not
         # request.tenant again — so a refresh can never move a session to a
@@ -611,6 +681,15 @@ def refresh_token(request, data: RefreshRequest):
         return AccessTokenResponse(access_token=create_access_token(user, payload['org_id']))
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, User.DoesNotExist, KeyError):
         raise HttpError(401, 'Invalid or expired token')
+
+
+def _user_avatar_url(request, user: User) -> str | None:
+    if not user.avatar:
+        return None
+    try:
+        return request.build_absolute_uri(user.avatar.url)
+    except ValueError:
+        return None
 
 
 @router.get('/me', response=CurrentUserSchema, auth=jwt_auth_any_role)
@@ -625,6 +704,7 @@ def me(request):
     user.pin_lock_allowed = bool(tenant and getattr(tenant, 'pin_lock_allowed', False))
     user.pin_lock_enabled = bool(getattr(user, 'pin_lock_enabled', False))
     user.pin_length = getattr(user, 'pin_length', None)
+    user.avatar_url = _user_avatar_url(request, user)
     if user.is_caregiver:
         # Caregiver access is identity-scoped, not permission-key-scoped —
         # no RolePermission lookup, just the linked client's display info.
@@ -752,6 +832,27 @@ def _is_valid_timezone(name: str) -> bool:
         return False
 
 
+# The app's UI strings are English-only today — this just records a
+# preference for later use, it doesn't translate anything yet.
+_LANGUAGE_OPTIONS = [
+    {'value': 'en-US', 'label': 'English (US)'},
+    {'value': 'en-GB', 'label': 'English (UK)'},
+    {'value': 'es', 'label': 'Español'},
+    {'value': 'fr', 'label': 'Français'},
+    {'value': 'pt-BR', 'label': 'Português (Brasil)'},
+    {'value': 'de', 'label': 'Deutsch'},
+    {'value': 'zh-CN', 'label': '中文 (简体)'},
+    {'value': 'vi', 'label': 'Tiếng Việt'},
+    {'value': 'tl', 'label': 'Tagalog'},
+    {'value': 'ar', 'label': 'العربية'},
+]
+_VALID_LANGUAGE_CODES = {option['value'] for option in _LANGUAGE_OPTIONS}
+
+
+def _is_valid_language(code: str) -> bool:
+    return code in _VALID_LANGUAGE_CODES
+
+
 @router.get('/account/profile', response=AccountProfileSchema, auth=jwt_auth_any_role)
 def account_profile(request):
     user = request.user
@@ -823,6 +924,9 @@ def account_profile(request):
         'email': email,
         'timezone': current_timezone,
         'timezone_options': timezone_options,
+        'language': user.language,
+        'language_options': _LANGUAGE_OPTIONS,
+        'avatar_url': _user_avatar_url(request, user),
     }
 
 
@@ -835,6 +939,86 @@ def update_account_timezone(request, data: UpdateAccountTimezoneRequest):
 
     User.objects.filter(pk=request.user.pk).update(timezone=data.timezone or None)
     request.user.timezone = data.timezone or None
+    return account_profile(request)
+
+
+@router.patch('/account/language', response=AccountProfileSchema, auth=jwt_auth_any_role)
+def update_account_language(request, data: UpdateAccountLanguageRequest):
+    """Persists the user's language preference. The app's UI is English-only
+    today, so this records the choice for later use without translating
+    anything yet. A null value clears it back to the app default."""
+    if data.language and not _is_valid_language(data.language):
+        raise HttpError(422, 'Unrecognized language')
+
+    User.objects.filter(pk=request.user.pk).update(language=data.language or None)
+    request.user.language = data.language or None
+    return account_profile(request)
+
+
+def _validate_signature_data(signature_data: str) -> bytes:
+    prefix = 'data:image/png;base64,'
+    if not signature_data.startswith(prefix):
+        raise HttpError(400, 'Signature must be a PNG image.')
+    from PIL import Image, UnidentifiedImageError
+    try:
+        image_bytes = base64.b64decode(signature_data[len(prefix):], validate=True)
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            if image.format != 'PNG' or image.width > 2000 or image.height > 700:
+                raise HttpError(400, 'Signature image dimensions or format are not supported.')
+            image.verify()
+    except HttpError:
+        raise
+    except (binascii.Error, UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError):
+        raise HttpError(400, 'Signature must be a valid PNG image.')
+    if not image_bytes or len(image_bytes) > 300_000:
+        raise HttpError(400, 'Signature image must be smaller than 300 KB.')
+    return image_bytes
+
+
+@router.get('/account/signature', response=AccountSignatureSchema, auth=jwt_auth_any_role)
+def account_signature(request):
+    """Returns the current user's private saved signature."""
+    return {'signature_data': request.user.signature_data}
+
+
+@router.put('/account/signature', response=AccountSignatureSchema, auth=jwt_auth_any_role)
+def save_account_signature(request, data: UpdateAccountSignatureRequest):
+    """Stores a validated signature image for this user only."""
+    _validate_signature_data(data.signature_data)
+    User.objects.filter(pk=request.user.pk).update(signature_data=data.signature_data)
+    request.user.signature_data = data.signature_data
+    return {'signature_data': request.user.signature_data}
+
+
+@router.delete('/account/signature', response=AccountSignatureSchema, auth=jwt_auth_any_role)
+def delete_account_signature(request):
+    """Removes the current user's saved signature; existing signed-note snapshots remain."""
+    User.objects.filter(pk=request.user.pk).update(signature_data='')
+    request.user.signature_data = ''
+    return {'signature_data': ''}
+
+
+@router.post('/account/avatar', response=AccountProfileSchema, auth=jwt_auth_any_role)
+def upload_account_avatar(request, file: UploadedFile = File(...)):
+    """Uploads/replaces the user's own profile picture."""
+    validate_image_upload(file)
+    user = request.user
+    old_avatar = user.avatar
+    user.avatar = file
+    user.save(update_fields=['avatar', 'updated_at'])
+    if old_avatar:
+        old_avatar.delete(save=False)
+    return account_profile(request)
+
+
+@router.delete('/account/avatar', response=AccountProfileSchema, auth=jwt_auth_any_role)
+def delete_account_avatar(request):
+    """Removes the user's profile picture, reverting to the initials avatar."""
+    user = request.user
+    if user.avatar:
+        user.avatar.delete(save=False)
+        user.avatar = None
+        user.save(update_fields=['avatar', 'updated_at'])
     return account_profile(request)
 
 
@@ -986,6 +1170,8 @@ def generate_password_set_link(request, user_id: int, data: PasswordSetLinkGener
     link, raw_token = PasswordSetLink.generate(user, created_by=request.user, expires_at=data.expires_at)
     base_url = getattr(settings, 'FRONTEND_BASE_URL', '').rstrip('/')
     url = f'{base_url}/set-password?token={raw_token}'
+    from apps.notifications.service import send_password_set_invite
+    send_password_set_invite(user.email, user.first_name, url, link.expires_at)
     return PasswordSetLinkGenerateResponse(url=url, expires_at=link.expires_at)
 
 

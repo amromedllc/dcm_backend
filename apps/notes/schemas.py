@@ -1,6 +1,7 @@
 from datetime import date, datetime
 from typing import Any, Literal
 from ninja import Schema
+from pydantic import Field
 
 from shared.schema_types import NonEmptyStr
 
@@ -102,12 +103,13 @@ class NoteSignatureSchema(Schema):
     signer_name: str
     signer_role: str
     signature_type: str
+    signature_data: str = ''
     signed_at: datetime
 
 
 class SignNoteRequest(Schema):
     signature_type: str                 # staff | supervisor | caregiver
-    signature_data: str = ''            # base64 image or text acknowledgement
+    signature_data: str = Field(default='', max_length=400_000)  # base64 image or text acknowledgement
     ip_address_hash: str = ''
 
 
@@ -216,6 +218,7 @@ class ReviewQueueItem(Schema):
 
 
 class NoteTemplateDraftRequest(Schema):
+    client_id: int
     program_id: int
     instruction: str = ''
 

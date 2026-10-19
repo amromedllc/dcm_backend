@@ -53,7 +53,11 @@ if settings.DEBUG:
     except ImportError:
         pass
 
-    # Serve user-uploaded media locally (S3 handles this in production —
-    # see DEFAULT_FILE_STORAGE in settings/production.py).
-    from django.conf.urls.static import static
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+if not getattr(settings, 'USE_S3', False):
+    import re
+    from django.urls import re_path
+    from django.views.static import serve as serve_static
+    media_prefix = re.escape(settings.MEDIA_URL.lstrip('/'))
+    urlpatterns += [
+        re_path(rf'^{media_prefix}(?P<path>.*)$', serve_static, {'document_root': settings.MEDIA_ROOT}),
+    ]

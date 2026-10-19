@@ -99,6 +99,7 @@ class UserSchema(Schema):
     external_employee_id: int | None
     mfa_required: bool = False
     mfa_enabled: bool = False
+    avatar_url: str | None = None
     created_at: datetime
 
 
@@ -126,6 +127,16 @@ class VerifyPinRequest(Schema):
     pin: str
 
 
+class PinUnlockRequest(Schema):
+    pin: str
+    refresh_token: str
+
+
+class PinUnlockResponse(Schema):
+    access_token: str
+    refresh_token: str
+
+
 class PinStatusResponse(Schema):
     pin_lock_allowed: bool
     pin_lock_enabled: bool
@@ -142,15 +153,35 @@ class AccountTimezoneOptionSchema(Schema):
     label: str
 
 
+class AccountLanguageOptionSchema(Schema):
+    value: str
+    label: str
+
+
 class AccountProfileSchema(Schema):
     display_name: str
     email: str
     timezone: str | None = None
     timezone_options: list[AccountTimezoneOptionSchema] = []
+    language: str | None = None
+    language_options: list[AccountLanguageOptionSchema] = []
+    avatar_url: str | None = None
+
+
+class AccountSignatureSchema(Schema):
+    signature_data: str = ''
+
+
+class UpdateAccountSignatureRequest(Schema):
+    signature_data: str = Field(max_length=400_000)
 
 
 class UpdateAccountTimezoneRequest(Schema):
     timezone: str | None = None
+
+
+class UpdateAccountLanguageRequest(Schema):
+    language: str | None = None
 
 
 class UserCreateRequest(Schema):

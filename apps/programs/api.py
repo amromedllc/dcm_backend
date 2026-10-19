@@ -21,6 +21,7 @@ from apps.central_library.models import (
 from shared.ai_client import AIError
 from shared.html_sanitize import sanitize_kb_html
 from .assessment_draft import generate_assessment_draft, normalize_assessment_draft
+from apps.clients.id_aliases import client_identifier_aliases
 from .program_draft import generate_program_draft
 from shared.uploads import (
     IMAGE_CONTENT_TYPES, VIDEO_CONTENT_TYPES, validate_image_upload, validate_media_upload,
@@ -184,8 +185,9 @@ def _validate_lesson_program_ids(request, client_id: int, program_ids: list[int]
         raise HttpError(400, 'A playlist cannot contain the same program more than once')
     programs = Program.objects.filter(
         id__in=program_ids,
-        external_client_id=client_id,
-        external_client_id__in=_accessible_external_client_ids(request),
+        external_client_id__in=(
+            client_identifier_aliases(client_id) & _accessible_external_client_ids(request)
+        ),
     )
     if set(programs.values_list('id', flat=True)) != set(program_ids):
         raise HttpError(400, 'One or more selected programs are not available for this client')
@@ -963,8 +965,9 @@ def _optimized_program_image_url(request, image_field) -> str | None:
 def list_programs(request, client_id: int, category: str | None = None, status: str | None = None, include_archived: bool = False):
     _require_program_read(request)
     qs = Program.objects.filter(
-        external_client_id=client_id,
-        external_client_id__in=_accessible_external_client_ids(request),
+        external_client_id__in=(
+            client_identifier_aliases(client_id) & _accessible_external_client_ids(request)
+        ),
     )
     if not include_archived:
         qs = qs.filter(archived_at__isnull=True)
@@ -1655,7 +1658,7 @@ def client_target_history(request, client_id: int):
     _assert_client_accessible(request, client_id)
     qs = (
         TargetStatusChange.objects
-        .filter(target__program__external_client_id=client_id)
+        .filter(target__program__external_client_id__in=client_identifier_aliases(client_id))
         .select_related('target', 'target__program', 'created_by')
         .order_by('-created_at')[:200]
     )
@@ -1723,7 +1726,10 @@ def client_program_audit(request, client_id: int):
 
     from apps.audit.models import AuditLog
 
-    program_ids = list(Program.objects.filter(external_client_id=client_id).values_list('id', flat=True))
+    program_ids = list(
+        Program.objects.filter(external_client_id__in=client_identifier_aliases(client_id))
+        .values_list('id', flat=True)
+    )
     target_ids = list(Target.objects.filter(program_id__in=program_ids).values_list('id', flat=True))
     qs = (
         AuditLog.objects
