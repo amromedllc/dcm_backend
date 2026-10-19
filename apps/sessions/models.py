@@ -42,6 +42,7 @@ class Appointment(TenantAwareModel):
     notes = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.SCHEDULED)
     synced_at = models.DateTimeField(null=True, blank=True)
+    reminder_sent_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
     session_title = models.CharField(max_length=255, blank=True)
     external_admin_id = models.IntegerField(null=True, blank=True, db_index=True)

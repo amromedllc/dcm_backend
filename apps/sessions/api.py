@@ -762,9 +762,17 @@ def update_appointment(request, appt_id: int, data: AppointmentUpdateRequest):
         )
     except Appointment.DoesNotExist:
         raise HttpError(404, 'Appointment not found')
-    for field, value in data.dict(exclude_none=True).items():
+    updates = data.dict(exclude_none=True)
+    changed_fields = {field for field, value in updates.items() if getattr(appt, field) != value}
+    previous_staff_id = appt.staff_id
+    for field, value in updates.items():
         setattr(appt, field, value)
+    if 'start_time' in changed_fields and appt.start_time > timezone.now():
+        appt.reminder_sent_at = None
     appt.save()
+    if changed_fields & {'start_time', 'end_time', 'staff_id', 'status'}:
+        from apps.notifications.service import notify_appointment_changed
+        notify_appointment_changed(appt, changed_fields, previous_staff_id=previous_staff_id)
     return appt
 
 

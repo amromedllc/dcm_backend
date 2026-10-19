@@ -260,8 +260,8 @@ def _client_display_name(client_id: int | None) -> str:
     if not client_id:
         return 'a client'
     try:
-        from apps.clients.models import Client
-        return Client.objects.get(id=client_id).full_name
+        client = _resolve_local_client(client_id)
+        return client.full_name if client else 'a client'
     except Exception:
         return 'a client'
 
@@ -346,6 +346,57 @@ def notify_session_rejected(session_run):
         data={'session_id': session_run.id, 'client_id': session_run.external_client_id,
               'reason': session_run.rejection_reason},
     )
+
+
+def notify_appointment_reminder(appointment):
+    """Notify the appointment's staff member shortly before it starts."""
+    if not appointment.staff_id:
+        return
+    client_name = _client_display_name(appointment.external_client_id)
+    start = timezone.localtime(appointment.start_time).strftime('%I:%M %p')
+    _create(
+        recipient_id=appointment.staff_id,
+        event_type='appointment_reminder',
+        title='Upcoming appointment',
+        body=f'Your appointment with {client_name} starts at {start}.',
+        data={
+            'appointment_id': appointment.id,
+            'client_id': appointment.external_client_id,
+            'url': '/reporting/appointments',
+        },
+    )
+
+
+def notify_appointment_changed(appointment, changed_fields, previous_staff_id=None):
+    """Notify the old and new assigned staff member about schedule changes."""
+    from apps.accounts.models import User
+
+    recipient_ids = {uid for uid in (previous_staff_id, appointment.staff_id) if uid}
+    if not recipient_ids:
+        return
+    recipients = User.objects.filter(id__in=recipient_ids, organization_id=appointment.organization_id)
+    client_name = _client_display_name(appointment.external_client_id)
+    if appointment.status == 'cancelled':
+        title = 'Appointment cancelled'
+        body = f'The appointment with {client_name} has been cancelled.'
+    elif 'staff_id' in changed_fields:
+        title = 'Appointment assignment changed'
+        body = f'The staff assignment for your appointment with {client_name} has changed.'
+    else:
+        title = 'Appointment schedule changed'
+        body = f'The time or details for your appointment with {client_name} have changed.'
+    for recipient in recipients:
+        _create(
+            recipient_id=recipient.id,
+            event_type='appointment_changed',
+            title=title,
+            body=body,
+            data={
+                'appointment_id': appointment.id,
+                'client_id': appointment.external_client_id,
+                'url': '/reporting/appointments',
+            },
+        )
 
 
 def notify_session_attachment_added(media):

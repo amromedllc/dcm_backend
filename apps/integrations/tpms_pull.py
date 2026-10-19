@@ -842,6 +842,7 @@ def _pull_appointments_window(
     )
     to_create: list[Appointment] = []
     to_update: list[Appointment] = []
+    appointment_notifications: list[tuple[Appointment, set[str], int | None]] = []
 
     for fields in mapped:
         ext_id = fields['external_id']
@@ -859,14 +860,22 @@ def _pull_appointments_window(
                 result.skipped += 1
                 continue
             changed = False
+            changed_fields: set[str] = set()
+            previous_staff_id = current.staff_id
             for attr in update_attrs:
                 value = fields.get(attr)
+                if getattr(current, attr) != value and attr in ('start_time', 'end_time', 'staff_id', 'status'):
+                    changed_fields.add(attr)
+                    if attr == 'start_time' and value and value > timezone.now():
+                        current.reminder_sent_at = None
                 if getattr(current, attr) != value:
                     setattr(current, attr, value)
                     changed = True
             if changed:
                 to_update.append(current)
                 result.updated += 1
+                if changed_fields:
+                    appointment_notifications.append((current, changed_fields, previous_staff_id))
             else:
                 result.skipped += 1
 
@@ -876,8 +885,17 @@ def _pull_appointments_window(
         if to_update:
             Appointment.objects.bulk_update(
                 to_update,
-                list(update_attrs),
+                list(update_attrs) + ['reminder_sent_at'],
                 batch_size=200,
+            )
+
+    if appointment_notifications:
+        from apps.notifications.service import notify_appointment_changed
+        for appointment, changed_fields, previous_staff_id in appointment_notifications:
+            notify_appointment_changed(
+                appointment,
+                changed_fields,
+                previous_staff_id=previous_staff_id,
             )
 
     return result
