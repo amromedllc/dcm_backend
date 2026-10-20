@@ -1,3 +1,4 @@
+from django.db import IntegrityError, transaction
 from datetime import date, datetime, time, timedelta
 import logging
 
@@ -1115,13 +1116,30 @@ def list_trials(request, session_id: int):
     return list(TrialEvent.objects.filter(session_run_id=session_id))
 
 
+def _get_or_create_trial(session_id, payload):
+    client_id = payload.get('client_event_id')
+    if not client_id:
+        return TrialEvent.objects.create(session_run_id=session_id, **payload), True
+    values = dict(payload)
+    values.pop('client_event_id')
+    try:
+        with transaction.atomic():
+            trial, created = TrialEvent.objects.get_or_create(
+                session_run_id=session_id, client_event_id=client_id, defaults=values)
+    except IntegrityError as exc:
+        raise HttpError(409, 'This trial number is already recorded. Review the session before retrying this entry.') from exc
+    if not created and any(getattr(trial, field) != value for field, value in values.items()):
+        raise HttpError(409, 'This event ID was already used with different trial data. The original entry was preserved.')
+    return trial, created
+
+
 @router.post('/sessions/{session_id}/trials', response={201: TrialEventSchema})
 def add_trial(request, session_id: int, data: TrialEventCreateRequest, reason: str = ''):
     session, closed = _session_for_data_change(request, session_id, reason)
     payload = data.dict()
     payload['recorded_at'] = _clamp_to_manual_window(session, payload['recorded_at'])
-    trial = TrialEvent.objects.create(session_run_id=session_id, **payload)
-    if closed:
+    trial, created = _get_or_create_trial(session_id, payload)
+    if closed and created:
         _record_closed_session_edit(request, session, f"Added trial {payload['trial_number']} for {payload['target_name']}", reason)
     return 201, trial
 
@@ -1472,20 +1490,23 @@ def sync_session(request, session_id: int, data: SessionSyncPayload):
 
     trials_created = 0
     for t in data.trials:
-        _, created = TrialEvent.objects.get_or_create(
-            session_run_id=session_id,
-            target_id=t.target_id,
-            trial_number=t.trial_number,
-            sub_item_key=t.sub_item_key,
-            defaults={
-                'target_name': t.target_name,
-                'response_score': t.response_score,
-                'prompt_level_label': t.prompt_level_label,
-                'value_seconds': t.value_seconds,
-                'recorded_at': t.recorded_at,
-                'staff_notes': t.staff_notes,
-            },
-        )
+        if t.client_event_id:
+            _, created = _get_or_create_trial(session_id, t.dict())
+        else:
+            _, created = TrialEvent.objects.get_or_create(
+                session_run_id=session_id,
+                target_id=t.target_id,
+                trial_number=t.trial_number,
+                sub_item_key=t.sub_item_key,
+                defaults={
+                    'target_name': t.target_name,
+                    'response_score': t.response_score,
+                    'prompt_level_label': t.prompt_level_label,
+                    'value_seconds': t.value_seconds,
+                    'recorded_at': t.recorded_at,
+                    'staff_notes': t.staff_notes,
+                },
+            )
         if created:
             trials_created += 1
 
