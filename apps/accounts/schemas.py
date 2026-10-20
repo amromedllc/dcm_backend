@@ -229,6 +229,26 @@ class PasswordSetLinkSubmitRequest(Schema):
     password_confirm: str
 
 
+class ForgotPasswordRequest(Schema):
+    email: EmailStr
+
+
+class ForgotPasswordResponse(Schema):
+    detail: str
+
+
+class PasswordResetLinkInfoResponse(Schema):
+    first_name: str
+    email_masked: str
+    expires_at: datetime
+
+
+class PasswordResetConfirmRequest(Schema):
+    token: str
+    password: str = Field(min_length=8)
+    password_confirm: str
+
+
 class StaffSchema(Schema):
     id: int
     admin_id: int | None

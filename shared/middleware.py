@@ -43,7 +43,7 @@ def _is_rate_limited(key: str) -> bool:
         return False
 
 
-_RATE_LIMITED_PATHS = {'/api/v1/auth/login', '/api/v1/auth/refresh'}
+_RATE_LIMITED_PATHS = {'/api/v1/auth/login', '/api/v1/auth/refresh', '/api/v1/auth/password-reset/request'}
 
 
 def _org_id_from_jwt(request) -> int | None:

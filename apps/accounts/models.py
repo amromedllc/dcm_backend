@@ -331,6 +331,63 @@ class PasswordSetLink(models.Model):
         return f'PasswordSetLink for {self.user_id} ({self.token_prefix}...)'
 
 
+class PasswordResetLink(models.Model):
+    """
+    One-time, expiring link a user requests for themself after forgetting
+    their password — the self-service counterpart to PasswordSetLink above
+    (which only an admin can generate, for someone else). Same hash-and-
+    prefix storage shape and same "requesting a new one expires any prior
+    unused one" behavior; the distinct 'pwr_' token prefix (vs. PasswordSetLink's
+    'pwl_') keeps the two kinds of token from ever being interchangeable.
+    """
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='password_reset_links')
+    token_prefix = models.CharField(max_length=8, db_index=True)
+    token_hash = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        app_label = 'accounts'
+        ordering = ['-created_at']
+
+    @classmethod
+    def generate(cls, user: User, *, expires_at) -> tuple['PasswordResetLink', str]:
+        cls.objects.filter(user=user, used_at__isnull=True, expires_at__gt=timezone.now()).update(
+            expires_at=timezone.now()
+        )
+
+        raw_token = f'pwr_{secrets.token_urlsafe(32)}'
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        instance = cls.objects.create(
+            user=user,
+            token_prefix=raw_token[:8],
+            token_hash=token_hash,
+            expires_at=expires_at,
+        )
+        return instance, raw_token
+
+    @classmethod
+    def verify(cls, raw_token: str) -> 'PasswordResetLink | None':
+        if not raw_token.startswith('pwr_'):
+            return None
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        try:
+            link = cls.objects.select_related('user').get(
+                token_prefix=raw_token[:8],
+                token_hash=token_hash,
+            )
+        except cls.DoesNotExist:
+            return None
+
+        if link.used_at is not None or link.expires_at < timezone.now():
+            return None
+        return link
+
+    def __str__(self) -> str:
+        return f'PasswordResetLink for {self.user_id} ({self.token_prefix}...)'
+
+
 class RolePermission(models.Model):
     """
     Facility-scoped permission matrix for a role.

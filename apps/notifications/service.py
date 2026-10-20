@@ -146,6 +146,42 @@ def send_password_set_invite(email: str, first_name: str, url: str, expires_at) 
         logger.exception('Failed to send password setup invitation to %s', email)
 
 
+def send_password_reset_email(email: str, first_name: str, url: str, expires_at) -> None:
+    """Send the branded self-service password-reset email. Failure is
+    swallowed, same as send_password_set_invite above — the request endpoint
+    always returns a generic response regardless of whether sending
+    succeeded, so a client can't tell from this function's behavior whether
+    the address it submitted matched an account."""
+    if not email:
+        return
+    from django.utils import timezone
+
+    expiry = timezone.localtime(expires_at).strftime('%B %-d, %Y at %-I:%M %p %Z')
+    subject = 'Reset your Progressly password'
+    body = (
+        f"Hi {first_name or 'there'},\n\n"
+        'We received a request to reset your Progressly password. Use the link below to choose a new one. '
+        f'This link expires {expiry}.\n\n'
+        f'{url}\n\nIf you did not request this, you can ignore this email — your password will not be changed.'
+    )
+    try:
+        html_body = render_to_string('notifications/password_reset.html', {
+            'first_name': first_name,
+            'reset_url': url,
+            'expiry': expiry,
+        })
+        message = EmailMultiAlternatives(
+            subject=subject,
+            body=body,
+            from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', None),
+            to=[email],
+        )
+        message.attach_alternative(html_body, 'text/html')
+        message.send(fail_silently=False)
+    except Exception:
+        logger.exception('Failed to send password reset email to %s', email)
+
+
 def send_mfa_verification_code(email: str, first_name: str, code: str, expires_in_minutes: int) -> None:
     """Send a branded email containing a one-time MFA verification code."""
     if not email:
