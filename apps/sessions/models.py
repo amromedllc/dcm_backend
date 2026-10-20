@@ -143,6 +143,15 @@ class SessionRun(TenantAwareModel):
         blank=True,
         related_name='session_runs',
     )
+    class ServiceSetting(models.TextChoices):
+        HOME = 'Home', 'Home'
+        OFFICE = 'Office', 'Office'
+        SCHOOL = 'School', 'School'
+        COMMUNITY = 'Community', 'Community'
+        OTHER = 'Other', 'Other'
+        TELEHEALTH = 'Telehealth', 'Telehealth'
+
+    service_setting = models.CharField(max_length=20, choices=ServiceSetting.choices, blank=True, default='')
     session_name = models.CharField(max_length=160, blank=True)
     message_to_therapist = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN, db_index=True)
@@ -215,9 +224,14 @@ class TrialEvent(OrganizationScopedMixin):
     # seconds for that step. Null for every plain pass/fail trial.
     value_seconds = models.FloatField(null=True, blank=True)
     recorded_at = models.DateTimeField(db_index=True)
+    service_setting = models.CharField(max_length=20, choices=SessionRun.ServiceSetting.choices, blank=True, default='')
     staff_notes = models.TextField(blank=True)
     client_event_id = models.CharField(max_length=64, null=True, blank=True)
 
+    def save(self, *args, **kwargs):
+        if self._state.adding:
+            self.service_setting = self.session_run.service_setting
+        return super().save(*args, **kwargs)
     def _derive_organization_id(self) -> int | None:
         return self.session_run.organization_id
 

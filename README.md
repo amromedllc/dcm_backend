@@ -126,6 +126,18 @@ pytest -v
 - `shared/` — Multitenancy middlewares (`TenantResolverMiddleware`), mixins, and storage utils.
 
 
+## Session service setting
+
+`POST /sessions` and `POST /group-sessions` accept `service_setting`: `Home`,
+`Office`, `School`, `Community`, `Other`, or `Telehealth`. Session responses
+return the saved value. Manual sessions use the same field. Each new trial
+inherits its session's setting, including batch-synced trials, and trial
+responses return it. Program Category is independent of this field.
+
+Apply migration `dcm_sessions.0019_session_service_setting` before deploying.
+Existing sessions and trials retain an empty setting; older API clients may
+omit the field. The web creation dialogs require an explicit selection.
+
 ## Web offline recording event IDs
 
 `POST /sessions/{id}/trials` now accepts an optional nonempty

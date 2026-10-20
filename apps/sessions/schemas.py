@@ -86,6 +86,7 @@ class TrialSummaryItem(Schema):
 
 
 class SessionRunSchema(Schema):
+    service_setting: str = ''
     id: int
     client_id: int
     staff_id: int | None
@@ -128,6 +129,7 @@ class GroupSessionClientSelection(Schema):
 
 
 class GroupSessionStartRequest(Schema):
+    service_setting: Literal['Home', 'Office', 'School', 'Community', 'Other', 'Telehealth', ''] = ''
     clients: list[GroupSessionClientSelection]
     title: str = ''
     latitude: float | None = None
@@ -135,6 +137,7 @@ class GroupSessionStartRequest(Schema):
 
 
 class SessionStartRequest(Schema):
+    service_setting: Literal['Home', 'Office', 'School', 'Community', 'Other', 'Telehealth', ''] = ''
     client_id: int
     appointment_id: int | None = None
     external_appointment_id: str | None = None
@@ -183,6 +186,7 @@ class SessionRejectRequest(Schema):
 # ---------------------------------------------------------------------------
 
 class TrialEventSchema(Schema):
+    service_setting: str = ''
     client_event_id: str | None = None
     id: int
     session_run_id: int

@@ -499,6 +499,7 @@ def _serialize_session(
         'message_to_therapist': session.message_to_therapist,
         'status': session.status,
         'entry_method': session.entry_method,
+        'service_setting': session.service_setting,
         'started_at': session.started_at,
         'start_latitude': session.start_latitude,
         'start_longitude': session.start_longitude,
@@ -840,6 +841,7 @@ def start_session(request, data: SessionStartRequest):
     )
     session = SessionRun.objects.create(
         external_client_id=_canonical_external_client_id(data.client_id),
+        service_setting=data.service_setting,
         staff=request.user,
         external_appointment_id=external_appointment_id,
         lesson_id=lesson_id,
@@ -914,6 +916,7 @@ def start_group_session(request, data: GroupSessionStartRequest):
             )
             session_runs.append(SessionRun.objects.create(
                 external_client_id=_canonical_external_client_id(selection.client_id),
+                service_setting=data.service_setting,
                 staff=request.user,
                 group_session=group,
                 program_snapshot=snapshot,
