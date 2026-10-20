@@ -124,3 +124,24 @@ pytest -v
 - `apps/notes/` — Document editor, supervisor approval workflows, and PDF exports.
 - `apps/exports/` — Task runner bindings for CSV, Zip, and PDF exports.
 - `shared/` — Multitenancy middlewares (`TenantResolverMiddleware`), mixins, and storage utils.
+
+
+## Web offline recording event IDs
+
+`POST /sessions/{id}/trials` now accepts an optional nonempty
+`client_event_id` (up to 64 characters), returned in trial responses and lists.
+For the same session, retries with the same ID and immutable payload return the
+original trial. Reusing that ID for different data or colliding with an existing
+trial number returns 409, without overwriting the recorded entry. Existing
+recording permissions, completed-session edit reasons, and manual time-window
+rules still apply. Behavior and ABC endpoints already support this ID.
+
+Migration `dcm_sessions.0018_trialevent_client_event_id_and_more` adds the nullable
+field and conditional uniqueness constraint. Older clients can omit the field;
+the mobile batch-sync endpoint keeps its existing natural-key deduplication for
+legacy trials and supports event IDs when present.
+
+The web client durably queues open-session creates/deletes, retries the existing
+per-event endpoints with the original IDs, and requires confirmation before
+submitting. It does not depend on closed-browser background sync. See the web
+README for local simulation and recovery tests.

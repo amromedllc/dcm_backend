@@ -1,7 +1,7 @@
-from django.db import IntegrityError, transaction
 from datetime import date, datetime, time, timedelta
 import logging
 
+from django.db import IntegrityError, transaction
 from django.db.models import Count
 from django.utils import timezone
 from ninja import Router, Form, File
@@ -1169,8 +1169,7 @@ def _get_or_create_behavior(session_id: int, data: BehaviorEventCreateRequest) -
     the app dies before the local row can be flagged synced, which would
     otherwise resend and duplicate on retry (unlike trials, behavior events
     have no natural (target, trial_number) key to dedupe on). Falls back to
-    a plain create when no client_event_id is sent (e.g. from the web app,
-    which has no offline queue and nothing to dedupe against).
+    a plain create for older clients that do not send a client_event_id.
     """
     payload = data.dict()
     client_event_id = payload.pop('client_event_id', None)
