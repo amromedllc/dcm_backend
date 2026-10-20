@@ -358,8 +358,8 @@ def set_my_pin(request, data: SetPinRequest):
         raise HttpError(400, 'PIN lock is not allowed by your organization.')
 
     pin = data.pin.strip()
-    if not (pin.isdigit() and len(pin) in (4, 6)):
-        raise HttpError(400, 'PIN must be exactly 4 or 6 digits.')
+    if not (pin.isdigit() and len(pin) == 4):
+        raise HttpError(400, 'PIN must be exactly 4 digits.')
 
     user = request.user
     if user.has_pin and data.current_pin is not None:
