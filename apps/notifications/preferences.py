@@ -1,4 +1,6 @@
 PREFERENCE_TYPES = [
+    ('appointment_reminder', 'Upcoming appointment reminder'),
+    ('appointment_changed', 'Appointment schedule changed'),
     ('file_upload_failed', 'File upload failed'),
     ('session_attachment_added', 'Files, photo or video attached to a session'),
     ('video_session_invitation', 'Invitation to a video session'),

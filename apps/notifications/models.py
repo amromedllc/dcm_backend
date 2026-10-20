@@ -11,6 +11,8 @@ class Notification(TenantAwareModel):
         TARGET_ADVANCED     = 'target_advanced',      'Target automatically advanced'
         TARGET_PROMPT_LEVEL_CHANGED = 'target_prompt_level_changed', 'Target prompt level automatically changed'
         REPORT_REVIEW_REQUEST = 'report_review_request', 'Report review request'
+        APPOINTMENT_REMINDER = 'appointment_reminder', 'Appointment reminder'
+        APPOINTMENT_CHANGED = 'appointment_changed', 'Appointment changed'
 
     recipient = models.ForeignKey(
         settings.AUTH_USER_MODEL,

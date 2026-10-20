@@ -20,6 +20,9 @@ from apps.central_library.models import (
 )
 from shared.ai_client import AIError
 from shared.html_sanitize import sanitize_kb_html
+from apps.central_library.settings_service import (
+    validate_setting_links, sync_legacy_links, apply_program_settings, pull_links, pull_setting,
+)
 from .assessment_draft import generate_assessment_draft, normalize_assessment_draft
 from apps.clients.id_aliases import client_identifier_aliases
 from .program_draft import generate_program_draft
@@ -2720,16 +2723,14 @@ def _serialize_central_program(
         copied_names = set(linked.targets.values_list('name', flat=True)) if linked else set()
         targets = [
             {
-                'id': t['id'], 'name': t['name'], 'status': 'waiting',
-                'measurement_type': t['measurement_type'],
-                'measurement': t['measurement'], 'timer_type': t['timer_type'],
-                'display_order': t['display_order'], 'is_visible_to_staff': t['is_visible_to_staff'],
-                'already_copied': t['name'] in copied_names,
+                'id': target.id, 'name': target.name, 'status': 'waiting',
+                'measurement_type': target.measurement_type,
+                'measurement': target.measurement, 'timer_type': target.timer_type,
+                'display_order': target.display_order, 'is_visible_to_staff': target.is_visible_to_staff,
+                'already_copied': target.name in copied_names,
+                'setting_ids': [setting.pk for setting in target.settings.all()],
             }
-            for t in program.targets.all().values(
-                'id', 'name', 'measurement_type', 'measurement', 'timer_type',
-                'display_order', 'is_visible_to_staff',
-            )
+            for target in program.targets.all()
         ]
     target_count = program.targets.count()
     imported_target_count = min(import_progress.get(program.id, 0), target_count)
@@ -2737,6 +2738,11 @@ def _serialize_central_program(
         'id': program.id,
         'is_template': True,
         'name': program.name,
+        'setting_ids': [setting.pk for setting in program.settings.all()],
+        'configuration': program.configuration,
+        'instructions_html': program.configuration.get('instructions_html', ''),
+        'professional_instructions_html': program.configuration.get('professional_instructions_html', ''),
+        'custom_field_values': program.configuration.get('custom_field_values', {}),
         'category': program.category,
         'status': program.status,
         'phase': program.phase,
@@ -2766,7 +2772,7 @@ def _get_central_folder_or_404(folder_id: int) -> CentralProgramFolder:
 
 def _get_superadmin_central_program_or_404(program_id: int) -> CentralProgram:
     try:
-        return CentralProgram.objects.prefetch_related('targets').get(id=program_id)
+        return CentralProgram.objects.prefetch_related('targets', 'settings', 'targets__settings').get(id=program_id)
     except CentralProgram.DoesNotExist:
         raise HttpError(404, 'Program not found')
 
@@ -2776,6 +2782,41 @@ def _get_central_target_or_404(target_id: int) -> CentralTarget:
         return CentralTarget.objects.select_related('program').get(id=target_id)
     except CentralTarget.DoesNotExist:
         raise HttpError(404, 'Target not found')
+
+
+def _clean_central_configuration(configuration):
+    result = dict(configuration or {})
+    for key in ('instructions_html', 'professional_instructions_html'):
+        if key in result:
+            result[key] = sanitize_kb_html(result[key])
+    return result
+
+
+def _sync_central_labels(program):
+    area = program.settings.filter(kind='treatment_area').first()
+    tags = list(program.settings.filter(kind='tag').values_list('name', flat=True))
+    if area:
+        program.treatment_area = area.name
+    if tags:
+        program.tags = tags
+    program.save()
+    sync_legacy_links(program)
+
+
+def _validate_central_target_settings(settings, measurement):
+    for setting in settings:
+        if setting.kind == 'workflow' and not _workflow_matches_measurement(
+                SimpleNamespace(phases=setting.configuration['phases']), measurement):
+            raise HttpError(400, 'Central workflow does not match the selected measurement')
+
+
+def _validate_central_sub_items(items):
+    for item in items:
+        if {'prompting_template_id', 'workflow_template_id'}.intersection(item):
+            raise HttpError(400, 'Central steps must link central setting_ids, not facility template IDs')
+        linked = validate_setting_links(item.get('setting_ids', []), target=True)
+        if any(setting.kind not in {'prompting', 'workflow'} for setting in linked):
+            raise HttpError(400, 'Steps accept prompting and workflow settings only')
 
 
 def _validate_central_program_fields(data) -> None:
@@ -2798,6 +2839,8 @@ def _serialize_superadmin_central_target(target: CentralTarget) -> dict:
         'id': target.id,
         'program_id': target.program_id,
         'name': target.name,
+        'setting_ids': [setting.pk for setting in target.settings.all()],
+        'configuration': target.configuration,
         'measurement_type': target.measurement_type,
         'measurement': target.measurement,
         'timer_type': target.timer_type,
@@ -2816,6 +2859,8 @@ def _serialize_superadmin_central_program(program: CentralProgram, request, incl
         'id': program.id,
         'is_template': True,
         'name': program.name,
+        'setting_ids': [setting.pk for setting in program.settings.all()],
+        'configuration': program.configuration,
         'category': program.category,
         'status': program.status,
         'phase': program.phase,
@@ -2834,6 +2879,7 @@ def _serialize_superadmin_central_program(program: CentralProgram, request, incl
             {
                 'id': target.id,
                 'name': target.name,
+                'setting_ids': [setting.pk for setting in target.settings.all()],
                 'status': 'waiting',
                 'measurement_type': target.measurement_type,
                 'measurement': target.measurement,
@@ -2914,15 +2960,18 @@ def superadmin_delete_central_program_folder(request, folder_id: int):
 @router.get('/superadmin/central-programs', response=list[OrgProgramSchema])
 def superadmin_list_central_programs(request):
     _require_superadmin(request)
-    qs = CentralProgram.objects.prefetch_related('targets').all()
+    qs = CentralProgram.objects.prefetch_related('targets', 'settings', 'targets__settings').all()
     return [_serialize_superadmin_central_program(program, request) for program in qs]
 
 
 @router.post('/superadmin/central-programs', response={201: OrgProgramSchema})
+@transaction.atomic
 def superadmin_create_central_program(request, data: CentralProgramRequest):
     _require_superadmin(request)
     _validate_central_program_fields(data)
+    linked_settings = validate_setting_links(data.setting_ids)
     program = CentralProgram.objects.create(
+        configuration=_clean_central_configuration(data.configuration.model_dump()),
         name=data.name,
         category=data.category,
         phase=data.phase,
@@ -2935,6 +2984,8 @@ def superadmin_create_central_program(request, data: CentralProgramRequest):
         display_order=data.display_order,
         created_by=request.user,
     )
+    program.settings.set(linked_settings)
+    _sync_central_labels(program)
     return 201, _serialize_superadmin_central_program(program, request, include_targets=True)
 
 
@@ -2946,13 +2997,19 @@ def superadmin_get_central_program(request, program_id: int):
 
 
 @router.patch('/superadmin/central-programs/{program_id}', response=OrgProgramSchema)
+@transaction.atomic
 def superadmin_update_central_program(request, program_id: int, data: CentralProgramUpdateRequest):
     _require_superadmin(request)
     _validate_central_program_fields(data)
     program = _get_superadmin_central_program_or_404(program_id)
-    for field, value in data.dict(exclude_unset=True).items():
-        setattr(program, field, value)
+    updates = data.dict(exclude_unset=True)
+    ids = updates.pop('setting_ids', None)
+    if ids is not None:
+        program.settings.set(validate_setting_links(ids))
+    for field, value in updates.items():
+        setattr(program, field, _clean_central_configuration(value) if field == 'configuration' else value)
     program.save()
+    _sync_central_labels(program)
     return _serialize_superadmin_central_program(program, request, include_targets=True)
 
 
@@ -2972,11 +3029,16 @@ def superadmin_list_central_targets(request, program_id: int):
 
 
 @router.post('/superadmin/central-programs/{program_id}/targets', response={201: CentralTargetSchema})
+@transaction.atomic
 def superadmin_create_central_target(request, program_id: int, data: CentralTargetRequest):
     _require_superadmin(request)
     program = _get_superadmin_central_program_or_404(program_id)
     measurement, timer_type = _normalize_central_target_payload(data)
+    linked_settings = validate_setting_links(data.setting_ids, target=True)
+    _validate_central_target_settings(linked_settings, measurement)
+    _validate_central_sub_items(data.sub_items)
     target = CentralTarget.objects.create(
+        configuration=_clean_central_configuration(data.configuration.model_dump()),
         program=program,
         name=data.name,
         measurement_type=data.measurement_type,
@@ -2989,14 +3051,21 @@ def superadmin_create_central_target(request, program_id: int, data: CentralTarg
         display_order=data.display_order,
         is_visible_to_staff=data.is_visible_to_staff,
     )
+    target.settings.set(linked_settings)
+    sync_legacy_links(target)
     return 201, _serialize_superadmin_central_target(target)
 
 
 @router.patch('/superadmin/central-targets/{target_id}', response=CentralTargetSchema)
+@transaction.atomic
 def superadmin_update_central_target(request, target_id: int, data: CentralTargetUpdateRequest):
     _require_superadmin(request)
     target = _get_central_target_or_404(target_id)
     updates = data.dict(exclude_unset=True)
+    ids = updates.pop('setting_ids', None)
+    linked_settings = validate_setting_links(ids, target=True) if ids is not None else list(target.settings.all())
+    if 'sub_items' in updates:
+        _validate_central_sub_items(updates['sub_items'])
     next_measurement_type = updates.get('measurement_type', target.measurement_type)
     measurement_payload = SimpleNamespace(
         measurement_type=next_measurement_type,
@@ -3004,12 +3073,18 @@ def superadmin_update_central_target(request, target_id: int, data: CentralTarge
         timer_type=updates.get('timer_type', target.timer_type),
     )
     measurement, timer_type = _normalize_central_target_payload(measurement_payload)
+    _validate_central_target_settings(linked_settings, measurement)
     for field, value in updates.items():
         if field not in {'measurement', 'timer_type'}:
-            setattr(target, field, value)
+            setattr(target, field, _clean_central_configuration(value) if field == 'configuration' else value)
     target.measurement = measurement
     target.timer_type = timer_type
     target.save()
+    if ids is not None:
+        target.settings.set(linked_settings)
+    if 'prompting_levels' in updates and ids is None:
+        target.settings.remove(*target.settings.filter(kind='prompting'))
+        sync_legacy_links(target)
     return _serialize_superadmin_central_target(target)
 
 
@@ -3035,7 +3110,7 @@ def list_central_programs(
     elif unfiled:
         qs = qs.filter(folder_id__isnull=True)
     import_progress = _central_import_progress(request)
-    return [_serialize_central_program(p, request, import_progress=import_progress) for p in qs.prefetch_related('targets')]
+    return [_serialize_central_program(p, request, import_progress=import_progress) for p in qs.prefetch_related('targets', 'settings', 'targets__settings')]
 
 
 # Registered before /central-programs/{program_id} below — same routing
@@ -3057,6 +3132,7 @@ def list_central_program_folders(request):
 
 
 @router.post('/central-programs/folders/{folder_id}/import', response={201: ImportCentralFolderResult})
+@transaction.atomic
 def import_central_folder(request, folder_id: int):
     """Import every not-yet-imported program in a Central Library folder into
     the caller's org library in one shot, filing them all into a same-named
@@ -3101,7 +3177,7 @@ def import_central_folder(request, folder_id: int):
 def get_central_program(request, program_id: int):
     require_permission(request, 'central_library_view')
     try:
-        program = _central_qs().prefetch_related('targets').get(id=program_id)
+        program = _central_qs().prefetch_related('targets', 'settings', 'targets__settings').get(id=program_id)
     except CentralProgram.DoesNotExist:
         raise HttpError(404, 'Program not found')
     return _serialize_central_program(program, request, include_targets=True, import_progress=_central_import_progress(request))
@@ -3136,39 +3212,60 @@ def _create_linked_org_program(source: CentralProgram, user) -> Program:
         display_order=source.display_order,
         created_by=user,
     )
+    apply_program_settings(dest, source, user)
     _copy_image(source.image, dest)
     return dest
 
 
 def _append_central_targets(dest: Program, targets, user) -> None:
-    """Copies each given CentralTarget into dest as a new Target, appended
-    after whatever targets dest already has."""
+    """Copy linked settings into this facility, then attach local IDs only."""
     start_order = dest.targets.count()
     for i, t in enumerate(targets):
-        prompting_template = None
-        if t.prompting_levels:
-            prompting_template = PromptingTemplate.objects.create(name=f'{t.name} Prompting', levels=t.prompting_levels)
+        sync_legacy_links(t)
+        linked = pull_links(t, user)
+        prompting = linked.get('prompting', [(None, dest.prompting_template)])[0][1]
+        workflow = linked.get('workflow', [(None, dest.workflow_template)])[0][1]
         measurement, timer_type = _resolve_measurement_fields(
             t.measurement_type, t.measurement or None, t.timer_type or None,
         )
+        if workflow and not _workflow_matches_measurement(workflow, measurement):
+            if linked.get('workflow'):
+                raise HttpError(400, f'Workflow does not match target "{t.name}" measurement')
+            workflow = None  # mixed-measurement programs inherit only compatible defaults
+        starting = linked.get('target_status', [])
+        if not starting:
+            source_status = t.program.settings.filter(kind='target_status').first()
+            if source_status:
+                starting = [(source_status.pk, pull_setting(source_status, user))]
+        fallback = _settings_qs(TargetStatus, SimpleNamespace(user=user), include_org_defaults=True).filter(is_default=True).first()
+        status = starting[0][1].key if starting else (fallback.key if fallback else 'waiting')
+        sub_items = []
+        for raw in t.sub_items:
+            step = dict(raw)
+            ids = step.pop('setting_ids', [])
+            for setting in validate_setting_links(ids, target=True):
+                if setting.kind not in {'prompting', 'workflow'}:
+                    raise HttpError(400, 'Steps accept prompting and workflow settings')
+                local = pull_setting(setting, user)
+                step['prompting_template_id' if setting.kind == 'prompting' else 'workflow_template_id'] = local.pk
+            sub_items.append(step)
+        config = dict(t.configuration)
+        if config.get('mastery_mode') == 'automatic' and workflow is None:
+            raise HttpError(400, f'Automatic mastery for "{t.name}" requires a compatible workflow')
         copied = Target.objects.create(
-            program=dest,
-            name=t.name,
-            measurement_type=t.measurement_type,
-            measurement=measurement,
-            timer_type=timer_type,
-            sub_items=t.sub_items,
-            sd_text=t.sd_text,
-            teaching_instructions=t.teaching_instructions,
-            display_order=start_order + i,
-            is_visible_to_staff=t.is_visible_to_staff,
-            prompting_template=prompting_template,
-            created_by=user,
+            program=dest, name=t.name, measurement_type=t.measurement_type,
+            measurement=measurement, timer_type=timer_type, sub_items=sub_items,
+            sd_text=t.sd_text, teaching_instructions=t.teaching_instructions,
+            display_order=start_order + i, is_visible_to_staff=t.is_visible_to_staff,
+            prompting_template=prompting, workflow_template=workflow, status=status,
+            current_prompt_level_index=_initial_prompt_level_index(prompting),
+            created_by=user, **config,
         )
         if copied.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
-            _sync_target_sub_items(None, copied, copied.sub_items, user)
+            _sync_target_sub_items(SimpleNamespace(user=user), copied, copied.sub_items, user)
 
 
+@transaction.atomic
 def _clone_central_program(program_id: int, user) -> Program:
     """Deep-copies a Central Library program (+ targets) into the calling
     user's own organization. A target's optional `prompting_levels` becomes
@@ -3182,7 +3279,7 @@ def _clone_central_program(program_id: int, user) -> Program:
     is still missing, rather than creating a second, duplicate program.
     """
     try:
-        source = _central_qs().prefetch_related('targets').get(id=program_id)
+        source = _central_qs().select_for_update().prefetch_related('targets', 'settings', 'targets__settings').get(id=program_id)
     except CentralProgram.DoesNotExist:
         raise HttpError(404, 'Program not found')
 
@@ -3211,6 +3308,7 @@ def import_central_program(request, program_id: int):
     return 201, _serialize_org_program(dest, request, include_targets=True)
 
 
+@transaction.atomic
 def _clone_central_target_as_program(program_id: int, target_id: int, user) -> Program:
     """Copy a single target out of a Central Library program into the
     caller's Library. If this central program is already linked to one of
@@ -3221,7 +3319,7 @@ def _clone_central_target_as_program(program_id: int, target_id: int, user) -> P
     (name, category, image, etc.) so it starts out as a coherent program
     rather than an orphaned single target."""
     try:
-        source = _central_qs().get(id=program_id)
+        source = _central_qs().select_for_update().get(id=program_id)
     except CentralProgram.DoesNotExist:
         raise HttpError(404, 'Program not found')
     try:
@@ -3677,3 +3775,7 @@ def delete_data_field(request, pk: int):
     except ProgramDataField.DoesNotExist:
         raise HttpError(404, 'Not found')
     return 204, None
+
+# Platform settings use the same authenticated API surface as central programs.
+from apps.central_library.settings_api import router as central_settings_router
+router.add_router('', central_settings_router)

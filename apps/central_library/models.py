@@ -1,6 +1,6 @@
 import uuid
 
-from django.conf import settings
+from django.conf import settings as django_settings
 from django.db import models
 
 
@@ -35,7 +35,7 @@ class CentralProgramFolder(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        django_settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True, blank=True,
         related_name='+',
@@ -47,6 +47,50 @@ class CentralProgramFolder(models.Model):
 
     def __str__(self) -> str:
         return self.name
+
+
+class CentralProgramSetting(models.Model):
+    """Reusable platform settings; configuration uses the facility's schemas."""
+    class Kind(models.TextChoices):
+        PROMPTING = 'prompting', 'Prompting and Fading'
+        WORKFLOW = 'workflow', 'Workflow'
+        TREATMENT_AREA = 'treatment_area', 'Treatment Area'
+        TAG = 'tag', 'Tag'
+        TARGET_STATUS = 'target_status', 'Target Status'
+        DATA_FIELD = 'data_field', 'Custom Field'
+
+    kind = models.CharField(max_length=30, choices=Kind.choices)
+    source_id = models.CharField(max_length=200, unique=True, null=True, blank=True)
+    name = models.CharField(max_length=200)
+    configuration = models.JSONField(default=dict, blank=True)
+    dependencies = models.ManyToManyField('self', symmetrical=False, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['kind', 'name']
+        constraints = [models.UniqueConstraint(fields=['kind', 'name'], name='central_setting_kind_name')]
+
+    def __str__(self):
+        return self.name
+
+
+class CentralSettingCopy(models.Model):
+    """Provenance, scoped to both organization and TPMS facility/practice.
+
+    Local settings can be edited after import. Later imports reuse the copy
+    without overwriting those edits. No cross-schema foreign key to local data.
+    """
+    setting = models.ForeignKey(CentralProgramSetting, on_delete=models.CASCADE)
+    organization = models.ForeignKey('tenants.Organization', on_delete=models.CASCADE)
+    practice_key = models.CharField(max_length=80)
+    local_id = models.PositiveBigIntegerField()
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=['setting', 'organization', 'practice_key'], name='central_setting_facility_copy',
+        )]
 
 
 class CentralProgram(models.Model):
@@ -80,6 +124,7 @@ class CentralProgram(models.Model):
         ACTIVE = 'active', 'Active'
         ARCHIVED = 'archived', 'Archived'
 
+    source_id = models.CharField(max_length=200, unique=True, null=True, blank=True)
     name = models.CharField(max_length=200)
     category = models.CharField(max_length=30, choices=Category.choices, default=Category.SKILL_ACQUISITION)
     phase = models.CharField(max_length=20, choices=Phase.choices, default=Phase.TEACHING, blank=True)
@@ -88,6 +133,9 @@ class CentralProgram(models.Model):
     tags = models.JSONField(default=list, blank=True)
     objective = models.TextField(blank=True)
     instructions = models.TextField(blank=True)
+    prompting_levels = models.JSONField(default=list, blank=True)
+    settings = models.ManyToManyField(CentralProgramSetting, blank=True, related_name='programs')
+    configuration = models.JSONField(default=dict, blank=True)
     image = models.ImageField(upload_to=_central_program_upload_path, max_length=500, blank=True, null=True)
     folder = models.ForeignKey(
         CentralProgramFolder,
@@ -99,7 +147,7 @@ class CentralProgram(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        django_settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True, blank=True,
         related_name='+',
@@ -124,6 +172,7 @@ class CentralTarget(models.Model):
         INSTRUCTIONS = 'instructions', 'Instructions'
 
     program = models.ForeignKey(CentralProgram, on_delete=models.CASCADE, related_name='targets')
+    source_id = models.CharField(max_length=200, unique=True, null=True, blank=True)
     name = models.CharField(max_length=200)
     measurement_type = models.CharField(
         max_length=30, choices=MeasurementType.choices, default=MeasurementType.DISCRETE_TRIAL,
@@ -139,6 +188,8 @@ class CentralTarget(models.Model):
     # shared FK to one central row isn't possible (and wouldn't be desired;
     # each org should own and be able to edit its own copy).
     prompting_levels = models.JSONField(default=list, blank=True)
+    settings = models.ManyToManyField(CentralProgramSetting, blank=True, related_name='targets')
+    configuration = models.JSONField(default=dict, blank=True)
     display_order = models.PositiveIntegerField(default=0, db_index=True)
     is_visible_to_staff = models.BooleanField(default=True)
 
@@ -185,7 +236,7 @@ class KnowledgeBaseModule(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        django_settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True, blank=True,
         related_name='+',
@@ -252,7 +303,7 @@ class KnowledgeBaseImport(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        django_settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True, blank=True,
         related_name='+',
@@ -283,7 +334,7 @@ class KnowledgeBaseMedia(models.Model):
     file_size = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        django_settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True, blank=True,
         related_name='+',
@@ -309,7 +360,7 @@ class ChangelogEntry(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        django_settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True, blank=True,
         related_name='+',

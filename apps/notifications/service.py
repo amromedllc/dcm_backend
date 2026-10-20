@@ -146,6 +146,42 @@ def send_password_set_invite(email: str, first_name: str, url: str, expires_at) 
         logger.exception('Failed to send password setup invitation to %s', email)
 
 
+def send_password_reset_email(email: str, first_name: str, url: str, expires_at) -> None:
+    """Send the branded self-service password-reset email. Failure is
+    swallowed, same as send_password_set_invite above — the request endpoint
+    always returns a generic response regardless of whether sending
+    succeeded, so a client can't tell from this function's behavior whether
+    the address it submitted matched an account."""
+    if not email:
+        return
+    from django.utils import timezone
+
+    expiry = timezone.localtime(expires_at).strftime('%B %-d, %Y at %-I:%M %p %Z')
+    subject = 'Reset your Progressly password'
+    body = (
+        f"Hi {first_name or 'there'},\n\n"
+        'We received a request to reset your Progressly password. Use the link below to choose a new one. '
+        f'This link expires {expiry}.\n\n'
+        f'{url}\n\nIf you did not request this, you can ignore this email — your password will not be changed.'
+    )
+    try:
+        html_body = render_to_string('notifications/password_reset.html', {
+            'first_name': first_name,
+            'reset_url': url,
+            'expiry': expiry,
+        })
+        message = EmailMultiAlternatives(
+            subject=subject,
+            body=body,
+            from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', None),
+            to=[email],
+        )
+        message.attach_alternative(html_body, 'text/html')
+        message.send(fail_silently=False)
+    except Exception:
+        logger.exception('Failed to send password reset email to %s', email)
+
+
 def send_mfa_verification_code(email: str, first_name: str, code: str, expires_in_minutes: int) -> None:
     """Send a branded email containing a one-time MFA verification code."""
     if not email:
@@ -260,8 +296,8 @@ def _client_display_name(client_id: int | None) -> str:
     if not client_id:
         return 'a client'
     try:
-        from apps.clients.models import Client
-        return Client.objects.get(id=client_id).full_name
+        client = _resolve_local_client(client_id)
+        return client.full_name if client else 'a client'
     except Exception:
         return 'a client'
 
@@ -346,6 +382,57 @@ def notify_session_rejected(session_run):
         data={'session_id': session_run.id, 'client_id': session_run.external_client_id,
               'reason': session_run.rejection_reason},
     )
+
+
+def notify_appointment_reminder(appointment):
+    """Notify the appointment's staff member shortly before it starts."""
+    if not appointment.staff_id:
+        return
+    client_name = _client_display_name(appointment.external_client_id)
+    start = timezone.localtime(appointment.start_time).strftime('%I:%M %p')
+    _create(
+        recipient_id=appointment.staff_id,
+        event_type='appointment_reminder',
+        title='Upcoming appointment',
+        body=f'Your appointment with {client_name} starts at {start}.',
+        data={
+            'appointment_id': appointment.id,
+            'client_id': appointment.external_client_id,
+            'url': '/reporting/appointments',
+        },
+    )
+
+
+def notify_appointment_changed(appointment, changed_fields, previous_staff_id=None):
+    """Notify the old and new assigned staff member about schedule changes."""
+    from apps.accounts.models import User
+
+    recipient_ids = {uid for uid in (previous_staff_id, appointment.staff_id) if uid}
+    if not recipient_ids:
+        return
+    recipients = User.objects.filter(id__in=recipient_ids, organization_id=appointment.organization_id)
+    client_name = _client_display_name(appointment.external_client_id)
+    if appointment.status == 'cancelled':
+        title = 'Appointment cancelled'
+        body = f'The appointment with {client_name} has been cancelled.'
+    elif 'staff_id' in changed_fields:
+        title = 'Appointment assignment changed'
+        body = f'The staff assignment for your appointment with {client_name} has changed.'
+    else:
+        title = 'Appointment schedule changed'
+        body = f'The time or details for your appointment with {client_name} have changed.'
+    for recipient in recipients:
+        _create(
+            recipient_id=recipient.id,
+            event_type='appointment_changed',
+            title=title,
+            body=body,
+            data={
+                'appointment_id': appointment.id,
+                'client_id': appointment.external_client_id,
+                'url': '/reporting/appointments',
+            },
+        )
 
 
 def notify_session_attachment_added(media):

@@ -42,6 +42,7 @@ class Appointment(TenantAwareModel):
     notes = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.SCHEDULED)
     synced_at = models.DateTimeField(null=True, blank=True)
+    reminder_sent_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
     session_title = models.CharField(max_length=255, blank=True)
     external_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
@@ -215,6 +216,7 @@ class TrialEvent(OrganizationScopedMixin):
     value_seconds = models.FloatField(null=True, blank=True)
     recorded_at = models.DateTimeField(db_index=True)
     staff_notes = models.TextField(blank=True)
+    client_event_id = models.CharField(max_length=64, null=True, blank=True)
 
     def _derive_organization_id(self) -> int | None:
         return self.session_run.organization_id
@@ -223,6 +225,10 @@ class TrialEvent(OrganizationScopedMixin):
         app_label = 'dcm_sessions'
         ordering = ['target_id', 'trial_number']
         unique_together = [['session_run', 'target_id', 'trial_number', 'sub_item_key']]
+        constraints = [models.UniqueConstraint(
+            fields=['session_run', 'client_event_id'], condition=models.Q(client_event_id__isnull=False),
+            name='unique_trial_session_client_event_id',
+        )]
 
     def __str__(self) -> str:
         return f'Trial {self.trial_number} — target {self.target_id} [{self.prompt_level_label}]'

@@ -1,5 +1,6 @@
 import environ
 from pathlib import Path
+from celery.schedules import crontab
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
@@ -183,6 +184,12 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = 'UTC'
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes max per task
+CELERY_BEAT_SCHEDULE = {
+    'upcoming-appointment-reminders': {
+        'task': 'apps.notifications.tasks.send_upcoming_appointment_reminders',
+        'schedule': crontab(minute='*/5'),
+    },
+}
 
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'

@@ -183,6 +183,7 @@ class SessionRejectRequest(Schema):
 # ---------------------------------------------------------------------------
 
 class TrialEventSchema(Schema):
+    client_event_id: str | None = None
     id: int
     session_run_id: int
     target_id: int
@@ -197,6 +198,7 @@ class TrialEventSchema(Schema):
 
 
 class TrialEventCreateRequest(Schema):
+    client_event_id: str | None = Field(default=None, min_length=1, max_length=64)
     target_id: int
     target_name: str
     trial_number: int

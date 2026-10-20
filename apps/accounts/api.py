@@ -22,7 +22,7 @@ from django.db import transaction
 from django.db.models import Q
 
 from . import mfa
-from .models import PasswordSetLink, User, UserMFA
+from .models import PasswordResetLink, PasswordSetLink, User, UserMFA
 from .auth import (
     create_access_token, create_refresh_token, decode_token, is_token_blocked,
     jwt_auth, jwt_auth_any_role, token_tenant_mismatch,
@@ -53,6 +53,10 @@ from .schemas import (
     PasswordSetLinkGenerateResponse,
     PasswordSetLinkInfoResponse,
     PasswordSetLinkSubmitRequest,
+    ForgotPasswordRequest,
+    ForgotPasswordResponse,
+    PasswordResetLinkInfoResponse,
+    PasswordResetConfirmRequest,
     StaffSchema,
     PinStatusResponse,
     SetPinRequest,
@@ -79,6 +83,13 @@ from apps.integrations.tpms_auth_client import (
 
 
 _CLIENT_ACCOUNT_TYPES = {'client', 'patient'}
+
+# Self-service password-reset link: how long a requested link stays valid,
+# and the minimum gap between two requests for the same account (mirrors
+# apps.accounts.mfa.EMAIL_OTP_RESEND_COOLDOWN_SECONDS) so the request
+# endpoint can't be used to spam a mailbox.
+PASSWORD_RESET_LINK_TTL = timedelta(hours=1)
+PASSWORD_RESET_RESEND_COOLDOWN_SECONDS = 60
 
 router = Router()
 
@@ -358,8 +369,8 @@ def set_my_pin(request, data: SetPinRequest):
         raise HttpError(400, 'PIN lock is not allowed by your organization.')
 
     pin = data.pin.strip()
-    if not (pin.isdigit() and len(pin) in (4, 6)):
-        raise HttpError(400, 'PIN must be exactly 4 or 6 digits.')
+    if not (pin.isdigit() and len(pin) == 4):
+        raise HttpError(400, 'PIN must be exactly 4 digits.')
 
     user = request.user
     if user.has_pin and data.current_pin is not None:
@@ -1220,6 +1231,84 @@ def get_password_set_link(request, token: str):
     if link is None:
         raise HttpError(404, 'This link is invalid or has expired')
     return PasswordSetLinkInfoResponse(
+        first_name=link.user.first_name,
+        email_masked=mfa.mask_email(link.user.email),
+        expires_at=link.expires_at,
+    )
+
+
+@router.post('/password-reset/request', response=ForgotPasswordResponse, auth=None)
+def request_password_reset(request, data: ForgotPasswordRequest):
+    """Public, self-service counterpart to generate_password_set_link above
+    — the "forgot password" link on the login page. Always returns the same
+    generic message regardless of whether the email matches an account, so
+    this can't be used to enumerate registered emails. Caregiver/client-
+    portal accounts are excluded, same as login() above — they authenticate
+    through TherapyPMS, not a DCM password."""
+    generic = ForgotPasswordResponse(
+        detail='If an account exists for that email, a password reset link has been sent.'
+    )
+
+    user = User.objects.filter(email__iexact=data.email, is_active=True).exclude(role=User.Role.CAREGIVER).first()
+    if user is None:
+        return generic
+
+    recent = PasswordResetLink.objects.filter(user=user).order_by('-created_at').first()
+    if recent and (timezone.now() - recent.created_at).total_seconds() < PASSWORD_RESET_RESEND_COOLDOWN_SECONDS:
+        return generic
+
+    link, raw_token = PasswordResetLink.generate(user, expires_at=timezone.now() + PASSWORD_RESET_LINK_TTL)
+    base_url = getattr(settings, 'FRONTEND_BASE_URL', '').rstrip('/')
+    url = f'{base_url}/reset-password?token={raw_token}'
+    from apps.notifications.service import send_password_reset_email
+    send_password_reset_email(user.email, user.first_name, url, link.expires_at)
+    return generic
+
+
+@router.post('/password-reset/confirm', response=LoginResponse, auth=None)
+def confirm_password_reset(request, data: PasswordResetConfirmRequest):
+    """Registered before GET /password-reset/{token} below — same route-
+    ordering reason as submit_password_set_link vs. get_password_set_link
+    above (the {token} converter would otherwise swallow "confirm")."""
+    tenant = getattr(request, 'tenant', None)
+    if tenant is None:
+        raise HttpError(401, 'Invalid or expired link')
+    if data.password != data.password_confirm:
+        raise HttpError(400, 'Passwords do not match')
+
+    if not data.token.startswith('pwr_'):
+        raise HttpError(404, 'This link is invalid or has expired')
+    token_hash = hashlib.sha256(data.token.encode()).hexdigest()
+
+    with transaction.atomic():
+        # select_for_update + a fresh used_at/expires_at check inside the
+        # transaction, not just PasswordResetLink.verify() up front — so two
+        # concurrent requests for the same token can't both pass the check
+        # and both consume it.
+        link = (
+            PasswordResetLink.objects.select_for_update()
+            .select_related('user')
+            .filter(token_hash=token_hash)
+            .first()
+        )
+        if link is None or link.used_at is not None or link.expires_at < timezone.now():
+            raise HttpError(404, 'This link is invalid or has expired')
+
+        user = link.user
+        user.set_password(data.password)
+        user.save(update_fields=['password'])
+        link.used_at = timezone.now()
+        link.save(update_fields=['used_at'])
+
+    return _mfa_gate(tenant, _issue_tokens(user, tenant.pk))
+
+
+@router.get('/password-reset/{token}', response=PasswordResetLinkInfoResponse, auth=None)
+def get_password_reset_link(request, token: str):
+    link = PasswordResetLink.verify(token)
+    if link is None:
+        raise HttpError(404, 'This link is invalid or has expired')
+    return PasswordResetLinkInfoResponse(
         first_name=link.user.first_name,
         email_masked=mfa.mask_email(link.user.email),
         expires_at=link.expires_at,
