@@ -105,10 +105,15 @@ celery -A config beat --loglevel=info
 - **APIs and Login**: Real-time staff/admin logins are routed through legacy table lookups using bcrypt.
 
 Admin integrations are scoped to a mapped facility within the current organization.
-Use `facility_admin_id=<TherapyPMS practice admin ID>` on the integration settings,
-connect, disconnect, pull, and pull-job list endpoints. Settings without a selection
-return the facility list; mutations require a selection when several facilities are
-mapped. A single facility remains the default for older callers.
+The integrations page has no facility selector. POST admin credentials to the
+connect endpoint; TherapyPMS's login response identifies the facility, and the
+response returns its connection settings (HTTP 200). The facility must already be
+mapped to this organization. Settings resolve the current user's TherapyPMS
+practice ID, a matching connection email, or the organization's sole facility.
+The page remembers an automatically detected facility for the current user in the
+browser session and passes its `facility_admin_id` to disconnect, pull, and history
+requests. An optional ID on connect is checked against the login response for
+older callers; it never overrides the returned TherapyPMS facility ID.
 
 Credentials are encrypted on `OrganizationTpmsAdminId`, and cached tokens include
 both organization and facility IDs. Each queued pull records `facility_admin_id`

@@ -54,6 +54,23 @@ def _organization(request) -> Organization:
     return tenant
 
 
+def _default_integration_facility(request):
+    org = _organization(request)
+    facilities = org.tpms_admin_ids.all()
+    login_admin_id = getattr(request.user, 'external_admin_id', None)
+    if isinstance(login_admin_id, int):
+        return facilities.filter(admin_id=login_admin_id).first()
+    email = getattr(request.user, 'email', None)
+    if isinstance(email, str) and email:
+        matches = list(facilities.filter(integration_email__iexact=email)[:2])
+        if len(matches) == 1:
+            return matches[0]
+    candidates = list(facilities[:2])
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
 def _integration_connection(request, facility_admin_id: int | None = None):
     from apps.integrations.tpms_pull import FacilityConnection
     org = _organization(request)
@@ -63,10 +80,9 @@ def _integration_connection(request, facility_admin_id: int | None = None):
         if facility is None:
             raise HttpError(404, 'Facility not found in this organization')
     else:
-        candidates = list(facilities[:2])
-        if len(candidates) != 1:
-            raise HttpError(400, 'Select a facility before managing its TherapyPMS connection.')
-        facility = candidates[0]
+        facility = _default_integration_facility(request)
+        if facility is None:
+            raise HttpError(400, 'Connect with your TherapyPMS admin credentials to identify the facility.')
     return FacilityConnection(org, facility)
 
 
@@ -340,7 +356,7 @@ def get_integration_settings(request, facility_admin_id: int | None = None):
     org = _organization(request)
     facilities = list(org.tpms_admin_ids.all())
     connection = None
-    if facility_admin_id is not None or len(facilities) == 1:
+    if facility_admin_id is not None or _default_integration_facility(request) is not None:
         connection = _integration_connection(request, facility_admin_id)
     return {
         'integration_platform': connection.integration_platform if connection else '',
@@ -370,20 +386,20 @@ def update_integration_settings(request, data: OrganizationIntegrationSettingsUp
     return get_integration_settings(request, org.facility.admin_id)
 
 
-@router.post('/settings/integrations/therapy-pms/connect', response={204: None})
+@router.post('/settings/integrations/therapy-pms/connect', response=OrganizationIntegrationSettingsSchema)
 def connect_therapy_pms(request, data: TherapyPmsConnectRequest, facility_admin_id: int | None = None):
     """Verify TherapyPMS admin credentials, bind this org to that practice, and
     store encrypted credentials for later Pull sync. The password is never
     returned to the client."""
     _require_manager(request)
-    from apps.integrations.tpms_pull import bind_therapy_pms_connection
+    from apps.integrations.tpms_pull import connect_facility_from_login
 
     if not data.email.strip() or not data.password:
         raise HttpError(400, 'Email and password are required.')
 
-    org = _integration_connection(request, facility_admin_id)
-    bind_therapy_pms_connection(org, data.email.strip(), data.password)
-    return 204, None
+    org = _organization(request)
+    connection = connect_facility_from_login(org, data.email.strip(), data.password, facility_admin_id)
+    return get_integration_settings(request, connection.facility.admin_id)
 
 
 @router.post('/settings/integrations/disconnect', response={204: None})

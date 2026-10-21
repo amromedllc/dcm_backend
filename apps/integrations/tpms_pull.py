@@ -210,9 +210,14 @@ def bind_therapy_pms_connection(org: Organization, email: str, password: str) ->
 
     Returns the bound TPMS admin_id.
     """
+    session = _authenticate_admin_session(email, password)
+    return _bind_admin_session(org, email, password, session)
+
+
+def _authenticate_admin_session(email: str, password: str):
     try:
         payload = authenticate_admin_raw(email, password)
-        session = normalize_admin_login_payload(email, payload)
+        return normalize_admin_login_payload(email, payload)
     except TpmsAuthError as exc:
         raise HttpError(
             400,
@@ -220,6 +225,20 @@ def bind_therapy_pms_connection(org: Organization, email: str, password: str) ->
             'If the problem persists, please contact TherapyPMS support.',
         ) from exc
 
+
+def connect_facility_from_login(org: Organization, email: str, password: str, expected_admin_id: int | None = None):
+    session = _authenticate_admin_session(email, password)
+    if expected_admin_id is not None and expected_admin_id != session.admin_id:
+        raise HttpError(400, 'These TherapyPMS credentials belong to a different facility.')
+    facility = org.tpms_admin_ids.filter(admin_id=session.admin_id).first()
+    if facility is None:
+        raise HttpError(400, 'The facility returned by TherapyPMS is not mapped to this organization. Ask a Progressly superadmin to map it.')
+    connection = FacilityConnection(org, facility)
+    _bind_admin_session(connection, email, password, session)
+    return connection
+
+
+def _bind_admin_session(org, email: str, password: str, session) -> int:
     mapped = _org_practice_ids(org)
     if not mapped:
         raise HttpError(

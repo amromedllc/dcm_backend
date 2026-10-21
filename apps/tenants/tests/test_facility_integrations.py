@@ -99,6 +99,35 @@ class FacilityIntegrationTests(TestCase):
         with self.assertRaises(HttpError):
             disconnect_integration(self.request)
 
+    def test_connect_detects_facility_from_therapypms_login(self):
+        with (
+            mock.patch('apps.integrations.tpms_pull.authenticate_admin_raw', return_value={
+                'status': 'success', 'id': 702, 'email': 'south@example.com', 'access_token': 'south-token',
+            }) as login,
+            mock.patch('apps.integrations.tpms_pull.store_org_tpms_admin_token'),
+        ):
+            result = connect_therapy_pms(self.request, TherapyPmsConnectRequest(email='south@example.com', password='secret'))
+        login.assert_called_once_with('south@example.com', 'secret')
+        self.assertEqual(result['facility_admin_id'], 702)
+        self.a.refresh_from_db()
+        self.b.refresh_from_db()
+        self.assertEqual(self.a.integration_platform, '')
+        self.assertEqual(self.b.integration_platform, 'therapy_pms')
+
+    def test_settings_resolve_facility_from_progressly_user_login(self):
+        self.request.user.external_admin_id = 702
+        self.assertEqual(get_integration_settings(self.request)['facility_admin_id'], 702)
+
+    def test_auto_detect_does_not_connect_an_unmapped_facility(self):
+        with (
+            mock.patch('apps.integrations.tpms_pull.authenticate_admin_raw', return_value={
+                'status': 'success', 'id': 999, 'email': 'other@example.com', 'access_token': 'other-token',
+            }),
+            self.assertRaises(HttpError),
+        ):
+            connect_therapy_pms(self.request, TherapyPmsConnectRequest(email='other@example.com', password='secret'))
+        self.assertFalse(self.org.tpms_admin_ids.exclude(integration_platform='').exists())
+
     def test_settings_list_facilities_without_secrets(self):
         self.connect(701, 'north@example.com', 'north-secret')
         result = get_integration_settings(self.request)
@@ -147,7 +176,8 @@ class FacilityIntegrationTests(TestCase):
                 (701, 'north@example.com', 'north-secret'),
                 (702, 'south@example.com', 'south-secret'),
             ):
-                connect_therapy_pms(self.request, TherapyPmsConnectRequest(email=email, password=password), admin_id)
+                result = connect_therapy_pms(self.request, TherapyPmsConnectRequest(email=email, password=password))
+                self.assertEqual(result['facility_admin_id'], admin_id)
                 facility = self.org.tpms_admin_ids.get(admin_id=admin_id)
                 token = _admin_access_token(FacilityConnection(self.org, facility))
                 self.assertEqual(token, f'token-{admin_id}')
