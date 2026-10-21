@@ -429,6 +429,12 @@ def _map_admin_provider(row: dict[str, Any], *, practice_admin_id: int, org_id: 
     employee_type = str(employee_type) if employee_type is not None else None
     is_admin = str(_dig(row, 'is_admin', 'isAdmin') or '').lower() in {'1', 'true', 'yes'}
     role = _tpms_role_for_employee_type(employee_type, is_admin=is_admin)
+    if 'provider_type' in row:
+        role = (
+            User.Role.SUPERVISOR
+            if str(row['provider_type']).strip().lower() == 'supervisor'
+            else User.Role.STAFF
+        )
 
     active_raw = _dig(row, 'is_active', 'is_staff_active', 'active', 'account_status')
     if active_raw is None:
@@ -533,7 +539,7 @@ def pull_providers(org: Organization) -> PullResult:
                 user_changed = True
             else:
                 update_fields: list[str] = []
-                for attr in ('first_name', 'last_name', 'is_active'):
+                for attr in ('first_name', 'last_name', 'is_active', 'role'):
                     if getattr(user, attr) != fields[attr]:
                         setattr(user, attr, fields[attr])
                         update_fields.append(attr)
