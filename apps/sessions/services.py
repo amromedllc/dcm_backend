@@ -251,7 +251,7 @@ def _assert_editable(session_run) -> None:
         raise HttpError(409, f'Session is {session_run.status} and cannot be modified')
 
 
-def submit_session(session_run, staff_user) -> tuple[list, list]:
+def submit_session(session_run, staff_user, service_address=None) -> tuple[list, list]:
     """Move a session from open → submitted, then evaluate target workflow
     advancement and prompt-level fading.
 
@@ -274,11 +274,23 @@ def submit_session(session_run, staff_user) -> tuple[list, list]:
     if note and note.docuseal_template_id and not note.docuseal_completed_at:
         raise HttpError(409, 'Session Note must be completed before submitting')
 
+    from pydantic import ValidationError
+    from .schemas import ServiceAddress
+
+    if session_run.service_setting in ('Home', 'Office', 'School', 'Community'):
+        try:
+            address = ServiceAddress.model_validate(service_address or session_run.service_address)
+        except ValidationError as exc:
+            raise HttpError(400, 'A complete US service address (street, city, state, and ZIP code) is required before submitting this session.') from exc
+        session_run.service_address = address.model_dump()
+    else:
+        session_run.service_address = {}
+
     auto_approve = staff_user.role in ('admin', 'supervisor')
     now = timezone.now()
     session_run.submitted_at = now
     session_run.ended_at = session_run.ended_at or now
-    update_fields = ['submitted_at', 'ended_at', 'status']
+    update_fields = ['submitted_at', 'ended_at', 'status', 'service_address']
     if auto_approve:
         session_run.status = session_run.Status.APPROVED
         session_run.reviewed_by = staff_user

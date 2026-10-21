@@ -500,6 +500,7 @@ def _serialize_session(
         'status': session.status,
         'entry_method': session.entry_method,
         'service_setting': session.service_setting,
+        'service_address': session.service_address,
         'started_at': session.started_at,
         'start_latitude': session.start_latitude,
         'start_longitude': session.start_longitude,
@@ -1429,7 +1430,7 @@ def submit(request, session_id: int, data: SessionSubmitRequest):
     session = _require_recording_access(request, session_id)
     if data.ended_at and session.entry_method != SessionRun.EntryMethod.MANUAL:
         session.ended_at = data.ended_at
-    advanced, faded = submit_session(session, request.user)
+    advanced, faded = submit_session(session, request.user, service_address=data.service_address)
     return {
         'session': _serialize_session(session),
         'advanced_targets': [
@@ -1526,7 +1527,7 @@ def sync_session(request, session_id: int, data: SessionSyncPayload):
 
     submitted = False
     if data.submit_after_sync:
-        submit_session(session, request.user)
+        submit_session(session, request.user, service_address=data.service_address)
         submitted = True
 
     return SessionSyncResult(

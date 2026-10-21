@@ -138,6 +138,15 @@ Apply migration `dcm_sessions.0019_session_service_setting` before deploying.
 Existing sessions and trials retain an empty setting; older API clients may
 omit the field. The web creation dialogs require an explicit selection.
 
+Before submitting a Home, Office, School, or Community session, send
+`service_address` with `street`, optional `unit`, `city`, two-letter US `state`,
+`zip_code` (five digits or ZIP+4), and `country: "US"`. Both
+`POST /sessions/{id}/submit` and batch sync with `submit_after_sync: true`
+enforce this requirement. The address is saved on the session and returned
+as `service_address`. Telehealth is online, and Other needs no address.
+Legacy sessions without a setting can still be submitted without an address.
+Apply migration `dcm_sessions.0020_sessionrun_service_address` before deploying.
+
 ## Web offline recording event IDs
 
 `POST /sessions/{id}/trials` now accepts an optional nonempty

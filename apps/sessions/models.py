@@ -152,6 +152,7 @@ class SessionRun(TenantAwareModel):
         TELEHEALTH = 'Telehealth', 'Telehealth'
 
     service_setting = models.CharField(max_length=20, choices=ServiceSetting.choices, blank=True, default='')
+    service_address = models.JSONField(default=dict, blank=True)
     session_name = models.CharField(max_length=160, blank=True)
     message_to_therapist = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN, db_index=True)
