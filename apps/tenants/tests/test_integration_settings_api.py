@@ -9,7 +9,7 @@ from ninja.errors import HttpError
 from apps.accounts.models import User
 from apps.clients.models import Client
 from apps.integrations.tpms_auth_client import TpmsAuthError
-from apps.integrations.tpms_pull import PullResult, pull_clients, pull_providers
+from apps.integrations.tpms_pull import pull_appointments, pull_clients, pull_providers
 from apps.sessions.models import Appointment
 from apps.tenants.api import (
     connect_therapy_pms,
@@ -85,13 +85,13 @@ class IntegrationSettingsApiTests(TestCase):
                     self._request(),
                     TherapyPmsConnectRequest(email='a@b.com', password='right'),
                 )
-        org = Organization.objects.get(pk=self.org.pk)
+        org = OrganizationTpmsAdminId.objects.get(organization=self.org, admin_id=42)
         self.assertEqual(org.integration_platform, 'therapy_pms')
         self.assertEqual(org.integration_email, 'a@b.com')
         self.assertEqual(org.integration_admin_id, 42)
         self.assertTrue(org.integration_password_encrypted)
         self.assertNotIn('right', org.integration_password_encrypted)
-        store_token.assert_called_once_with(org.id, 'admin-token-abc')
+        store_token.assert_called_once_with(f'{self.org.id}:facility:42', 'admin-token-abc')
 
     def test_disconnect_clears_the_platform_and_credentials(self):
         with _patch_admin_login():
@@ -102,12 +102,12 @@ class IntegrationSettingsApiTests(TestCase):
                 )
         with mock.patch('apps.integrations.tpms_pull.clear_org_tpms_admin_token') as clear_token:
             disconnect_integration(self._request())
-        org = Organization.objects.get(pk=self.org.pk)
+        org = OrganizationTpmsAdminId.objects.get(organization=self.org, admin_id=42)
         self.assertEqual(org.integration_platform, '')
         self.assertEqual(org.integration_email, '')
         self.assertEqual(org.integration_password_encrypted, '')
         self.assertIsNone(org.integration_admin_id)
-        clear_token.assert_called_once_with(org.id)
+        clear_token.assert_called_once_with(f'{self.org.id}:facility:42')
 
 
 class TherapyPmsPullIsolationTests(TestCase):
@@ -125,6 +125,12 @@ class TherapyPmsPullIsolationTests(TestCase):
         self.org.integration_password_encrypted = encrypt_password('secret')
         self.org.integration_admin_id = 42
         self.org.save()
+        OrganizationTpmsAdminId.objects.filter(organization=self.org, admin_id=42).update(
+            integration_platform=self.org.integration_platform,
+            integration_email=self.org.integration_email,
+            integration_password_encrypted=self.org.integration_password_encrypted,
+            integration_admin_id=42,
+        )
 
     def _request(self):
         return SimpleNamespace(user=self.admin, tenant=self.org)
@@ -237,16 +243,10 @@ class TherapyPmsPullIsolationTests(TestCase):
         with self._connect_mocks():
             with mock.patch('apps.integrations.tpms_pull.admin_list_appointments', return_value=rows):
                 with schema_context(self.org.schema_name), tenant_context(self.org.id):
-                    result = pull_therapy_pms_appointments(
-                        self._request(),
-                        TherapyPmsPullAppointmentsRequest(
-                            from_date=date(2026, 9, 1),
-                            to_date=date(2026, 9, 30),
-                        ),
-                    )
+                    result = pull_appointments(self.org, from_date=date(2026, 9, 1), to_date=date(2026, 9, 30))
 
-        self.assertEqual(result['created'], 1)
-        self.assertEqual(result['skipped'], 1)
+        self.assertEqual(result.created, 1)
+        self.assertEqual(result.skipped, 1)
         with schema_context(self.org.schema_name), tenant_context(self.org.id):
             appts = list(Appointment.objects.all())
         self.assertEqual(len(appts), 1)
@@ -259,17 +259,15 @@ class TherapyPmsPullIsolationTests(TestCase):
     def test_pull_clients_endpoint_requires_connection(self):
         self.org.integration_platform = ''
         self.org.save(update_fields=['integration_platform'])
+        OrganizationTpmsAdminId.objects.filter(organization=self.org).update(integration_platform='')
         with self.assertRaises(HttpError) as ctx:
             pull_therapy_pms_clients(self._request())
         self.assertEqual(ctx.exception.status_code, 400)
 
     def test_pull_providers_endpoint_wired(self):
-        with self._connect_mocks():
-            with mock.patch(
-                'apps.integrations.tpms_pull.pull_providers',
-                return_value=PullResult(created=2, updated=1),
-            ) as mocked:
-                result = pull_therapy_pms_providers(self._request())
-        mocked.assert_called_once()
-        self.assertEqual(result['created'], 2)
-        self.assertEqual(result['updated'], 1)
+        with schema_context(self.org.schema_name), tenant_context(self.org.id):
+            with mock.patch('apps.integrations.tasks.run_pull_job.delay') as queued:
+                status, job = pull_therapy_pms_providers(self._request())
+            self.assertEqual(status, 202)
+            self.assertEqual(job.params['facility_admin_id'], 42)
+            queued.assert_called_once_with(job_id=job.id, org_id=self.org.id)

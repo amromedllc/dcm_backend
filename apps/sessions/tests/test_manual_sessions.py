@@ -12,7 +12,8 @@ from ninja.errors import HttpError
 from apps.accounts.models import RolePermission, User
 from apps.sessions import api as sessions_api
 from apps.sessions.models import SessionRun, TrialEvent
-from apps.sessions.schemas import SessionStartRequest, TrialEventCreateRequest
+from apps.sessions.schemas import SessionStartRequest, SessionSyncPayload, TrialEventCreateRequest, TrialEventSchema
+from pydantic import ValidationError
 from apps.tenants.models import Organization
 from shared.tenancy import tenant_context
 
@@ -65,6 +66,53 @@ class ManualSessionTests(TestCase):
             row = SessionRun.objects.get(pk=session['id'])
         self.assertEqual(row.entry_method, SessionRun.EntryMethod.LIVE)
         self.assertIsNone(row.ended_at)
+
+    def test_service_setting_is_saved_and_inherited_by_live_and_manual_trials(self):
+        schema, tenant = self._in_tenant()
+        with schema, tenant:
+            for manual in (False, True):
+                for setting in SessionRun.ServiceSetting.values:
+                    with self.subTest(manual=manual, setting=setting):
+                        if manual:
+                            _, session = self._start_manual(service_setting=setting)
+                        else:
+                            _, session = sessions_api.start_session(
+                                self._request(), SessionStartRequest(client_id=CLIENT_ID, service_setting=setting),
+                            )
+                        row = SessionRun.objects.get(pk=session['id'])
+                        self.assertEqual(row.service_setting, setting)
+                        self.assertEqual(session['service_setting'], setting)
+                        payload = TrialEventCreateRequest(
+                            target_id=5, target_name='T', trial_number=1, response_score=1,
+                            prompt_level_label='Independent', recorded_at=row.started_at,
+                            client_event_id='setting-trial',
+                        )
+                        _, trial = sessions_api.add_trial(self._request(), row.id, payload)
+                        trial.refresh_from_db()
+                        self.assertEqual(trial.service_setting, setting)
+                        self.assertEqual(TrialEventSchema.from_orm(trial).service_setting, setting)
+                        _, retried = sessions_api.add_trial(self._request(), row.id, payload)
+                        self.assertEqual(retried.id, trial.id)
+
+    def test_synced_trials_inherit_session_setting(self):
+        schema, tenant = self._in_tenant()
+        with schema, tenant:
+            for client_event_id in (None, 'synced-setting-trial'):
+                _, session = self._start_manual(service_setting='School')
+                payload = TrialEventCreateRequest(
+                    target_id=5, target_name='T', trial_number=1, response_score=1,
+                    prompt_level_label='Independent', recorded_at=self.now - timedelta(hours=2),
+                    client_event_id=client_event_id,
+                )
+                sync = SessionSyncPayload(trials=[payload])
+                sessions_api.sync_session(self._request(), session['id'], sync)
+                sessions_api.sync_session(self._request(), session['id'], sync)
+                trial = TrialEvent.objects.get(session_run_id=session['id'])
+                self.assertEqual(trial.service_setting, 'School')
+
+    def test_invalid_service_setting_is_rejected(self):
+        with self.assertRaises(ValidationError):
+            SessionStartRequest(client_id=CLIENT_ID, service_setting='Invalid')
 
     def test_window_validation(self):
         schema, tenant = self._in_tenant()

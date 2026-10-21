@@ -111,11 +111,11 @@ def clear_tpms_access_token(user_id: int) -> None:
     _redis().delete(_tpms_token_key(user_id))
 
 
-def _org_admin_token_key(org_id: int) -> str:
+def _org_admin_token_key(org_id: int | str) -> str:
     return f'dcm:tpms:org-admin-token:{org_id}'
 
 
-def store_org_tpms_admin_token(org_id: int, token: str) -> None:
+def store_org_tpms_admin_token(org_id: int | str, token: str) -> None:
     """Cache the practice-admin Bearer token used for Integrations Pull."""
     raw = _normalize_bearer_token(token)
     if not raw:
@@ -124,12 +124,12 @@ def store_org_tpms_admin_token(org_id: int, token: str) -> None:
     _redis().setex(_org_admin_token_key(org_id), ttl, raw)
 
 
-def get_org_tpms_admin_token(org_id: int) -> str | None:
+def get_org_tpms_admin_token(org_id: int | str) -> str | None:
     value = _redis().get(_org_admin_token_key(org_id))
     return value if isinstance(value, str) and value else None
 
 
-def clear_org_tpms_admin_token(org_id: int) -> None:
+def clear_org_tpms_admin_token(org_id: int | str) -> None:
     _redis().delete(_org_admin_token_key(org_id))
 
 

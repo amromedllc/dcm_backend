@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 from ninja import Schema
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from shared.schema_types import NonEmptyStr
 from .models import BehaviorEvent
@@ -74,6 +74,31 @@ class AppointmentUpdateRequest(Schema):
 # Session
 # ---------------------------------------------------------------------------
 
+US_STATE_CODES = frozenset('AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY AS GU MP PR VI'.split())
+
+
+class ServiceAddress(Schema):
+    street: str = Field(min_length=1, max_length=200)
+    unit: str = Field(default='', max_length=100)
+    city: str = Field(min_length=1, max_length=100)
+    state: str
+    zip_code: str = Field(pattern=r'^[0-9]{5}(-[0-9]{4})?$')
+    country: Literal['US'] = 'US'
+
+    @field_validator('street', 'unit', 'city', 'state', 'zip_code', mode='before')
+    @classmethod
+    def strip_address_value(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator('state')
+    @classmethod
+    def validate_state(cls, value):
+        value = value.upper()
+        if value not in US_STATE_CODES:
+            raise ValueError('Select a valid US state or territory')
+        return value
+
+
 class TrialSummaryItem(Schema):
     target_id: int
     target_name: str
@@ -86,6 +111,8 @@ class TrialSummaryItem(Schema):
 
 
 class SessionRunSchema(Schema):
+    service_address: dict[str, Any] = Field(default_factory=dict)
+    service_setting: str = ''
     id: int
     client_id: int
     staff_id: int | None
@@ -128,6 +155,7 @@ class GroupSessionClientSelection(Schema):
 
 
 class GroupSessionStartRequest(Schema):
+    service_setting: Literal['Home', 'Office', 'School', 'Community', 'Other', 'Telehealth', ''] = ''
     clients: list[GroupSessionClientSelection]
     title: str = ''
     latitude: float | None = None
@@ -135,6 +163,7 @@ class GroupSessionStartRequest(Schema):
 
 
 class SessionStartRequest(Schema):
+    service_setting: Literal['Home', 'Office', 'School', 'Community', 'Other', 'Telehealth', ''] = ''
     client_id: int
     appointment_id: int | None = None
     external_appointment_id: str | None = None
@@ -153,6 +182,7 @@ class SessionLinkAppointmentRequest(Schema):
 
 
 class SessionSubmitRequest(Schema):
+    service_address: ServiceAddress | None = None
     ended_at: datetime | None = None
 
 
@@ -183,6 +213,7 @@ class SessionRejectRequest(Schema):
 # ---------------------------------------------------------------------------
 
 class TrialEventSchema(Schema):
+    service_setting: str = ''
     client_event_id: str | None = None
     id: int
     session_run_id: int
@@ -387,6 +418,7 @@ class SessionSyncPayload(Schema):
     All events are submitted in a single request when connectivity is restored.
     The API creates any events not already present (idempotent on trial_number per target).
     """
+    service_address: ServiceAddress | None = None
     ended_at: datetime | None = None
     trials: list[TrialEventCreateRequest] = []
     behaviors: list[BehaviorEventCreateRequest] = []

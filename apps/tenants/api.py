@@ -54,6 +54,38 @@ def _organization(request) -> Organization:
     return tenant
 
 
+def _default_integration_facility(request):
+    org = _organization(request)
+    facilities = org.tpms_admin_ids.all()
+    login_admin_id = getattr(request.user, 'external_admin_id', None)
+    if isinstance(login_admin_id, int):
+        return facilities.filter(admin_id=login_admin_id).first()
+    email = getattr(request.user, 'email', None)
+    if isinstance(email, str) and email:
+        matches = list(facilities.filter(integration_email__iexact=email)[:2])
+        if len(matches) == 1:
+            return matches[0]
+    candidates = list(facilities[:2])
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _integration_connection(request, facility_admin_id: int | None = None):
+    from apps.integrations.tpms_pull import FacilityConnection
+    org = _organization(request)
+    facilities = org.tpms_admin_ids.all()
+    if facility_admin_id is not None:
+        facility = facilities.filter(admin_id=facility_admin_id).first()
+        if facility is None:
+            raise HttpError(404, 'Facility not found in this organization')
+    else:
+        facility = _default_integration_facility(request)
+        if facility is None:
+            raise HttpError(400, 'Connect with your TherapyPMS admin credentials to identify the facility.')
+    return FacilityConnection(org, facility)
+
+
 def _normalize_slug(value: str) -> str:
     slug = re.sub(r'[^a-z0-9-]+', '-', value.lower().strip()).strip('-')
     if not slug:
@@ -319,16 +351,30 @@ def update_authentication_settings(request, data: OrganizationAuthenticationSett
 
 
 @router.get('/settings/integrations', response=OrganizationIntegrationSettingsSchema)
-def get_integration_settings(request):
+def get_integration_settings(request, facility_admin_id: int | None = None):
     _require_manager(request)
     org = _organization(request)
-    return {'integration_platform': org.integration_platform, 'organization_name': org.name}
+    facilities = list(org.tpms_admin_ids.all())
+    connection = None
+    if facility_admin_id is not None or _default_integration_facility(request) is not None:
+        connection = _integration_connection(request, facility_admin_id)
+    return {
+        'integration_platform': connection.integration_platform if connection else '',
+        'organization_name': org.name,
+        'facility_admin_id': connection.facility.admin_id if connection else None,
+        'integration_email': connection.integration_email if connection else '',
+        'facilities': [
+            {'admin_id': f.admin_id, 'facility_name': f.facility_name,
+             'connected': f.integration_platform == 'therapy_pms'}
+            for f in facilities
+        ],
+    }
 
 
 @router.patch('/settings/integrations', response=OrganizationIntegrationSettingsSchema)
-def update_integration_settings(request, data: OrganizationIntegrationSettingsUpdate):
+def update_integration_settings(request, data: OrganizationIntegrationSettingsUpdate, facility_admin_id: int | None = None):
     _require_manager(request)
-    org = _organization(request)
+    org = _integration_connection(request, facility_admin_id)
 
     if data.integration_platform is not None:
         valid_platforms = {choice.value for choice in Organization.IntegrationPlatform}
@@ -337,43 +383,46 @@ def update_integration_settings(request, data: OrganizationIntegrationSettingsUp
         org.integration_platform = data.integration_platform
         org.save(update_fields=['integration_platform', 'updated_at'])
 
-    return {'integration_platform': org.integration_platform, 'organization_name': org.name}
+    return get_integration_settings(request, org.facility.admin_id)
 
 
-@router.post('/settings/integrations/therapy-pms/connect', response={204: None})
-def connect_therapy_pms(request, data: TherapyPmsConnectRequest):
+@router.post('/settings/integrations/therapy-pms/connect', response=OrganizationIntegrationSettingsSchema)
+def connect_therapy_pms(request, data: TherapyPmsConnectRequest, facility_admin_id: int | None = None):
     """Verify TherapyPMS admin credentials, bind this org to that practice, and
     store encrypted credentials for later Pull sync. The password is never
     returned to the client."""
     _require_manager(request)
-    from apps.integrations.tpms_pull import bind_therapy_pms_connection
+    from apps.integrations.tpms_pull import connect_facility_from_login
 
     if not data.email.strip() or not data.password:
         raise HttpError(400, 'Email and password are required.')
 
     org = _organization(request)
-    bind_therapy_pms_connection(org, data.email.strip(), data.password)
-    return 204, None
+    connection = connect_facility_from_login(org, data.email.strip(), data.password, facility_admin_id)
+    return get_integration_settings(request, connection.facility.admin_id)
 
 
 @router.post('/settings/integrations/disconnect', response={204: None})
-def disconnect_integration(request):
+def disconnect_integration(request, facility_admin_id: int | None = None):
     _require_manager(request)
     from apps.integrations.tpms_pull import clear_therapy_pms_connection
 
-    org = _organization(request)
+    org = _integration_connection(request, facility_admin_id)
     clear_therapy_pms_connection(org)
     return 204, None
 
 
-def _dispatch_pull_job(request, job_type: str, params: dict) -> PullJob:
+def _dispatch_pull_job(request, job_type: str, params: dict, facility_admin_id: int | None = None) -> PullJob:
     """Creates a PullJob row and hands it to Celery. A pull (appointments
     especially, which can span years) used to run inline in this request and
     could exceed the web server's own timeout; it now returns immediately
     and the caller polls /pull-jobs/{id} for progress."""
     from apps.integrations.tasks import run_pull_job
 
-    org = _organization(request)
+    from apps.integrations.tpms_pull import _require_connected_org
+    org = _integration_connection(request, facility_admin_id)
+    _require_connected_org(org)
+    params = {**params, 'facility_admin_id': org.facility.admin_id}
     job = PullJob.objects.create(
         job_type=job_type,
         params=params,
@@ -411,27 +460,27 @@ def _expire_stale_job(job: PullJob) -> PullJob:
     '/settings/integrations/therapy-pms/pull/clients',
     response={202: PullJobSchema},
 )
-def pull_therapy_pms_clients(request):
+def pull_therapy_pms_clients(request, facility_admin_id: int | None = None):
     """Queue a background pull of clients from TherapyPMS into this org."""
     _require_manager(request)
-    return 202, _dispatch_pull_job(request, PullJob.JobType.CLIENTS, {})
+    return 202, _dispatch_pull_job(request, PullJob.JobType.CLIENTS, {}, facility_admin_id)
 
 
 @router.post(
     '/settings/integrations/therapy-pms/pull/providers',
     response={202: PullJobSchema},
 )
-def pull_therapy_pms_providers(request):
+def pull_therapy_pms_providers(request, facility_admin_id: int | None = None):
     """Queue a background pull of providers from TherapyPMS into this org's users."""
     _require_manager(request)
-    return 202, _dispatch_pull_job(request, PullJob.JobType.PROVIDERS, {})
+    return 202, _dispatch_pull_job(request, PullJob.JobType.PROVIDERS, {}, facility_admin_id)
 
 
 @router.post(
     '/settings/integrations/therapy-pms/pull/appointments',
     response={202: PullJobSchema},
 )
-def pull_therapy_pms_appointments(request, data: TherapyPmsPullAppointmentsRequest):
+def pull_therapy_pms_appointments(request, data: TherapyPmsPullAppointmentsRequest, facility_admin_id: int | None = None):
     """Queue a background pull of appointments/sessions for a date range.
     Chunked month-by-month inside the task, so a multi-year backfill (e.g.
     2022 to today) no longer needs to finish inside one HTTP request."""
@@ -444,7 +493,7 @@ def pull_therapy_pms_appointments(request, data: TherapyPmsPullAppointmentsReque
         'patient_ids': data.patient_ids,
         'staff_ids': data.staff_ids,
     }
-    return 202, _dispatch_pull_job(request, PullJob.JobType.APPOINTMENTS, params)
+    return 202, _dispatch_pull_job(request, PullJob.JobType.APPOINTMENTS, params, facility_admin_id)
 
 
 @router.get(
@@ -466,11 +515,14 @@ def get_pull_job(request, job_id: int):
     '/settings/integrations/pull-jobs',
     response=list[PullJobSchema],
 )
-def list_pull_jobs(request, job_type: str | None = None, limit: int = 5):
+def list_pull_jobs(request, job_type: str | None = None, limit: int = 5, facility_admin_id: int | None = None):
     """Most recent pull jobs for this org, optionally filtered by type — lets
     the admin UI resume showing an in-progress job after a page reload."""
     _require_manager(request)
     qs = PullJob.objects.all()
+    if facility_admin_id is not None:
+        _integration_connection(request, facility_admin_id)
+        qs = qs.filter(params__facility_admin_id=facility_admin_id)
     if job_type:
         qs = qs.filter(job_type=job_type)
     jobs = list(qs[:max(1, min(limit, 20))])

@@ -15,9 +15,18 @@ class OrganizationAuthenticationSettingsUpdate(Schema):
     pin_lock_allowed: bool | None = None
 
 
+class FacilityIntegrationSchema(Schema):
+    admin_id: int
+    facility_name: str
+    connected: bool
+
+
 class OrganizationIntegrationSettingsSchema(Schema):
     integration_platform: str
     organization_name: str
+    facility_admin_id: int | None = None
+    integration_email: str = ''
+    facilities: list[FacilityIntegrationSchema] = []
 
 
 class OrganizationIntegrationSettingsUpdate(Schema):
