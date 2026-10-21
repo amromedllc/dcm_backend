@@ -86,6 +86,13 @@ Background tasks (like generating notes PDF exports and behavior analytics graph
 celery -A config worker --loglevel=info
 ```
 
+The backend and worker must use the same Redis instance and database. When
+running the backend on the host with the Docker Compose worker, the worker
+defaults to `redis://host.docker.internal:6379/0`. If the backend uses another
+Redis endpoint, set `DCM_WORKER_REDIS_URL` to its Docker-accessible equivalent
+before starting Compose. After a broker change, recreate the worker with
+`docker compose up -d --no-deps worker` from the repository root.
+
 ### Running Celery Beat (Periodic Tasks)
 ```bash
 celery -A config beat --loglevel=info
@@ -96,6 +103,31 @@ celery -A config beat --loglevel=info
 ## 🤝 TherapyPMS Integration
 
 - **APIs and Login**: Real-time staff/admin logins are routed through legacy table lookups using bcrypt.
+
+Admin integrations are scoped to a mapped facility within the current organization.
+Use `facility_admin_id=<TherapyPMS practice admin ID>` on the integration settings,
+connect, disconnect, pull, and pull-job list endpoints. Settings without a selection
+return the facility list; mutations require a selection when several facilities are
+mapped. A single facility remains the default for older callers.
+
+Credentials are encrypted on `OrganizationTpmsAdminId`, and cached tokens include
+both organization and facility IDs. Each queued pull records `facility_admin_id`
+in its params, which the worker resolves within the job's organization. The worker
+rejects older jobs without a facility selection. Migration `0012` moves an existing
+organization connection to its matching facility. Apply it with
+`python manage.py migrate_schemas --shared`, then restart the Celery worker.
+
+To verify facility login and token refresh over real HTTP without contacting
+TherapyPMS, start the local fixture from this directory:
+
+```bash
+postman simulation run postman/simulations/therapypms-facilities.sim.yaml --port 4911
+DCM_TPMS_SIMULATION_URL=http://127.0.0.1:4911/therapypms python manage.py test apps.tenants.tests.test_facility_integrations
+```
+
+The fixture follows the repository's admin-login payload contract and uses fake
+credentials for two facilities. It is a local stand-in; live TherapyPMS verification
+still requires the facility's real credentials.
 
 
 ## 🧪 Running Tests

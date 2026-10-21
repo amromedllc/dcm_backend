@@ -8,7 +8,7 @@ request timeout. Progress is tracked on the PullJob row so the admin UI can
 poll it instead.
 """
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 from celery import shared_task
 from django.utils import timezone
@@ -60,6 +60,17 @@ def run_pull_job(self, job_id: int, org_id: int) -> None:
         job = None
         try:
             job = PullJob.objects.get(id=job_id)
+            if job.status != PullJob.Status.PENDING:
+                return
+            if timezone.now() - job.created_at > timedelta(minutes=3):
+                _mark_failed(job, 'Job timed out before worker picked it up. Please try again.')
+                return
+            facility_admin_id = job.params.get('facility_admin_id')
+            if facility_admin_id is None:
+                _mark_failed(job, 'Please start a new sync for the selected facility.')
+                return
+            facility = org.tpms_admin_ids.get(admin_id=facility_admin_id)
+            org = tpms_pull.FacilityConnection(org, facility)
             logger.info('Starting pull job %s (%s) for org %s', job_id, job.job_type, org_id)
             _mark_running(job)
             if job.job_type == PullJob.JobType.CLIENTS:

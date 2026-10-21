@@ -76,6 +76,11 @@ class OrganizationTpmsAdminId(models.Model):
     admin_id = models.IntegerField(unique=True, db_index=True)
     facility_name = models.CharField(max_length=200, blank=True)
     email_notifications_enabled = models.BooleanField(default=False)
+    integration_platform = models.CharField(max_length=30, blank=True, default='')
+    integration_email = models.EmailField(blank=True, default='')
+    integration_password_encrypted = models.TextField(blank=True, default='')
+    integration_admin_id = models.IntegerField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

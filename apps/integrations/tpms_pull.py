@@ -34,10 +34,42 @@ from apps.integrations.tpms_auth_client import (
 )
 from apps.integrations.tpms_credentials import decrypt_password, decrypt_ssn, encrypt_password, encrypt_ssn
 from apps.sessions.models import Appointment
-from apps.tenants.models import Organization
+from apps.tenants.models import Organization, OrganizationTpmsAdminId
 from shared.tenancy import current_org_id_or_none
 
 logger = logging.getLogger(__name__)
+
+
+class FacilityConnection:
+    """Use facility-owned credentials while retaining the parent org's data scope."""
+    _credential_fields = {
+        'integration_platform', 'integration_email',
+        'integration_password_encrypted', 'integration_admin_id', 'updated_at',
+    }
+
+    def __init__(self, org: Organization, facility: OrganizationTpmsAdminId):
+        if facility.organization_id != org.pk:
+            raise ValueError('Facility belongs to another organization')
+        self.org = org
+        self.facility = facility
+
+    def __getattr__(self, name):
+        return getattr(self.facility if name in self._credential_fields else self.org, name)
+
+    def __setattr__(self, name, value):
+        if name in self._credential_fields:
+            setattr(self.facility, name, value)
+        else:
+            object.__setattr__(self, name, value)
+
+    def save(self, *, update_fields):
+        self.facility.save(update_fields=update_fields)
+
+
+def _admin_token_scope(org):
+    if isinstance(org, FacilityConnection):
+        return f'{org.id}:facility:{org.facility.admin_id}'
+    return org.id
 
 
 @dataclass
@@ -168,6 +200,8 @@ def _require_connected_org(org: Organization) -> None:
 
 
 def _org_practice_ids(org: Organization) -> set[int]:
+    if isinstance(org, FacilityConnection):
+        return {org.facility.admin_id}
     return set(org.tpms_admin_ids.values_list('admin_id', flat=True))
 
 
@@ -213,12 +247,12 @@ def bind_therapy_pms_connection(org: Organization, email: str, password: str) ->
             'updated_at',
         ],
     )
-    store_org_tpms_admin_token(org.id, session.access_token)
+    store_org_tpms_admin_token(_admin_token_scope(org), session.access_token)
     return session.admin_id
 
 
 def clear_therapy_pms_connection(org: Organization) -> None:
-    clear_org_tpms_admin_token(org.id)
+    clear_org_tpms_admin_token(_admin_token_scope(org))
     org.integration_platform = ''
     org.integration_email = ''
     org.integration_password_encrypted = ''
@@ -237,7 +271,7 @@ def clear_therapy_pms_connection(org: Organization) -> None:
 def _admin_access_token(org: Organization) -> str:
     """Return a usable admin Bearer token, refreshing via stored credentials if needed."""
     _require_connected_org(org)
-    cached = get_org_tpms_admin_token(org.id)
+    cached = get_org_tpms_admin_token(_admin_token_scope(org))
     if cached:
         return cached
 
@@ -246,7 +280,7 @@ def _admin_access_token(org: Organization) -> str:
         payload = authenticate_admin_raw(org.integration_email, password)
         session = normalize_admin_login_payload(org.integration_email, payload)
     except TpmsAuthError as exc:
-        clear_org_tpms_admin_token(org.id)
+        clear_org_tpms_admin_token(_admin_token_scope(org))
         raise HttpError(
             400,
             'Could not refresh TherapyPMS credentials. Please reconnect.',
@@ -260,7 +294,7 @@ def _admin_access_token(org: Organization) -> str:
             'TherapyPMS credentials now resolve to a different practice. Please reconnect.',
         )
 
-    store_org_tpms_admin_token(org.id, session.access_token)
+    store_org_tpms_admin_token(_admin_token_scope(org), session.access_token)
     return session.access_token
 
 
@@ -270,7 +304,7 @@ def _with_admin_token(org: Organization, call):
         return call(token)
     except TpmsAuthError as exc:
         if exc.status_code in {401, 403}:
-            clear_org_tpms_admin_token(org.id)
+            clear_org_tpms_admin_token(_admin_token_scope(org))
             token = _admin_access_token(org)
             try:
                 return call(token)
