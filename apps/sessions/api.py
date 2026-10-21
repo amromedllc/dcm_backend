@@ -842,7 +842,7 @@ def start_session(request, data: SessionStartRequest):
     )
     session = SessionRun.objects.create(
         external_client_id=_canonical_external_client_id(data.client_id),
-        service_setting=data.service_setting,
+        service_setting=data.service_setting or ('Telehealth' if appt and appt.telehealth_link else ''),
         staff=request.user,
         external_appointment_id=external_appointment_id,
         lesson_id=lesson_id,

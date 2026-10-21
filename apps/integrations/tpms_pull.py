@@ -15,6 +15,8 @@ from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
 from django.db import transaction
+from django.core.exceptions import ValidationError
+from django.core.validators import URLValidator
 from django.utils import timezone
 from ninja.errors import HttpError
 
@@ -664,6 +666,22 @@ def pull_providers(org: Organization) -> PullResult:
 # Appointments
 # ---------------------------------------------------------------------------
 
+def _appointment_telehealth_link(row: dict[str, Any]) -> str:
+    for key in ('zoom_link', 'telehealth_link'):
+        value = row.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        value = value.strip()
+        if len(value) > 2048:
+            continue
+        try:
+            URLValidator(schemes=['https', 'http'])(value)
+        except ValidationError:
+            continue
+        return value
+    return ''
+
+
 def _map_admin_appointment(
     row: dict[str, Any],
     *,
@@ -744,6 +762,7 @@ def _map_admin_appointment(
         'start_time': start,
         'end_time': end,
         'service_type': service,
+        'telehealth_link': _appointment_telehealth_link(row),
         'notes': notes,
         'status': status,
         'source': Appointment.Source.SYNCED,
@@ -894,7 +913,7 @@ def _pull_appointments_window(
 
     update_attrs = (
         'external_client_id', 'staff_id', 'start_time', 'end_time',
-        'service_type', 'notes', 'status', 'synced_at',
+        'service_type', 'telehealth_link', 'notes', 'status', 'synced_at',
         'session_title', 'external_admin_id', 'billable', 'authorization_id',
         'payor_id', 'time_duration', 'cpt_code', 'external_created_at',
         'external_updated_at', 'start_time_local_raw', 'end_time_local_raw',
