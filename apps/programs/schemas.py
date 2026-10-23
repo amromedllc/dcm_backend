@@ -150,7 +150,26 @@ class PromptingTemplateUpdateRequest(Schema):
 # Programs
 # ---------------------------------------------------------------------------
 
-class TargetSummarySchema(Schema):
+class ProgramCodeSchema(Schema):
+    """Read-only code derived from the database-assigned identity."""
+    code: str
+
+    @staticmethod
+    def resolve_code(obj):
+        record_id = obj['id'] if isinstance(obj, dict) else obj.id
+        return f'PRG-{record_id:04d}'
+
+
+class TargetCodeSchema(Schema):
+    code: str
+
+    @staticmethod
+    def resolve_code(obj):
+        record_id = obj['id'] if isinstance(obj, dict) else obj.id
+        return f'TAR-{record_id:04d}'
+
+
+class TargetSummarySchema(TargetCodeSchema):
     setting_ids: list[int] = []
     id: int
     name: str
@@ -177,7 +196,7 @@ class ProgramMaterialSchema(Schema):
     created_at: datetime
 
 
-class ProgramSchema(Schema):
+class ProgramSchema(ProgramCodeSchema):
     id: int
     client_id: int | None = None
     is_locked: bool = False
@@ -206,7 +225,7 @@ class ProgramSchema(Schema):
     materials: list[ProgramMaterialSchema] = []
 
 
-class ProgramListSchema(Schema):
+class ProgramListSchema(ProgramCodeSchema):
     id: int
     client_id: int
     name: str
@@ -309,7 +328,7 @@ class ProgramSubmoduleRequest(Schema):
     display_order: int = Field(default=0, ge=0)
 
 
-class TargetSchema(Schema):
+class TargetSchema(TargetCodeSchema):
     id: int
     program_id: int
     name: str
@@ -498,7 +517,7 @@ class AddProgramToLessonRequest(Schema):
 # Org-level program templates (facility-wide library)
 # ---------------------------------------------------------------------------
 
-class OrgProgramSchema(Schema):
+class OrgProgramSchema(ProgramCodeSchema):
     setting_ids: list[int] = []
     configuration: dict[str, Any] = {}
     id: int
@@ -692,7 +711,7 @@ class CentralProgramUpdateRequest(Schema):
     display_order: int | None = Field(default=None, ge=0)
 
 
-class CentralTargetSchema(Schema):
+class CentralTargetSchema(TargetCodeSchema):
     setting_ids: list[int] = []
     configuration: dict[str, Any] = {}
     id: int
