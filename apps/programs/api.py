@@ -3015,6 +3015,16 @@ def superadmin_update_central_program(request, program_id: int, data: CentralPro
     return _serialize_superadmin_central_program(program, request, include_targets=True)
 
 
+@router.post('/superadmin/central-programs/{program_id}/image', response=OrgProgramSchema)
+def superadmin_upload_central_program_image(request, program_id: int, file: UploadedFile = File(...)):
+    _require_superadmin(request)
+    program = _get_superadmin_central_program_or_404(program_id)
+    validate_image_upload(file)
+    program.image = file
+    program.save(update_fields=['image', 'updated_at'])
+    return _serialize_superadmin_central_program(program, request, include_targets=True)
+
+
 @router.delete('/superadmin/central-programs/{program_id}', response={204: None})
 def superadmin_delete_central_program(request, program_id: int):
     _require_superadmin(request)
