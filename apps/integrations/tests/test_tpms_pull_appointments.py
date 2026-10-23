@@ -1,7 +1,10 @@
 from datetime import date
 from unittest import mock
+from unittest import skipUnless
+from types import SimpleNamespace
+import os
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django_tenants.utils import schema_context
 
 from apps.clients.models import Client
@@ -90,3 +93,47 @@ class PullAppointmentsTests(TestCase):
                 pull_appointments(self.org, from_date=date(2026, 10, 1), to_date=date(2026, 10, 31))
 
             self.assertEqual(Appointment.objects.filter(external_id='2038296').count(), 1)
+
+    def test_zoom_link_is_saved_updated_cleared_and_exposed_by_api(self):
+        from apps.sessions.schemas import AppointmentSchema
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            Client.objects.create(organization=self.org, external_id='15808', external_admin_id=PRACTICE_ADMIN_ID, first_name='Pat', last_name='Ient')
+            for link, expected in (
+                ('https://meet.example.com/room-one', 'https://meet.example.com/room-one'),
+                ('https://meet.example.com/room-two', 'https://meet.example.com/room-two'),
+                ('', ''),
+                (True, ''),
+                ('javascript:alert(1)', ''),
+            ):
+                with self.subTest(link=link):
+                    with mock.patch('apps.integrations.tpms_pull.admin_list_appointments', return_value=[{**SAMPLE_ROW, 'zoom_link': link}]):
+                        pull_appointments(self.org, from_date=date(2026, 10, 1), to_date=date(2026, 10, 31))
+                    appt = Appointment.objects.get(external_id=str(SAMPLE_ROW['id']))
+                    self.assertEqual(appt.telehealth_link, expected)
+                    self.assertEqual(AppointmentSchema.from_orm(appt).telehealth_link, expected)
+            self.assertEqual(Appointment.objects.count(), 1)
+
+    def test_session_linked_to_zoom_appointment_defaults_to_telehealth(self):
+        from apps.accounts.models import User
+        from apps.sessions.api import start_session
+        from apps.sessions.schemas import SessionStartRequest
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            client = Client.objects.create(organization=self.org, external_id='15808', external_admin_id=PRACTICE_ADMIN_ID, first_name='Pat', last_name='Ient')
+            staff = User.objects.create_user(email='telehealth-admin@example.com', password='x', role=User.Role.ADMIN, organization=self.org)
+            row = {**SAMPLE_ROW, 'zoom_link': 'https://meet.example.com/room-one'}
+            with mock.patch('apps.integrations.tpms_pull.admin_list_appointments', return_value=[row]):
+                pull_appointments(self.org, from_date=date(2026, 10, 1), to_date=date(2026, 10, 31))
+            with (
+                mock.patch('apps.sessions.api._accessible_external_client_ids', return_value={client.pk}),
+                mock.patch('apps.sessions.api.build_program_snapshot', return_value={}),
+            ):
+                _, result = start_session(SimpleNamespace(user=staff, tenant=self.org), SessionStartRequest(client_id=client.pk, external_appointment_id=str(SAMPLE_ROW['id'])))
+            self.assertEqual(result['service_setting'], 'Telehealth')
+
+    @skipUnless(os.environ.get('DCM_TPMS_APPOINTMENTS_SIMULATION_URL'), 'Requires local appointment HTTP fixture')
+    def test_real_http_requests_zoom_link_and_persists_it(self):
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            Client.objects.create(organization=self.org, external_id='15808', external_admin_id=PRACTICE_ADMIN_ID, first_name='Pat', last_name='Ient')
+            with override_settings(TPMS_API_BASE_URL=os.environ['DCM_TPMS_APPOINTMENTS_SIMULATION_URL']):
+                pull_appointments(self.org, from_date=date(2026, 10, 1), to_date=date(2026, 10, 31))
+            self.assertEqual(Appointment.objects.get(external_id=str(SAMPLE_ROW['id'])).telehealth_link, 'https://meet.example.com/appointment-room')

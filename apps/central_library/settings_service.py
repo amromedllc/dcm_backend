@@ -120,10 +120,26 @@ def _local_model(kind):
                 tag=ProgramTag, target_status=TargetStatus, data_field=ProgramDataField)[kind]
 
 
+def _matching_facility_setting(visible, kind, values):
+    """Reuse compatible facility definitions independently of program ownership."""
+    # Template titles do not affect behavior; tags, areas and fields remain named.
+    candidates = visible if kind in {'prompting', 'workflow'} else visible.filter(name=values['name'])
+    comparable = {key: value for key, value in values.items()
+                  if key not in {'name', 'program_template_ids'}}
+    for candidate in candidates.order_by('pk'):
+        if all(getattr(candidate, key) == value for key, value in comparable.items()):
+            return candidate
+    return None
+
+
 @transaction.atomic
 def pull_setting(setting, user):
     """Serialize reuse across program imports and never overwrite local edits."""
     from apps.programs.api import _settings_qs
+    # Serialize different central imports that may share one local template.
+    from apps.tenants.models import Organization
+    org_id = current_org_id()
+    Organization.objects.select_for_update().get(pk=org_id)
     setting = CentralProgramSetting.objects.select_for_update().get(pk=setting.pk)
     if not setting.is_active:
         raise HttpError(400, f'Central setting "{setting.name}" is inactive')
@@ -148,15 +164,13 @@ def pull_setting(setting, user):
         if existing is None and model.objects.filter(key=values['key']).exists():
             raise HttpError(409, f'Status key "{values["key"]}" belongs to another facility in this organization')
     else:
-        existing = visible.filter(name=setting.name).first()
-        if existing and not all(getattr(existing, key) == value for key, value in values.items()):
-            existing = None
+        existing = _matching_facility_setting(visible, setting.kind, values)
         if existing is None:
             base = setting.name
             counter = 0
             while model.objects.filter(name=values['name']).exists():
                 counter += 1
-                suffix = f' (Central {setting.pk}' + (f'-{counter}' if counter > 1 else '') + ')'
+                suffix = f' ({counter + 1})'
                 limit = 100 if setting.kind == 'tag' else 200
                 values['name'] = base[:limit - len(suffix)] + suffix
     if existing is None:
@@ -196,10 +210,15 @@ def sync_legacy_links(source):
         configuration = normalize_configuration('prompting', 'Imported prompting', {'levels': source.prompting_levels})
         match = CentralProgramSetting.objects.filter(kind='prompting', configuration=configuration).first()
         if match is None:
-            # Include model and pk to avoid collisions with a differently
-            # configured source that happens to have the same display name.
-            match = legacy_setting('prompting', f'{source.name[:140]} ({source._meta.model_name} {source.pk})',
-                                   levels=source.prompting_levels)
+            # Keep internal model names and IDs out of user-visible labels.
+            base = source.name[:200]
+            name = base
+            counter = 1
+            while CentralProgramSetting.objects.filter(kind='prompting', name=name).exists():
+                counter += 1
+                suffix = f' ({counter})'
+                name = base[:200 - len(suffix)] + suffix
+            match = legacy_setting('prompting', name, levels=source.prompting_levels)
         source.settings.add(match)
 
 

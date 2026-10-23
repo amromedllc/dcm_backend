@@ -9,7 +9,7 @@ from ninja.files import UploadedFile
 from ninja.errors import HttpError
 
 from apps.accounts.auth import partner_auth
-from apps.accounts.permissions import require_permission, resolve_permission_organization, user_has_permission
+from apps.accounts.permissions import require_permission
 from apps.clients.id_aliases import client_identifier_aliases
 from apps.programs.measurements import (
     aggregate_measurement, MEASUREMENT_LABELS,
@@ -66,9 +66,13 @@ def _session_for_data_change(request, session_id: int, reason: str = ''):
 
     Open sessions follow the recording privileges (session_start, or
     sessions_manual_entry for manual ones). A session that is already
-    submitted, approved or rejected can only be changed by someone with
-    sessions_edit_data, who must give a reason. Returns (session, closed)."""
+    submitted or rejected can only be changed by someone with
+    sessions_edit_data, who must give a reason. Approved data is locked.
+    Returns (session, closed)."""
     session = _get_session_or_404(session_id, request)
+    session = SessionRun.objects.select_for_update().get(pk=session.pk)
+    if session.status == SessionRun.Status.APPROVED:
+        raise HttpError(409, 'Approved session data is locked and cannot be edited.')
     if session.status == SessionRun.Status.OPEN:
         require_permission(
             request,
@@ -82,22 +86,12 @@ def _session_for_data_change(request, session_id: int, reason: str = ''):
 
 
 def _record_closed_session_edit(request, session: SessionRun, change: str, reason: str) -> None:
-    """Audit-log a change to a completed session. A change by someone who
-    cannot approve sessions sends it back for review (approved -> submitted).
+    """Audit-log a correction to a submitted or rejected session.
     Automatic target advancement and prompt fading are NOT re-run."""
     from apps.audit.models import AuditLog
     from shared.tenancy import current_org_id_or_none
 
     status_before = session.status
-    if (
-        session.status == SessionRun.Status.APPROVED
-        and not user_has_permission(request.user, resolve_permission_organization(request), 'session_approve')
-    ):
-        session.status = SessionRun.Status.SUBMITTED
-        session.reviewed_by = None
-        session.reviewed_at = None
-        session.save(update_fields=['status', 'reviewed_by', 'reviewed_at'])
-
     AuditLog.objects.create(
         organization_id=current_org_id_or_none() or session.organization_id,
         actor_id=request.user.id,
@@ -842,7 +836,7 @@ def start_session(request, data: SessionStartRequest):
     )
     session = SessionRun.objects.create(
         external_client_id=_canonical_external_client_id(data.client_id),
-        service_setting=data.service_setting,
+        service_setting=data.service_setting or ('Telehealth' if appt and appt.telehealth_link else ''),
         staff=request.user,
         external_appointment_id=external_appointment_id,
         lesson_id=lesson_id,
@@ -1138,6 +1132,7 @@ def _get_or_create_trial(session_id, payload):
 
 
 @router.post('/sessions/{session_id}/trials', response={201: TrialEventSchema})
+@transaction.atomic
 def add_trial(request, session_id: int, data: TrialEventCreateRequest, reason: str = ''):
     session, closed = _session_for_data_change(request, session_id, reason)
     payload = data.dict()
@@ -1149,6 +1144,7 @@ def add_trial(request, session_id: int, data: TrialEventCreateRequest, reason: s
 
 
 @router.delete('/sessions/{session_id}/trials/{trial_id}', response={204: None})
+@transaction.atomic
 def delete_trial(request, session_id: int, trial_id: int, reason: str = ''):
     session, closed = _session_for_data_change(request, session_id, reason)
     try:
@@ -1193,6 +1189,7 @@ def list_behaviors(request, session_id: int):
 
 
 @router.post('/sessions/{session_id}/behaviors', response={201: BehaviorEventSchema})
+@transaction.atomic
 def add_behavior(request, session_id: int, data: BehaviorEventCreateRequest, reason: str = ''):
     session, closed = _session_for_data_change(request, session_id, reason)
     data.occurred_at = _clamp_to_manual_window(session, data.occurred_at)
@@ -1203,6 +1200,7 @@ def add_behavior(request, session_id: int, data: BehaviorEventCreateRequest, rea
 
 
 @router.delete('/sessions/{session_id}/behaviors/{event_id}', response={204: None})
+@transaction.atomic
 def delete_behavior(request, session_id: int, event_id: int, reason: str = ''):
     session, closed = _session_for_data_change(request, session_id, reason)
     try:
@@ -1356,6 +1354,7 @@ def list_abc(request, session_id: int):
 
 
 @router.post('/sessions/{session_id}/abc', response={201: ABCEventSchema})
+@transaction.atomic
 def add_abc(request, session_id: int, data: ABCEventCreateRequest, reason: str = ''):
     session, closed = _session_for_data_change(request, session_id, reason)
     data.occurred_at = _clamp_to_manual_window(session, data.occurred_at)
@@ -1366,6 +1365,7 @@ def add_abc(request, session_id: int, data: ABCEventCreateRequest, reason: str =
 
 
 @router.delete('/sessions/{session_id}/abc/{event_id}', response={204: None})
+@transaction.atomic
 def delete_abc(request, session_id: int, event_id: int, reason: str = ''):
     session, closed = _session_for_data_change(request, session_id, reason)
     try:
@@ -1453,17 +1453,21 @@ def submit(request, session_id: int, data: SessionSubmitRequest):
 
 
 @router.post('/sessions/{session_id}/approve', response=SessionRunSchema)
+@transaction.atomic
 def approve(request, session_id: int):
     require_permission(request, 'session_approve')
     session = _get_session_or_404(session_id, request)
+    session = SessionRun.objects.select_for_update().get(pk=session.pk)
     approve_session(session, request.user)
     return _serialize_session(session)
 
 
 @router.post('/sessions/{session_id}/reject', response=SessionRunSchema)
+@transaction.atomic
 def reject(request, session_id: int, data: SessionRejectRequest):
     require_permission(request, 'session_approve')
     session = _get_session_or_404(session_id, request)
+    session = SessionRun.objects.select_for_update().get(pk=session.pk)
     reject_session(session, request.user, data.reason)
     return _serialize_session(session)
 
@@ -1473,6 +1477,7 @@ def reject(request, session_id: int, data: SessionRejectRequest):
 # ---------------------------------------------------------------------------
 
 @router.post('/sessions/{session_id}/sync', response=SessionSyncResult)
+@transaction.atomic
 def sync_session(request, session_id: int, data: SessionSyncPayload):
     """
     Idempotent batch endpoint for the mobile offline workflow.
@@ -1484,6 +1489,7 @@ def sync_session(request, session_id: int, data: SessionSyncPayload):
     sends one — see _get_or_create_behavior/_get_or_create_abc.
     """
     session = _require_recording_access(request, session_id)
+    session = SessionRun.objects.select_for_update().get(pk=session.pk)
     if not session.is_editable:
         raise HttpError(409, f'Session is {session.status} — sync not allowed')
 

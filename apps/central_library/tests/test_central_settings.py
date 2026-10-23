@@ -102,10 +102,28 @@ class CentralSettingsImportTests(TestCase):
             existing = PromptingTemplate.objects.create(name=self.prompt.name, levels=LEVELS, description='Local', created_by=self.user)
             imported = pull_setting(self.prompt, self.user)
             self.assertNotEqual(existing.pk, imported.pk)
-            self.assertIn('Central', imported.name)
+            self.assertEqual(imported.name, self.prompt.name + ' (2)')
             existing.refresh_from_db()
             self.assertEqual(existing.description, 'Local')
             self.assertEqual(pull_setting(self.prompt, self.user).pk, imported.pk)
+
+    def test_different_central_template_names_reuse_same_facility_definition(self):
+        duplicate = self.setting('prompting', 'Another program prompt', **deepcopy(self.prompt.configuration))
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            first = pull_setting(self.prompt, self.user)
+            second = pull_setting(duplicate, self.user)
+            self.assertEqual(first.pk, second.pk)
+            self.assertEqual(PromptingTemplate.objects.count(), 1)
+            self.assertEqual(CentralSettingCopy.objects.filter(local_id=first.pk, organization=self.org).count(), 2)
+
+    def test_matching_existing_facility_template_is_reused(self):
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            existing = PromptingTemplate.objects.create(name='Our reusable prompt', created_by=self.user,
+                                                       **deepcopy(self.prompt.configuration))
+            imported = pull_setting(self.prompt, self.user)
+            self.assertEqual(imported.pk, existing.pk)
+            self.assertEqual(imported.name, 'Our reusable prompt')
+            self.assertEqual(PromptingTemplate.objects.count(), 1)
 
     def test_facilities_get_independent_copies(self):
         with schema_context(self.org.schema_name), tenant_context(self.org.pk):

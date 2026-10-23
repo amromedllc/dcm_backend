@@ -102,6 +102,14 @@ celery -A config beat --loglevel=info
 
 ## 🤝 TherapyPMS Integration
 
+Appointment pulls send boolean `zoom_link: true` to TherapyPMS and persist a
+returned HTTP(S) Zoom URL as `Appointment.telehealth_link` (also exposed in
+`AppointmentSchema`). Missing, empty, boolean, or invalid links are stored as an
+empty string. Later pulls replace or clear the saved link. The existing telehealth
+UI uses this field; new linked sessions default to service setting `Telehealth`
+when no explicit setting is supplied. Apply `dcm_sessions.0021` across tenant
+schemas and restart Celery before pulling appointments to populate existing rows.
+
 - **APIs and Login**: Real-time staff/admin logins are routed through legacy table lookups using bcrypt.
 
 Admin integrations are scoped to a mapped facility within the current organization.

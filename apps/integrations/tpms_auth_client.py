@@ -711,11 +711,13 @@ def admin_list_appointments(
     """POST /api/v1/admin/get/appointment — practice sessions for Integrations Pull.
 
     from_date / to_date are mandatory (YYYY-MM-DD). patient_ids and staff_ids
-    are optional filters forwarded when non-empty.
+    are optional filters forwarded when non-empty. Request Zoom links explicitly
+    for Progressly's internal use; TherapyPMS omits them by default.
     """
     body: dict[str, Any] = {
         'from_date': from_date,
         'to_date': to_date,
+        'zoom_link': True,
     }
     if patient_ids:
         body['patient_ids'] = [int(p) for p in patient_ids]
