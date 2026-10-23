@@ -156,7 +156,7 @@ def pull_setting(setting, user):
             counter = 0
             while model.objects.filter(name=values['name']).exists():
                 counter += 1
-                suffix = f' (Central {setting.pk}' + (f'-{counter}' if counter > 1 else '') + ')'
+                suffix = f' ({counter + 1})'
                 limit = 100 if setting.kind == 'tag' else 200
                 values['name'] = base[:limit - len(suffix)] + suffix
     if existing is None:
@@ -196,10 +196,15 @@ def sync_legacy_links(source):
         configuration = normalize_configuration('prompting', 'Imported prompting', {'levels': source.prompting_levels})
         match = CentralProgramSetting.objects.filter(kind='prompting', configuration=configuration).first()
         if match is None:
-            # Include model and pk to avoid collisions with a differently
-            # configured source that happens to have the same display name.
-            match = legacy_setting('prompting', f'{source.name[:140]} ({source._meta.model_name} {source.pk})',
-                                   levels=source.prompting_levels)
+            # Keep internal model names and IDs out of user-visible labels.
+            base = source.name[:200]
+            name = base
+            counter = 1
+            while CentralProgramSetting.objects.filter(kind='prompting', name=name).exists():
+                counter += 1
+                suffix = f' ({counter})'
+                name = base[:200 - len(suffix)] + suffix
+            match = legacy_setting('prompting', name, levels=source.prompting_levels)
         source.settings.add(match)
 
 
