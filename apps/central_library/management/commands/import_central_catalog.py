@@ -76,6 +76,10 @@ class Command(BaseCommand):
                 existing = CentralProgramSetting.objects.filter(source_id=identity).first()
                 if existing is None:
                     existing = CentralProgramSetting.objects.filter(kind=row['kind'], name=row['name']).first()
+                if existing is None and row['kind'] in {'prompting', 'workflow'}:
+                    existing = CentralProgramSetting.objects.filter(
+                        kind=row['kind'], configuration=row['configuration'],
+                    ).order_by('pk').first()
                 if existing is not None and existing.kind != row['kind']:
                     raise CommandError(f'{identity}: cannot change an existing setting kind')
                 if existing is None:
