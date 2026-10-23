@@ -2986,6 +2986,8 @@ def superadmin_create_central_program(request, data: CentralProgramRequest):
     )
     program.settings.set(linked_settings)
     _sync_central_labels(program)
+    for index, target_data in enumerate(data.targets):
+        _create_central_target(program, target_data, display_order=index)
     return 201, _serialize_superadmin_central_program(program, request, include_targets=True)
 
 
@@ -3033,6 +3035,11 @@ def superadmin_list_central_targets(request, program_id: int):
 def superadmin_create_central_target(request, program_id: int, data: CentralTargetRequest):
     _require_superadmin(request)
     program = _get_superadmin_central_program_or_404(program_id)
+    target = _create_central_target(program, data)
+    return 201, _serialize_superadmin_central_target(target)
+
+
+def _create_central_target(program, data: CentralTargetRequest, *, display_order=None):
     measurement, timer_type = _normalize_central_target_payload(data)
     linked_settings = validate_setting_links(data.setting_ids, target=True)
     _validate_central_target_settings(linked_settings, measurement)
@@ -3048,12 +3055,12 @@ def superadmin_create_central_target(request, program_id: int, data: CentralTarg
         sd_text=data.sd_text,
         teaching_instructions=data.teaching_instructions,
         prompting_levels=data.prompting_levels,
-        display_order=data.display_order,
+        display_order=data.display_order if display_order is None else display_order,
         is_visible_to_staff=data.is_visible_to_staff,
     )
     target.settings.set(linked_settings)
     sync_legacy_links(target)
-    return 201, _serialize_superadmin_central_target(target)
+    return target
 
 
 @router.patch('/superadmin/central-targets/{target_id}', response=CentralTargetSchema)

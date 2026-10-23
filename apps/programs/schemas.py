@@ -682,6 +682,7 @@ class CentralTargetConfiguration(Schema):
 
 
 class CentralProgramRequest(Schema):
+    targets: list['CentralTargetRequest'] = Field(default_factory=list, max_length=500)
     setting_ids: list[int] = []
     configuration: CentralProgramConfiguration = Field(default_factory=CentralProgramConfiguration)
     name: NonEmptyStr
@@ -1110,3 +1111,5 @@ class ProgramDraftSchema(Schema):
 # The create requests above embed TargetCreateRequest, which is defined further down.
 ProgramCreateRequest.model_rebuild()
 OrgProgramCreateRequest.model_rebuild()
+
+CentralProgramRequest.model_rebuild()
