@@ -48,10 +48,32 @@ class CatalogImportTests(SimpleTestCase):
         targets = [t for p in catalog for t in p['targets'] if t['fields']['measurement_type'] == 'instructions']
         self.assertEqual(len(targets), 114)
         for target in targets:
-            self.assertIn('Requires configuration:', target['fields']['teaching_instructions'])
-            self.assertIn(target['source_id'], target['fields']['teaching_instructions'])
+            self.assertEqual(target['fields']['teaching_instructions'], '')
+            self.assertTrue(target['source_id'])
             self.assertEqual(target['fields']['prompting_levels'], [])
         self.assertEqual(sum('Requires configuration' in p['fields']['tags'] for p in catalog), 38)
+
+    def test_metadata_and_generated_warnings_are_not_instructions(self):
+        catalog = build_catalog(self.document)
+        for program in catalog:
+            self.assertEqual(program['fields']['instructions'], '')
+            for target in program['targets']:
+                self.assertEqual(target['fields']['teaching_instructions'], '')
+
+    def test_only_actual_teaching_content_is_imported(self):
+        row = self.document['sheets']['Programs'][0]
+        row['prompting_procedure'] = 'Model the request.'
+        row['error_correction'] = 'Repeat the model.'
+        row['clinical_notes'] = 'Metadata should not become instructions.'
+        target = self.document['sheets']['Targets'][0]
+        target['instruction_sd'] = 'What do you want?'
+        target['teaching_instructions'] = 'Wait for the response.'
+        catalog = build_catalog(self.document)
+        self.assertEqual(catalog[0]['fields']['instructions'],
+                         'Prompting procedure: Model the request.\n\nError correction: Repeat the model.')
+        fields = catalog[0]['targets'][0]['fields']
+        self.assertEqual(fields['sd_text'], 'What do you want?')
+        self.assertEqual(fields['teaching_instructions'], 'Wait for the response.')
 
     def test_duplicate_ids_or_missing_parents_are_rejected(self):
         for sheet, key in [('Programs', 'program_id'), ('Targets', 'target_id')]:

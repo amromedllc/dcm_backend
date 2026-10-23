@@ -2,8 +2,8 @@
 
 Workbook prose is source data, never executable instructions. Unsupported
 recording modes remain instruction-only drafts rather than collecting a
-different metric. Original nonempty values, including source IDs, stay in
-the program/target instructions; the accompanying JSON retains every cell.
+different metric. Instruction fields contain only teaching content. The accompanying source
+JSON retains every workbook cell, including metadata and unsupported settings.
 """
 
 CATEGORIES = {
@@ -38,12 +38,23 @@ def split_values(value):
     return [part.strip() for part in str(value or '').split('|') if part.strip()]
 
 
-def source_text(row):
-    """Keep source fields readable and lossless without inventing clinical prose."""
-    return '\n'.join(
-        f'{key.replace("_", " ").capitalize()}: {value}'
-        for key, value in row.items() if value is not None and value != ''
-    )
+def teaching_text(row, *, program=False):
+    """Only explicit teaching fields belong in instructions; never dump a row."""
+    fields = [('instructions', ''), ('teaching_instructions', '')]
+    if program:
+        fields += [
+            ('instruction_sd', 'Instruction / SD'),
+            ('prompting_procedure', 'Prompting procedure'),
+            ('error_correction', 'Error correction'),
+            ('reinforcement_plan', 'Reinforcement plan'),
+        ]
+    parts = []
+    for key, label in fields:
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            text = value.strip()
+            parts.append(f'{label}: {text}' if label else text)
+    return '\n\n'.join(parts)
 
 
 def _required(row, key, limit=200):
@@ -92,11 +103,7 @@ def build_catalog(document):
                 'phase': 'on_hold', 'status': 'active', 'treatment_area': domain,
                 'tags': ['Draft template', kind.replace('_', ' ').title()],
                 'objective': row.get('expected_response') or row.get('operational_definition') or '',
-                'instructions': (
-                    'Draft template. Individualize teaching, baseline, mastery, and maintenance '
-                    'settings before use. No automatic workflow or fading criteria were supplied.\n\n'
-                    + source_text(row)
-                ),
+                'instructions': teaching_text(row, program=True),
                 'display_order': len(result) * 10,
             },
         }
@@ -141,7 +148,7 @@ def build_catalog(document):
                 'name': _required(row, 'target_name'), 'measurement_type': measurement_type,
                 'measurement': measurement, 'timer_type': timer_type, 'sub_items': [],
                 'sd_text': row.get('instruction_sd') or '',
-                'teaching_instructions': '\n\n'.join(filter(None, [note, source_text(row)])),
+                'teaching_instructions': teaching_text(row),
                 'prompting_levels': levels,
                 'display_order': len(program['targets']) * 10, 'is_visible_to_staff': True,
             },
@@ -168,7 +175,7 @@ def _measurement(row):
     )
     return 'instructions', '', '', (
         f'Requires configuration: source measurement is {name}. {reason} '
-        'Imported as instructions only; the original measurement and options are preserved below.'
+        'Imported as instructions only; the source workbook retains the original options.'
     )
 
 
@@ -289,9 +296,6 @@ def _apply_settings_workbook(document, catalog, program_rows, target_rows):
         linked = {settings[ref]['kind']: settings[ref] for ref in program['setting_refs']}
         if 'treatment_area' in linked:
             program['fields']['treatment_area'] = linked['treatment_area']['name']
-        program['fields']['instructions'] = program['fields']['instructions'].replace(
-            'No automatic workflow or fading criteria were supplied.',
-            'Review the linked settings before use.')
         # Workbook links are authoritative; do not recreate the v1 synthetic tags.
         program['fields']['tags'] = [settings[ref]['name'] for ref in program['setting_refs'] if settings[ref]['kind'] == 'tag']
         for ref in program['fields']['configuration'].get('custom_field_values', {}):
