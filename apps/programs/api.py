@@ -931,33 +931,8 @@ def _serialize_program(program: Program, request=None, include_targets: bool = F
 
 
 def _optimized_program_image_url(request, image_field) -> str | None:
-    if not image_field:
-        return None
-
-    try:
-        source_path = image_field.path
-        source_url = image_field.url
-    except (NotImplementedError, ValueError):
-        return request.build_absolute_uri(image_field.url)
-
-    optimized_path = f'{source_path}.card.webp'
-    optimized_url = f'{source_url}.card.webp'
-
-    try:
-        source_mtime = os.path.getmtime(source_path)
-        optimized_is_current = (
-            os.path.exists(optimized_path)
-            and os.path.getmtime(optimized_path) >= source_mtime
-        )
-        if not optimized_is_current:
-            with Image.open(source_path) as img:
-                img = img.convert('RGB')
-                img.thumbnail((1200, 800), Image.Resampling.LANCZOS)
-                img.save(optimized_path, 'WEBP', quality=82, method=6)
-    except OSError:
-        return request.build_absolute_uri(source_url)
-
-    return request.build_absolute_uri(optimized_url)
+    from shared.program_images import program_card_image_url
+    return program_card_image_url(request, image_field)
 
 
 # ---------------------------------------------------------------------------
