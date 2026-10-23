@@ -5,11 +5,75 @@ from pathlib import Path
 from django.core import serializers
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection, transaction
+from django.utils import timezone
 from django_tenants.utils import get_public_schema_name, schema_context
 
 from apps.central_library.catalog_import import build_catalog, build_settings
 from apps.central_library.settings_service import sync_legacy_links
 from apps.central_library.models import CentralProgram, CentralProgramFolder, CentralTarget, CentralProgramSetting, CentralSettingCopy
+
+
+def _bulk_import_catalog(catalog, folders, settings):
+    """Apply authoritative v2 rows and links in batches, preserving record IDs."""
+    now = timezone.now()
+    programs = {row.source_id: row for row in CentralProgram.objects.filter(
+        source_id__in=[item['source_id'] for item in catalog])}
+    new_programs, changed_programs, program_fields = [], [], set()
+    for item in catalog:
+        program = programs.get(item['source_id'])
+        is_new = program is None
+        if is_new:
+            program = CentralProgram(source_id=item['source_id'])
+        fields = dict(item['fields'])
+        configuration = dict(fields.get('configuration', {}))
+        if configuration.get('custom_field_values'):
+            configuration['custom_field_values'] = {
+                str(settings[ref].pk): value
+                for ref, value in configuration['custom_field_values'].items()}
+            fields['configuration'] = configuration
+        for field, value in fields.items():
+            setattr(program, field, value)
+        program.folder = folders[item['domain']]
+        program.updated_at = now
+        program_fields.update(fields)
+        (new_programs if is_new else changed_programs).append(program)
+        programs[item['source_id']] = program
+    CentralProgram.objects.bulk_create(new_programs, batch_size=500)
+    if changed_programs:
+        CentralProgram.objects.bulk_update(changed_programs, sorted(program_fields | {'folder', 'updated_at'}), batch_size=100)
+    program_ids = [program.pk for program in programs.values()]
+    links = CentralProgram.settings.through
+    links.objects.filter(centralprogram_id__in=program_ids).delete()
+    links.objects.bulk_create([
+        links(centralprogram_id=programs[item['source_id']].pk, centralprogramsetting_id=settings[ref].pk)
+        for item in catalog for ref in item.get('setting_refs', [])], batch_size=500)
+
+    target_rows = [target for item in catalog for target in item['targets']]
+    targets = {row.source_id: row for row in CentralTarget.objects.filter(
+        source_id__in=[target['source_id'] for target in target_rows])}
+    new_targets, changed_targets, target_fields = [], [], set()
+    for item in catalog:
+        for source in item['targets']:
+            target = targets.get(source['source_id'])
+            is_new = target is None
+            if is_new:
+                target = CentralTarget(source_id=source['source_id'])
+            for field, value in source['fields'].items():
+                setattr(target, field, value)
+            target.program = programs[item['source_id']]
+            target_fields.update(source['fields'])
+            (new_targets if is_new else changed_targets).append(target)
+            targets[source['source_id']] = target
+    CentralTarget.objects.bulk_create(new_targets, batch_size=500)
+    if changed_targets:
+        CentralTarget.objects.bulk_update(changed_targets, sorted(target_fields | {'program'}), batch_size=100)
+    target_ids = [target.pk for target in targets.values()]
+    links = CentralTarget.settings.through
+    links.objects.filter(centraltarget_id__in=target_ids).delete()
+    links.objects.bulk_create([
+        links(centraltarget_id=targets[source['source_id']].pk, centralprogramsetting_id=settings[ref].pk)
+        for source in target_rows for ref in source.get('setting_refs', [])], batch_size=500)
+    return program_ids, target_ids
 
 
 class Command(BaseCommand):
@@ -45,13 +109,19 @@ class Command(BaseCommand):
         if connection.vendor != 'postgresql':
             raise CommandError('Replacement requires the configured PostgreSQL database')
 
+        self.stdout.write('Connecting to database and starting catalog transaction...')
+        self.stdout.flush()
         with schema_context(get_public_schema_name()), transaction.atomic():
+            self.stdout.write('Acquiring central catalog locks (10-second lock timeout)...')
+            self.stdout.flush()
             # Protect the backup/replacement against concurrent catalog edits.
             with connection.cursor() as cursor:
                 cursor.execute('SET LOCAL lock_timeout = \'10s\'')
                 tables = ', '.join(connection.ops.quote_name(model._meta.db_table) for model in
                                    (CentralProgramSetting, CentralProgramFolder, CentralProgram, CentralTarget))
                 cursor.execute(f'LOCK TABLE {tables} IN EXCLUSIVE MODE')
+            self.stdout.write('Locks acquired. Reading existing catalog for backup...')
+            self.stdout.flush()
             records = [
                 *CentralProgramSetting.objects.order_by('id'),
                 *CentralSettingCopy.objects.order_by('id'),
@@ -69,6 +139,8 @@ class Command(BaseCommand):
                     os.fsync(stream.fileno())
             except OSError as exc:
                 raise CommandError(f'Backup failed; library was not changed: {exc}') from exc
+            self.stdout.write(f'Backup saved: {options["backup_file"]}. Importing shared settings...')
+            self.stdout.flush()
             old_programs = CentralProgram.objects.count()
             old_targets = CentralTarget.objects.count()
             settings = {}
@@ -95,31 +167,41 @@ class Command(BaseCommand):
                 name: CentralProgramFolder.objects.update_or_create(name=name, defaults={'display_order': i * 10})[0]
                 for i, name in enumerate(domains)
             }
-            program_ids, target_ids = [], []
-            for item in catalog:
-                fields = dict(item['fields'])
-                # Workbook custom-field references become central setting IDs;
-                # facility imports will remap those IDs again to local fields.
-                configuration = dict(fields.get('configuration', {}))
-                if configuration.get('custom_field_values'):
-                    configuration['custom_field_values'] = {
-                        str(settings[ref].pk): value
-                        for ref, value in configuration['custom_field_values'].items()
-                    }
-                    fields['configuration'] = configuration
-                program, _ = CentralProgram.objects.update_or_create(
-                    source_id=item['source_id'], defaults={'folder': folders[item['domain']], **fields})
-                program_ids.append(program.pk)
-                if setting_rows or document['format'] == 'progressly-workbook-v2':
-                    program.settings.set([settings[ref] for ref in item.get('setting_refs', [])])
-                sync_legacy_links(program)
-                for source_target in item['targets']:
-                    target, _ = CentralTarget.objects.update_or_create(source_id=source_target['source_id'],
-                        defaults={'program': program, **source_target['fields']})
-                    target_ids.append(target.pk)
+            if document['format'] == 'progressly-workbook-v2':
+                self.stdout.write(f'Importing {len(catalog)} programs and {total} targets in batches...')
+                self.stdout.flush()
+                program_ids, target_ids = _bulk_import_catalog(catalog, folders, settings)
+                self.stdout.write('Program, target, and shared-setting links saved. Verifying catalog...')
+                self.stdout.flush()
+            else:
+                program_ids, target_ids = [], []
+                for program_index, item in enumerate(catalog, start=1):
+                    if program_index == 1 or program_index % 10 == 0:
+                        self.stdout.write(f'Importing program {program_index}/{len(catalog)}: {item["fields"]["name"]}')
+                        self.stdout.flush()
+                    fields = dict(item['fields'])
+                    # Workbook custom-field references become central setting IDs;
+                    # facility imports will remap those IDs again to local fields.
+                    configuration = dict(fields.get('configuration', {}))
+                    if configuration.get('custom_field_values'):
+                        configuration['custom_field_values'] = {
+                            str(settings[ref].pk): value
+                            for ref, value in configuration['custom_field_values'].items()
+                        }
+                        fields['configuration'] = configuration
+                    program, _ = CentralProgram.objects.update_or_create(
+                        source_id=item['source_id'], defaults={'folder': folders[item['domain']], **fields})
+                    program_ids.append(program.pk)
                     if setting_rows or document['format'] == 'progressly-workbook-v2':
-                        target.settings.set([settings[ref] for ref in source_target.get('setting_refs', [])])
-                    sync_legacy_links(target)
+                        program.settings.set([settings[ref] for ref in item.get('setting_refs', [])])
+                    sync_legacy_links(program)
+                    for source_target in item['targets']:
+                        target, _ = CentralTarget.objects.update_or_create(source_id=source_target['source_id'],
+                            defaults={'program': program, **source_target['fields']})
+                        target_ids.append(target.pk)
+                        if setting_rows or document['format'] == 'progressly-workbook-v2':
+                            target.settings.set([settings[ref] for ref in source_target.get('setting_refs', [])])
+                        sync_legacy_links(target)
             # Replace the catalog contents while preserving IDs of matching
             # source entities and their facility source/provenance links.
             CentralTarget.objects.exclude(pk__in=target_ids).delete()

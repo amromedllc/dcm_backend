@@ -205,7 +205,7 @@ class CentralSettingsImportTests(TestCase):
         old_target = CentralTarget.objects.create(source_id='PRG-0001-T01', program=old, name='Before target')
         before = (CentralProgram.objects.count(), CentralTarget.objects.count(), CentralProgramSetting.objects.count())
         with tempfile.TemporaryDirectory() as directory:
-            with patch.object(CentralTarget, 'save', side_effect=RuntimeError('simulated failure')):
+            with patch.object(CentralTarget.objects, 'bulk_create', side_effect=RuntimeError('simulated failure')):
                 with self.assertRaises(RuntimeError):
                     call_command('import_central_catalog', str(path), replace=True, backup_file=str(Path(directory)/'failure.json'), stdout=io.StringIO())
             self.assertEqual((CentralProgram.objects.count(), CentralTarget.objects.count(), CentralProgramSetting.objects.count()), before)
