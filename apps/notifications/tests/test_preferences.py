@@ -1,3 +1,4 @@
+from unittest.mock import patch
 from django.core import mail
 from django.db import connection
 from django.test import Client as DjangoClient, TestCase, override_settings
@@ -36,6 +37,38 @@ class NotificationPreferenceTests(TestCase):
             organization=self.org,
             role=User.Role.ADMIN,
         )
+
+    def test_android_delivery_is_independent_from_browser_push(self):
+        with schema_context(self.org.schema_name), tenant_context(self.org.id):
+            pref = NotificationPreference.objects.create(
+                recipient=self.user, event_type='target_mastered',
+                email_enabled=False, web_enabled=False, mobile_enabled=True)
+            with patch('apps.notifications.service._send_firebase_push') as send:
+                _create(self.user.pk, 'target_mastered', 'Target mastered')
+                self.assertEqual(send.call_args.kwargs['platforms'], ['android'])
+                self.assertEqual(Notification.objects.count(), 0)
+            pref.web_enabled, pref.mobile_enabled = True, False
+            pref.save()
+            with patch('apps.notifications.service._send_firebase_push') as send:
+                _create(self.user.pk, 'target_mastered', 'Target mastered')
+                self.assertEqual(send.call_args.kwargs['platforms'], ['web'])
+                self.assertEqual(Notification.objects.count(), 1)
+
+    def test_android_preference_round_trips_and_old_clients_preserve_it(self):
+        from apps.notifications.api import (
+            _effective_preference_rows, update_notification_preferences,
+            NotificationPreferenceUpdateRequest)
+        from types import SimpleNamespace
+        with schema_context(self.org.schema_name), tenant_context(self.org.id):
+            pref = NotificationPreference.objects.create(
+                recipient=self.user, event_type='target_mastered', mobile_enabled=False)
+            request = SimpleNamespace(user=self.user)
+            update_notification_preferences(request, NotificationPreferenceUpdateRequest(
+                preferences=[dict(event_type='target_mastered', email_enabled=True, web_enabled=True)]))
+            pref.refresh_from_db()
+            self.assertFalse(pref.mobile_enabled)
+            row = next(row for row in _effective_preference_rows(self.user) if row['event_type']=='target_mastered')
+            self.assertFalse(row['mobile_enabled'])
 
     def test_web_and_email_preferences_disable_delivery(self):
         with schema_context(self.org.schema_name), tenant_context(self.org.id):

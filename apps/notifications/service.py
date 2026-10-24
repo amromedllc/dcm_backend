@@ -18,7 +18,9 @@ def _create(recipient_id: int, event_type: str, title: str, body: str = '', data
     try:
         from apps.accounts.models import User
         recipient = User.objects.get(id=recipient_id)
-        if _channel_enabled(recipient, event_type, 'web'):
+        web_enabled = _channel_enabled(recipient, event_type, 'web')
+        mobile_enabled = _channel_enabled(recipient, event_type, 'mobile')
+        if web_enabled:
             from .models import Notification
             Notification.objects.create(
                 recipient=recipient,
@@ -27,7 +29,9 @@ def _create(recipient_id: int, event_type: str, title: str, body: str = '', data
                 body=body,
                 data=data or {},
             )
-            _send_firebase_push(recipient, title, body, data or {})
+        if web_enabled or mobile_enabled:
+            platforms = (['web'] if web_enabled else []) + (['android'] if mobile_enabled else [])
+            _send_firebase_push(recipient, title, body, data or {}, platforms=platforms)
         if _channel_enabled(recipient, event_type, 'email'):
             _send_email(recipient.email, title, body, data or {})
     except Exception:
@@ -44,7 +48,7 @@ def _channel_enabled(recipient, event_type: str, channel: str) -> bool:
             return False
 
         def channel_value(obj):
-            return obj.email_enabled if channel == 'email' else obj.web_enabled
+            return getattr(obj, {'email': 'email_enabled', 'web': 'web_enabled', 'mobile': 'mobile_enabled'}[channel])
 
         policy = RoleNotificationPolicy.all_organizations.filter(
             organization_id=getattr(recipient, 'organization_id', None),
@@ -307,7 +311,12 @@ def _firebase_app():
         return None
 
 
-def _send_firebase_push(recipient, title: str, body: str, data: dict):
+def _send_firebase_push(recipient, title: str, body: str, data: dict, *, platforms=None, event_type=None):
+    if event_type is not None:
+        platforms = [platform for platform, channel in [('web', 'web'), ('android', 'mobile')]
+                     if _channel_enabled(recipient, event_type, channel)]
+        if not platforms:
+            return
     app = _firebase_app()
     if app is None:
         return
@@ -321,6 +330,8 @@ def _send_firebase_push(recipient, title: str, body: str, data: dict):
 
     url = _notification_url(data)
     tokens = FirebaseMessagingToken.all_organizations.filter(recipient=recipient, is_active=True)
+    if platforms is not None:
+        tokens = tokens.filter(platform__in=platforms)
     for token in tokens:
         try:
             messaging.send(

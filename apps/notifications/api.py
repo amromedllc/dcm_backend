@@ -1,3 +1,4 @@
+from typing import Literal
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
@@ -40,7 +41,7 @@ def _role_policy_map(role: str) -> dict[str, dict]:
     """{event_type: {email_enabled, web_enabled, locked}} for a role, merged
     over the all-on / unlocked default."""
     result = {
-        event_type: {'email_enabled': True, 'web_enabled': True, 'locked': False}
+        event_type: {'email_enabled': True, 'web_enabled': True, 'mobile_enabled': True, 'locked': False}
         for event_type, _label in PREFERENCE_TYPES
     }
     for row in RoleNotificationPolicy.objects.filter(role=role):
@@ -48,6 +49,7 @@ def _role_policy_map(role: str) -> dict[str, dict]:
             result[row.event_type] = {
                 'email_enabled': row.email_enabled,
                 'web_enabled': row.web_enabled,
+                'mobile_enabled': row.mobile_enabled,
                 'locked': row.locked,
             }
     return result
@@ -76,6 +78,7 @@ class NotificationPreferenceSchema(Schema):
     label: str
     email_enabled: bool
     web_enabled: bool
+    mobile_enabled: bool = True
     # True when an admin has locked this notification type for the user's role;
     # the toggles are read-only and the values below reflect the role policy.
     locked: bool = False
@@ -86,6 +89,7 @@ class NotificationPreferenceUpdate(Schema):
     event_type: str
     email_enabled: bool = Field(...)
     web_enabled: bool = Field(...)
+    mobile_enabled: bool | None = None
 
 
 class UserNotificationPreferenceUpdate(NotificationPreferenceUpdate):
@@ -102,6 +106,7 @@ class UserNotificationPreferenceUpdateRequest(Schema):
 
 class FirebaseTokenUpsert(Schema):
     token: str
+    platform: Literal['web', 'android'] | None = None
 
 
 class FirebaseTokenRemove(Schema):
@@ -158,6 +163,7 @@ def _default_preferences_for_user(user) -> list[NotificationPreference]:
                 event_type=event_type,
                 email_enabled=seed.get('email_enabled', True),
                 web_enabled=seed.get('web_enabled', True),
+                mobile_enabled=seed.get('mobile_enabled', True),
             )
         preferences.append(pref)
     return preferences
@@ -180,6 +186,7 @@ def _effective_preference_rows(user, *, email_available: bool | None = None) -> 
             'label': labels[pref.event_type],
             'email_enabled': email_available and (entry['email_enabled'] if use_policy_value else pref.email_enabled),
             'web_enabled': entry['web_enabled'] if use_policy_value else pref.web_enabled,
+            'mobile_enabled': entry['mobile_enabled'] if use_policy_value else pref.mobile_enabled,
             'locked': locked,
             'email_available': email_available,
         })
@@ -215,6 +222,7 @@ def update_notification_preferences(request, payload: NotificationPreferenceUpda
             defaults={
                 'email_enabled': email_enabled,
                 'web_enabled': item.web_enabled,
+                **({'mobile_enabled': item.mobile_enabled} if item.mobile_enabled is not None else {}),
             },
         )
     return list_notification_preferences(request)
@@ -367,6 +375,7 @@ def save_user_notification_preferences(request, user_id: int, payload: UserNotif
             defaults={
                 'email_enabled': item.email_enabled and email_available,
                 'web_enabled': item.web_enabled,
+                **({'mobile_enabled': item.mobile_enabled} if item.mobile_enabled is not None else {}),
                 'locked': item.locked,
             },
         )
@@ -420,10 +429,12 @@ def save_role_notification_policies(request, body: dict = Body(...)):
                 email_enabled = bool(vals.get('email_enabled', True))
                 web_enabled = bool(vals.get('web_enabled', True))
                 previous = current_policy[role][event_type]
+                mobile_enabled = bool(vals.get('mobile_enabled', previous['mobile_enabled']))
 
                 if (
                     previous['email_enabled'] != email_enabled
                     or previous['web_enabled'] != web_enabled
+                    or previous['mobile_enabled'] != mobile_enabled
                 ):
                     NotificationPreference.objects.filter(
                         recipient__organization=org,
@@ -433,6 +444,7 @@ def save_role_notification_policies(request, body: dict = Body(...)):
                     ).update(
                         email_enabled=email_enabled,
                         web_enabled=web_enabled,
+                        mobile_enabled=mobile_enabled,
                     )
 
                 RoleNotificationPolicy.objects.update_or_create(
@@ -441,6 +453,7 @@ def save_role_notification_policies(request, body: dict = Body(...)):
                     defaults={
                         'email_enabled': email_enabled,
                         'web_enabled': web_enabled,
+                        'mobile_enabled': mobile_enabled,
                         'locked': bool(vals.get('locked', False)),
                     },
                 )
@@ -455,6 +468,7 @@ def save_firebase_token(request, payload: FirebaseTokenUpsert):
         defaults={
             'recipient': request.user,
             'user_agent': request.headers.get('User-Agent', ''),
+            'platform': payload.platform or ('android' if 'android' in request.headers.get('User-Agent', '').lower() else 'web'),
             'is_active': True,
         },
     )
@@ -473,11 +487,11 @@ def delete_firebase_token(request, payload: FirebaseTokenRemove):
 @router.post('/notifications/test-push', response={200: dict})
 def send_test_push(request):
     if not FirebaseMessagingToken.all_organizations.filter(recipient=request.user, is_active=True).exists():
-        raise HttpError(400, 'No active web push registration for your account. Enable web push first.')
+        raise HttpError(400, 'No active push registration for your account. Enable push on your device first.')
     _send_firebase_push(
         request.user,
         title='Test notification',
-        body='If you can see this, web push is working.',
+        body='If you can see this, push notifications are working.',
         data={},
     )
     return {'ok': True}
@@ -569,7 +583,7 @@ def send_report_review_request(request, payload: ReportReviewRequestCreate):
         },
     )
     from .service import _send_firebase_push
-    _send_firebase_push(notification.recipient, notification.title, notification.body, notification.data)
+    _send_firebase_push(notification.recipient, notification.title, notification.body, notification.data, event_type=notification.event_type)
     return {'notification_id': notification.id}
 
 
