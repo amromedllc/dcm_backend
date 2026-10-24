@@ -121,6 +121,7 @@ class CurrentUserSchema(UserSchema):
 class SetPinRequest(Schema):
     pin: str
     current_pin: str | None = None
+    password: str | None = None
 
 
 class VerifyPinRequest(Schema):
@@ -144,7 +145,12 @@ class PinStatusResponse(Schema):
     pin_length: int | None = None
 
 
-class TogglePinLockRequest(Schema):
+class PinProtectionRequest(Schema):
+    current_pin: str | None = None
+    password: str | None = None
+
+
+class TogglePinLockRequest(PinProtectionRequest):
     enabled: bool
 
 

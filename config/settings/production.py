@@ -145,6 +145,10 @@ JWT_SECRET_KEY = env('JWT_SECRET_KEY', default=SECRET_KEY)
 JWT_ALGORITHM = 'HS256'
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES = env.int('JWT_ACCESS_TOKEN_EXPIRE_MINUTES', default=15)
 JWT_REFRESH_TOKEN_EXPIRE_DAYS = env.int('JWT_REFRESH_TOKEN_EXPIRE_DAYS', default=7)
+AUTH_SESSION_MAX_HOURS = env.int('AUTH_SESSION_MAX_HOURS', default=8)
+if AUTH_SESSION_MAX_HOURS <= 0:
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured('AUTH_SESSION_MAX_HOURS must be positive')
 
 # TherapyPMS HTTP API (auth — encrypt → login; no direct DB password checks)
 TPMS_API_BASE_URL = env('TPMS_API_BASE_URL', default='https://app.therapypms.com')
@@ -325,6 +329,15 @@ else:
             'level': 'INFO',
         },
     }
+
+# Audit extras must survive formatting in both development and production.
+LOGGING.setdefault('formatters', {})['audit_json'] = {'()': 'shared.audit.AuditJSONFormatter'}
+LOGGING['handlers']['audit_console'] = {
+    'class': 'logging.StreamHandler', 'formatter': 'audit_json',
+}
+LOGGING.setdefault('loggers', {})['dcm.audit'] = {
+    'handlers': ['audit_console'], 'level': 'INFO', 'propagate': False,
+}
 
 UNFOLD = {
     'SITE_TITLE': 'DCM Admin',

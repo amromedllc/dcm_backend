@@ -3,6 +3,7 @@ import binascii
 import hashlib
 import io
 import logging
+import secrets
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
@@ -21,10 +22,12 @@ from ninja.errors import HttpError
 from django.db import transaction
 from django.db.models import Q
 
+from .security_audit import audit_security
+from .pin_security import verify_pin_attempt, set_account_pin, update_pin_protection
 from . import mfa
 from .models import PasswordResetLink, PasswordSetLink, User, UserMFA
 from .auth import (
-    create_access_token, create_refresh_token, decode_token, is_token_blocked,
+    create_access_token, create_refresh_token, decode_token, is_token_blocked, session_start_from_payload, consume_refresh_token,
     jwt_auth, jwt_auth_any_role, token_tenant_mismatch,
 )
 from .permissions import get_user_permissions, require_permission, resolve_permission_organization
@@ -61,6 +64,7 @@ from .schemas import (
     PinStatusResponse,
     SetPinRequest,
     TogglePinLockRequest,
+    PinProtectionRequest,
     UpdateAccountLanguageRequest,
     UpdateAccountSignatureRequest,
     UpdateAccountTimezoneRequest,
@@ -102,9 +106,11 @@ def _issue_tokens(user: User, tenant_id: int) -> TokenResponse:
     # through this one function. Downstream: the provider admin screen's
     # "Active" status is keyed off last_login being non-null.
     User.objects.filter(pk=user.pk).update(last_login=timezone.now())
+    session_start = timezone.now().timestamp()
+    session_id = secrets.token_hex(16)
     return TokenResponse(
-        access_token=create_access_token(user, tenant_id),
-        refresh_token=create_refresh_token(user, tenant_id),
+        access_token=create_access_token(user, tenant_id, session_started_at=session_start, session_id=session_id, idle_started_at=session_start),
+        refresh_token=create_refresh_token(user, tenant_id, session_started_at=session_start, session_id=session_id, idle_started_at=session_start),
         user_id=user.id,
         email=user.email,
         role=user.role,
@@ -113,6 +119,7 @@ def _issue_tokens(user: User, tenant_id: int) -> TokenResponse:
 
 
 @router.post('/login', response=LoginResponse, auth=None)
+@audit_security('auth.login')
 def login(request, data: LoginRequest):
     """
     Staff/provider accounts authenticate locally against their DCM password
@@ -207,6 +214,7 @@ def _sso_success_redirect(tokens: LoginResponse, redirecturl: str) -> HttpRespon
 
 
 @router.get('/sso/login', auth=None)
+@audit_security('auth.sso')
 def sso_login(request, token: str, redirecturl: str = '/'):
     """
     SSO hand-off from TherapyPMS: TPMS has already authenticated this admin/
@@ -272,13 +280,17 @@ def sso_login(request, token: str, redirecturl: str = '/'):
         return _sso_error_redirect('user_not_found')
 
     tokens = _mfa_gate(tenant, _issue_tokens(user, tenant.pk))
+    request._security_actor_id = user.pk
+    request._security_sso_outcome = 'challenge' if getattr(tokens, 'mfa_required', False) else 'success'
     return _sso_success_redirect(tokens, redirecturl)
 
 
 @router.post('/mfa/verify', response=TokenResponse, auth=None)
+@audit_security('auth.mfa_verify')
 def mfa_verify(request, data: MfaTokenCodeRequest):
     tenant = getattr(request, 'tenant', None)
     user, org_id = mfa.user_from_mfa_token(data.mfa_token, getattr(tenant, 'pk', None))
+    request._security_actor_id = user.pk
     mfa.check_code(user, data.code)
     return _issue_tokens(user, org_id)
 
@@ -299,9 +311,11 @@ def mfa_login_setup_start(request, data: MfaSetupStartRequest):
 
 
 @router.post('/mfa/setup/confirm', response=TokenResponse, auth=None)
+@audit_security('auth.mfa_setup_confirm')
 def mfa_login_setup_confirm(request, data: MfaTokenCodeRequest):
     tenant = getattr(request, 'tenant', None)
     user, org_id = mfa.user_from_mfa_token(data.mfa_token, getattr(tenant, 'pk', None))
+    request._security_actor_id = user.pk
     mfa.check_code(user, data.code, activate=True)
     return _issue_tokens(user, org_id)
 
@@ -363,22 +377,17 @@ def get_my_pin_status(request):
 
 
 @router.post('/account/pin', response=PinStatusResponse, auth=jwt_auth_any_role)
+@audit_security('pin.set')
 def set_my_pin(request, data: SetPinRequest):
     tenant = getattr(request, 'tenant', None)
     if not (tenant and getattr(tenant, 'pin_lock_allowed', False)):
         raise HttpError(400, 'PIN lock is not allowed by your organization.')
 
     pin = data.pin.strip()
-    if not (pin.isdigit() and len(pin) == 4):
+    if not (pin.isascii() and pin.isdigit() and len(pin) == 4):
         raise HttpError(400, 'PIN must be exactly 4 digits.')
 
-    user = request.user
-    if user.has_pin and data.current_pin is not None:
-        if not user.check_pin(data.current_pin.strip()):
-            raise HttpError(403, 'Current PIN is incorrect.')
-
-    user.set_pin(pin)
-    user.save(update_fields=['pin_hash', 'pin_length', 'pin_lock_enabled', 'pin_failed_attempts', 'pin_locked_until'])
+    user = set_account_pin(request.user.pk, pin, current_pin=data.current_pin, password=data.password, request=request)
     return PinStatusResponse(
         pin_lock_allowed=True,
         pin_lock_enabled=True,
@@ -388,17 +397,14 @@ def set_my_pin(request, data: SetPinRequest):
 
 
 @router.post('/account/pin/toggle', response=PinStatusResponse, auth=jwt_auth_any_role)
+@audit_security('pin.toggle')
 def toggle_my_pin_lock(request, data: TogglePinLockRequest):
     tenant = getattr(request, 'tenant', None)
     if data.enabled and not (tenant and getattr(tenant, 'pin_lock_allowed', False)):
         raise HttpError(400, 'PIN lock is not allowed by your organization.')
 
-    user = request.user
-    if data.enabled and not user.has_pin:
-        raise HttpError(400, 'You must set a PIN before enabling PIN lock.')
-
-    user.pin_lock_enabled = data.enabled
-    user.save(update_fields=['pin_lock_enabled'])
+    user = update_pin_protection(request.user.pk, enabled=data.enabled,
+                                 current_pin=data.current_pin, password=data.password, request=request)
     return PinStatusResponse(
         pin_lock_allowed=bool(tenant and getattr(tenant, 'pin_lock_allowed', False)),
         pin_lock_enabled=user.pin_lock_enabled,
@@ -408,39 +414,23 @@ def toggle_my_pin_lock(request, data: TogglePinLockRequest):
 
 
 @router.delete('/account/pin', response={204: None}, auth=jwt_auth_any_role)
-def remove_my_pin(request):
-    user = request.user
-    user.clear_pin()
-    user.save(update_fields=['pin_hash', 'pin_length', 'pin_lock_enabled', 'pin_failed_attempts', 'pin_locked_until'])
+@audit_security('pin.remove')
+def remove_my_pin(request, data: PinProtectionRequest = Body(None)):
+    data = data or PinProtectionRequest()
+    update_pin_protection(request.user.pk, remove=True,
+                          current_pin=data.current_pin, password=data.password, request=request)
     return 204, None
 
 
 @router.post('/pin/verify', response=dict, auth=jwt_auth_any_role)
+@audit_security('pin.verify')
 def verify_my_pin(request, data: VerifyPinRequest):
-    user = request.user
-    if not user.has_pin:
-        raise HttpError(400, 'No PIN is set for this account.')
-
-    now = timezone.now()
-    if user.pin_locked_until and user.pin_locked_until > now:
-        raise HttpError(429, 'Too many incorrect attempts. Try again in a few minutes.')
-
-    pin = data.pin.strip()
-    if not user.check_pin(pin):
-        user.pin_failed_attempts += 1
-        if user.pin_failed_attempts >= mfa.MAX_FAILED_ATTEMPTS:
-            user.pin_locked_until = now + timedelta(minutes=mfa.LOCKOUT_MINUTES)
-            user.pin_failed_attempts = 0
-        user.save(update_fields=['pin_failed_attempts', 'pin_locked_until'])
-        raise HttpError(400, 'Incorrect PIN.')
-
-    user.pin_failed_attempts = 0
-    user.pin_locked_until = None
-    user.save(update_fields=['pin_failed_attempts', 'pin_locked_until'])
+    verify_pin_attempt(request.user.pk, data.pin, request=request)
     return {'valid': True}
 
 
 @router.post('/pin/unlock', response=PinUnlockResponse, auth=None)
+@audit_security('pin.unlock')
 def unlock_with_pin(request, data: PinUnlockRequest):
     """Re-authenticate a PIN-locked app after its short-lived tokens expire."""
     try:
@@ -448,14 +438,23 @@ def unlock_with_pin(request, data: PinUnlockRequest):
             data.refresh_token,
             settings.JWT_SECRET_KEY,
             algorithms=[settings.JWT_ALGORITHM],
-            options={'verify_exp': False},
+            options={'verify_exp': False, 'require': ['exp', 'iat', 'sub', 'org_id', 'jti']},
         )
+        session_started_at = session_start_from_payload(payload)
     except jwt.InvalidTokenError:
         raise HttpError(401, 'Session expired. Please sign in again.')
 
     if payload.get('type') != 'refresh' or not isinstance(payload.get('exp'), (int, float)):
         raise HttpError(401, 'Session expired. Please sign in again.')
-    if not payload.get('org_id') or token_tenant_mismatch(payload, request) or is_token_blocked(payload):
+    if not payload.get('org_id') or token_tenant_mismatch(payload, request):
+        raise HttpError(401, 'Session expired. Please sign in again.')
+    from redis.exceptions import RedisError
+    try:
+        blocked = is_token_blocked(payload)
+    except RedisError:
+        logger.exception('PIN token revocation check unavailable')
+        raise HttpError(503, 'Could not securely unlock the session. Please retry.')
+    if blocked:
         raise HttpError(401, 'Session expired. Please sign in again.')
 
     try:
@@ -463,6 +462,7 @@ def unlock_with_pin(request, data: PinUnlockRequest):
     except (User.DoesNotExist, KeyError, TypeError, ValueError):
         raise HttpError(401, 'Session expired. Please sign in again.')
 
+    request._security_actor_id = user.pk
     tenant = getattr(request, 'tenant', None)
     if not (
         tenant
@@ -472,26 +472,27 @@ def unlock_with_pin(request, data: PinUnlockRequest):
     ):
         raise HttpError(401, 'PIN unlock is not available for this session.')
 
-    now = timezone.now()
-    if user.pin_locked_until and user.pin_locked_until > now:
-        raise HttpError(429, 'Too many incorrect attempts. Try again in a few minutes.')
-
-    if not user.check_pin(data.pin.strip()):
-        user.pin_failed_attempts += 1
-        if user.pin_failed_attempts >= mfa.MAX_FAILED_ATTEMPTS:
-            user.pin_locked_until = now + timedelta(minutes=mfa.LOCKOUT_MINUTES)
-            user.pin_failed_attempts = 0
-        user.save(update_fields=['pin_failed_attempts', 'pin_locked_until'])
-        raise HttpError(400, 'Incorrect PIN.')
-
-    user.pin_failed_attempts = 0
-    user.pin_locked_until = None
-    user.save(update_fields=['pin_failed_attempts', 'pin_locked_until'])
+    user = verify_pin_attempt(user.pk, data.pin, require_enabled=True, request=request)
     tenant_id = payload.get('org_id')
-    return PinUnlockResponse(
-        access_token=create_access_token(user, tenant_id),
-        refresh_token=create_refresh_token(user, tenant_id),
+    # Prepare replacement credentials first; do not consume the old token if
+    # signing or loading the replacement's configuration fails.
+    # A new idle-session identity keeps the old locked credentials locked.
+    session_id = secrets.token_hex(16)
+    idle_started_at = timezone.now().timestamp()
+    response = PinUnlockResponse(
+        access_token=create_access_token(user, tenant_id, session_started_at=session_started_at, session_id=session_id, idle_started_at=idle_started_at),
+        refresh_token=create_refresh_token(user, tenant_id, session_started_at=session_started_at, session_id=session_id, idle_started_at=idle_started_at),
     )
+    try:
+        consumed = consume_refresh_token(payload)
+    except RedisError:
+        logger.exception('PIN refresh-token rotation unavailable')
+        raise HttpError(503, 'Could not securely unlock the session. Please retry.')
+    except jwt.InvalidTokenError:
+        raise HttpError(401, 'Session expired. Please sign in again.')
+    if not consumed:
+        raise HttpError(401, 'This session token was already used. Please sign in again.')
+    return response
 
 
 def _verify_actor_password(user: User, password: str) -> bool:
@@ -649,6 +650,7 @@ def _tpms_caregiver_auth(request, tenant, email: str, payload: dict) -> TokenRes
 
 
 @router.post('/logout', auth=jwt_auth_any_role, response={204: None})
+@audit_security('auth.logout')
 def logout(request):
     """Revoke the current access token immediately. Token is blocklisted in Redis until expiry."""
     from .auth import blocklist_token
@@ -659,6 +661,7 @@ def logout(request):
 
 
 @router.post('/logout-all', auth=jwt_auth_any_role, response={204: None})
+@audit_security('auth.logout_all')
 def logout_all(request):
     """
     Revoke all active tokens for this user by rotating their token secret seed.
@@ -674,6 +677,13 @@ def logout_all(request):
 
 
 
+@router.post('/session/activity', auth=jwt_auth_any_role, response={204: None})
+def record_session_activity(request):
+    from .session_security import enforce_session_activity
+    enforce_session_activity(request._jwt_payload, request.tenant, touch=True)
+    return 204, None
+
+
 @router.post('/refresh', response=AccessTokenResponse, auth=None)
 def refresh_token(request, data: RefreshRequest):
     try:
@@ -684,12 +694,16 @@ def refresh_token(request, data: RefreshRequest):
             raise HttpError(401, 'Invalid or expired token')
         if is_token_blocked(payload):
             raise HttpError(401, 'Invalid or expired token')
+        from .session_security import enforce_session_activity
+        enforce_session_activity(payload, getattr(request, 'tenant', None))
         user = User.objects.get(id=int(payload['sub']), is_active=True)
         # Reuse the tenant this refresh token was issued for — not
         # request.tenant again — so a refresh can never move a session to a
         # different tenant even if somehow presented elsewhere (defense in
         # depth; token_tenant_mismatch above already blocks that case).
-        return AccessTokenResponse(access_token=create_access_token(user, payload['org_id']))
+        return AccessTokenResponse(access_token=create_access_token(
+            user, payload['org_id'], session_started_at=session_start_from_payload(payload),
+            session_id=payload.get('sid'), idle_started_at=payload.get('idle_started_at')))
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, User.DoesNotExist, KeyError):
         raise HttpError(401, 'Invalid or expired token')
 

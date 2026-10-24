@@ -1,3 +1,4 @@
+import json
 import logging
 from django.utils import timezone
 
@@ -58,3 +59,16 @@ def log_export(actor_id: int, export_id: int, export_type: str) -> None:
 def log_api_key_use(key_id: int, endpoint: str) -> None:
     log_event('api_key_used', None, 'api_key', key_id,
               {'endpoint': endpoint})
+
+
+class AuditJSONFormatter(logging.Formatter):
+    """Serialize the audit contract, not arbitrary LogRecord/request attributes."""
+    def format(self, record):
+        return json.dumps({
+            'timestamp': getattr(record, 'timestamp', None),
+            'event_type': getattr(record, 'event_type', None),
+            'actor_id': getattr(record, 'actor_id', None),
+            'resource_type': getattr(record, 'resource_type', None),
+            'resource_id': getattr(record, 'resource_id', None),
+            'metadata': getattr(record, 'metadata', {}),
+        })
