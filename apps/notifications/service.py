@@ -213,6 +213,69 @@ def send_mfa_verification_code(email: str, first_name: str, code: str, expires_i
         raise
 
 
+_ROLE_LABEL = {
+    'staff': 'Staff (therapist)',
+    'supervisor': 'Supervisor',
+    'admin': 'Administrator',
+    'superadmin': 'Superadmin',
+}
+
+
+def send_assistant_ticket(user, transcript: list[dict], note: str = '') -> None:
+    """Email an unresolved help-chat conversation to the support inbox as a
+    branded ticket. Unlike _create()/_send_email() above, failures are NOT
+    swallowed — the caller (the /assistant/ticket endpoint) needs to tell
+    the user whether it actually sent."""
+    support_email = getattr(settings, 'SUPPORT_EMAIL', '')
+    if not support_email:
+        raise ValueError('SUPPORT_EMAIL is not configured.')
+
+    user_name = user.full_name or '(no name)'
+    org_name = getattr(getattr(user, 'organization', None), 'name', '') or ''
+    role_label = _ROLE_LABEL.get(user.role, user.role)
+    subject = f'[Support ticket] {user_name} — Progressly help chat'
+
+    turns = [
+        {
+            'speaker': 'User' if message.get('role') == 'user' else 'Assistant',
+            'is_user': message.get('role') == 'user',
+            'content': message.get('content', ''),
+        }
+        for message in transcript
+    ]
+
+    # Plain-text fallback for clients that don't render HTML.
+    text_lines = [f'{t["speaker"]}: {t["content"]}' for t in turns]
+    body = '\n\n'.join([
+        f'{user_name} <{user.email}>',
+        f'Role: {role_label}' + (f' · {org_name}' if org_name else ''),
+        *([f'Note: {note}'] if note else []),
+        '--- Conversation ---',
+        '\n'.join(text_lines),
+    ])
+
+    html_body = render_to_string('notifications/assistant_ticket.html', {
+        'subject': subject,
+        'user_name': user_name,
+        'user_email': user.email,
+        'role_label': role_label,
+        'org_name': org_name,
+        'note': note,
+        'transcript': turns,
+    })
+
+    message = EmailMultiAlternatives(
+        subject=subject,
+        body=body,
+        from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', None),
+        to=[support_email],
+    )
+    message.attach_alternative(html_body, 'text/html')
+    sent_count = message.send(fail_silently=False)
+    if sent_count != 1:
+        raise RuntimeError('Email backend did not send the support ticket message')
+
+
 def _firebase_app():
     if not getattr(settings, 'FIREBASE_PROJECT_ID', '') and not getattr(settings, 'FIREBASE_CREDENTIALS_JSON', ''):
         return None

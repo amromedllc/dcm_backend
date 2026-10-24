@@ -1,6 +1,10 @@
+import logging
+from typing import Literal
+
 from django.core.exceptions import ObjectDoesNotExist
 from django.db.utils import IntegrityError
-from ninja import NinjaAPI
+from ninja import NinjaAPI, Schema
+from ninja.errors import HttpError
 from shared.tenancy import CrossOrganizationReferenceError
 from apps.accounts.api import router as accounts_router
 from apps.accounts.auth import jwt_auth, partner_auth
@@ -16,6 +20,8 @@ from apps.notifications.api import router as notifications_router
 from apps.integrations.api import router as integrations_router
 from apps.audit.api import router as audit_router
 from apps.tenants.api import router as tenants_router
+
+logger = logging.getLogger(__name__)
 
 api = NinjaAPI(
     title='DCM Platform API',
@@ -285,3 +291,88 @@ def dashboard(request):
         ]
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# In-app help assistant
+# ---------------------------------------------------------------------------
+
+class AssistantMessageSchema(Schema):
+    role: Literal['user', 'assistant']
+    content: str
+
+
+class AssistantChatRequest(Schema):
+    messages: list[AssistantMessageSchema]
+
+
+class AssistantChatResponse(Schema):
+    reply: str
+    # True when the assistant couldn't resolve the question and the frontend
+    # should offer a "send as a ticket" button under this reply.
+    offer_ticket: bool = False
+
+
+_OFFER_TICKET_MARKER = '[[OFFER_TICKET]]'
+
+
+@api.post('/assistant/chat', auth=jwt_auth, response=AssistantChatResponse, tags=['System'])
+def assistant_chat(request, payload: AssistantChatRequest):
+    """Stateless turn for the in-app help chatbot — the frontend sends the
+    whole conversation so far (including the newest user message) and gets
+    one reply back. No history is persisted server-side.
+
+    Never put client (patient) data in a prompt here: see shared/ai_client.py.
+    """
+    from shared.ai_client import AIError, chat
+    from shared.assistant_prompt import build_messages
+
+    if not payload.messages or payload.messages[-1].role != 'user':
+        raise HttpError(400, 'The last message must be from the user.')
+
+    # Cap history so a long-running chat can't balloon the prompt indefinitely.
+    history = [{'role': m.role, 'content': m.content[:4000]} for m in payload.messages[-20:]]
+    messages = build_messages(request.user.role, history)
+
+    try:
+        reply = chat(messages, max_tokens=600, temperature=0.3)
+    except AIError as exc:
+        raise HttpError(exc.status, str(exc))
+
+    offer_ticket = _OFFER_TICKET_MARKER in reply
+    reply = reply.replace(_OFFER_TICKET_MARKER, '').strip()
+
+    return {'reply': reply, 'offer_ticket': offer_ticket}
+
+
+class AssistantTicketRequest(Schema):
+    messages: list[AssistantMessageSchema]
+    note: str = ''
+
+
+class AssistantTicketResponse(Schema):
+    sent: bool
+
+
+@api.post('/assistant/ticket', auth=jwt_auth, response=AssistantTicketResponse, tags=['System'])
+def assistant_send_ticket(request, payload: AssistantTicketRequest):
+    """Email the current help-chat conversation to SUPPORT_EMAIL as a ticket
+    when the assistant couldn't resolve it. See AssistantChatResponse.offer_ticket."""
+    from apps.notifications.service import send_assistant_ticket
+
+    if not payload.messages:
+        raise HttpError(400, 'Nothing to send — the conversation is empty.')
+
+    try:
+        send_assistant_ticket(
+            request.user,
+            [m.dict() for m in payload.messages],
+            payload.note[:2000],
+        )
+    except ValueError:
+        raise HttpError(503, 'Support tickets are not set up yet. Please contact your administrator directly.')
+    except Exception:
+        logger.exception('Failed to send assistant support ticket for user=%s', request.user.id)
+        raise HttpError(502, 'Could not send the ticket. Please try again shortly.')
+
+    return {'sent': True}

@@ -165,6 +165,8 @@ AI_API_KEY = env('AI_API_KEY', default='')
 AI_MODEL = env('AI_MODEL', default='nvidia/nemotron-3-super-120b-a12b')
 AI_TIMEOUT_SECONDS = env.int('AI_TIMEOUT_SECONDS', default=60)
 
+SUPPORT_EMAIL = env('SUPPORT_EMAIL', default='')
+
 DOCUSEAL_BASE_URL = env('DOCUSEAL_BASE_URL')
 DOCUSEAL_SSO_SECRET = env('DOCUSEAL_SSO_SECRET')
 DOCUSEAL_WEBHOOK_SECRET = env('DOCUSEAL_WEBHOOK_SECRET', default='')
