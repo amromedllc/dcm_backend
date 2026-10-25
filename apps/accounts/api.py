@@ -202,15 +202,42 @@ def _sso_error_redirect(reason: str) -> HttpResponseRedirect:
     return HttpResponseRedirect(f'{base}/login?error={reason}')
 
 
-def _sso_success_redirect(tokens: LoginResponse, redirecturl: str) -> HttpResponseRedirect:
+def _sso_success_redirect(tokens: LoginResponse, redirecturl: str, tenant_id: int) -> HttpResponseRedirect:
+    """Exchange a one-use handoff; bearer credentials never enter browser URLs."""
+    import json
+    from .auth import _redis
+    from redis.exceptions import RedisError
     base = getattr(settings, 'FRONTEND_BASE_URL', 'https://app.progressly.io').rstrip('/')
-    target = _safe_sso_redirect_target(redirecturl)
-    fields = {
-        k: (str(v).lower() if isinstance(v, bool) else v)
-        for k, v in tokens.dict().items() if v is not None
-    }
-    fields['redirect'] = target
-    return HttpResponseRedirect(f'{base}/sso-callback#{urlencode(fields)}')
+    code = secrets.token_urlsafe(32)
+    try:
+        _redis().setex(f'dcm:sso:handoff:{code}', 60, json.dumps({
+            'organization_id': tenant_id, 'tokens': {**tokens.dict(),
+            'redirect_target': _safe_sso_redirect_target(redirecturl)},
+        }))
+    except RedisError:
+        raise HttpError(503, 'Could not securely complete sign-in. Please retry.')
+    return HttpResponseRedirect(f'{base}/sso-callback#{urlencode({"code": code})}')
+
+
+@router.post('/sso/exchange', response=dict, auth=None)
+def exchange_sso_handoff(request, data: dict = Body(...)):
+    import json
+    from .auth import _redis
+    from redis.exceptions import RedisError
+    code = data.get('code', '')
+    if not isinstance(code, str) or not 32 <= len(code) <= 64:
+        raise HttpError(401, 'Sign-in handoff expired. Please try again.')
+    try:
+        value = _redis().getdel(f'dcm:sso:handoff:{code}')
+    except RedisError:
+        raise HttpError(503, 'Could not securely complete sign-in. Please retry.')
+    if not value:
+        raise HttpError(401, 'Sign-in handoff expired. Please try again.')
+    handoff = json.loads(value)
+    tenant = getattr(request, 'tenant', None)
+    if tenant is None or tenant.pk != handoff['organization_id']:
+        raise HttpError(401, 'Sign-in handoff is not valid for this facility.')
+    return handoff['tokens']
 
 
 @router.get('/sso/login', auth=None)
@@ -282,7 +309,7 @@ def sso_login(request, token: str, redirecturl: str = '/'):
     tokens = _mfa_gate(tenant, _issue_tokens(user, tenant.pk))
     request._security_actor_id = user.pk
     request._security_sso_outcome = 'challenge' if getattr(tokens, 'mfa_required', False) else 'success'
-    return _sso_success_redirect(tokens, redirecturl)
+    return _sso_success_redirect(tokens, redirecturl, tenant.pk)
 
 
 @router.post('/mfa/verify', response=TokenResponse, auth=None)
