@@ -21,6 +21,7 @@ import pyotp
 import qrcode
 from cryptography.fernet import Fernet, InvalidToken
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 from ninja.errors import HttpError
 
@@ -196,19 +197,24 @@ def _check_totp_code(mfa: UserMFA, code: str, *, activate: bool, now) -> None:
 def check_code(user: User, code: str, *, activate: bool = False) -> None:
     """Validate a 6-digit code or raise HttpError. Locks the account's MFA
     after repeated failures and rejects re-use of an already-accepted code."""
-    mfa = UserMFA.objects.filter(user=user).first()
-    if mfa is None or (not mfa.is_active and not activate):
-        raise HttpError(400, 'MFA is not set up for this account')
-
-    now = timezone.now()
-    if mfa.locked_until and mfa.locked_until > now:
-        raise HttpError(429, 'Too many incorrect codes. Try again in a few minutes.')
-
-    code = (code or '').strip().replace(' ', '')
-    if mfa.method == UserMFA.Method.EMAIL:
-        _check_email_code(mfa, code, activate=activate, now=now)
-    else:
-        _check_totp_code(mfa, code, activate=activate, now=now)
+    error = None
+    with transaction.atomic():
+        factor = UserMFA.objects.select_for_update().filter(user=user).first()
+        if factor is None or (not factor.is_active and not activate):
+            raise HttpError(400, 'MFA is not set up for this account')
+        now = timezone.now()
+        if factor.locked_until and factor.locked_until > now:
+            raise HttpError(429, 'Too many incorrect codes. Try again in a few minutes.')
+        code = (code or '').strip().replace(' ', '')
+        try:
+            if factor.method == UserMFA.Method.EMAIL:
+                _check_email_code(factor, code, activate=activate, now=now)
+            else:
+                _check_totp_code(factor, code, activate=activate, now=now)
+        except HttpError as exc:
+            error = exc
+    if error:
+        raise error
 
 
 def create_mfa_token(user: User, tenant_id: int) -> str:

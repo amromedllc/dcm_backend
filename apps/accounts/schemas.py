@@ -74,7 +74,7 @@ class MfaStatusSchema(Schema):
 
 
 class MfaRemoveRequest(Schema):
-    password: str
+    password: str = ''
 
 
 class RefreshRequest(Schema):
@@ -274,3 +274,11 @@ class StaffSchema(Schema):
     mfa_enabled: bool = False
     password_link_status: str = 'not_invited'
     password_link_expires_at: datetime | None = None
+
+
+class StepUpRequest(Schema):
+    path: str
+    method: str
+    digest: str
+    password: str | None = None
+    code: str | None = None

@@ -147,3 +147,37 @@ class TokenRefreshRouteTests(TestCase):
             self.assertEqual(response.status_code, 204)
             self.user.refresh_from_db()
             self.assertFalse(self.user.has_pin)
+
+    def test_sensitive_role_change_requires_exact_single_use_step_up_over_http(self):
+        import hashlib
+        import json
+        from apps.accounts.tests.test_step_up import GrantRedis
+        self.user.role = User.Role.ADMIN
+        self.user.save(update_fields=['role'])
+        target = User.objects.create_user(email='step-up-target@example.test', password='target-pass', organization=self.org)
+        access = create_access_token(self.user, self.org.pk)
+        headers = dict(HTTP_HOST='localhost', HTTP_AUTHORIZATION=f'Bearer {access}')
+        path = f'/auth/users/{target.pk}'
+        body = json.dumps({'role': 'supervisor'})
+        with mock.patch('apps.accounts.auth.is_token_blocked', return_value=False), \
+             mock.patch('apps.accounts.step_up._redis', return_value=GrantRedis()):
+            response = self.client.patch('/api/v1'+path, data=body, content_type='application/json', **headers)
+            self.assertEqual(response.status_code, 428)
+            target.refresh_from_db()
+            self.assertEqual(target.role, User.Role.STAFF)
+            response = self.client.get('/api/v1/auth/account/step-up', **headers)
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json()['password_required'])
+            response = self.client.post('/api/v1/auth/account/step-up', content_type='application/json', data={
+                'path': path, 'method': 'PATCH', 'digest': hashlib.sha256(body.encode()).hexdigest(), 'password': 'secret-pass'}, **headers)
+            self.assertEqual(response.status_code, 200)
+            approval = response.json()['verification_token']
+            proof_headers = {**headers, 'HTTP_X_STEP_UP_TOKEN': approval}
+            mismatch = self.client.patch('/api/v1'+path, data=json.dumps({'role': 'staff'}), content_type='application/json', **proof_headers)
+            self.assertEqual(mismatch.status_code, 428)
+            success = self.client.patch('/api/v1'+path, data=body, content_type='application/json', **proof_headers)
+            self.assertEqual(success.status_code, 200)
+            target.refresh_from_db()
+            self.assertEqual(target.role, User.Role.SUPERVISOR)
+            replay = self.client.patch('/api/v1'+path, data=body, content_type='application/json', **proof_headers)
+            self.assertEqual(replay.status_code, 428)

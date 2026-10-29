@@ -23,6 +23,7 @@ from django.db import transaction
 from django.db.models import Q
 
 from .security_audit import audit_security
+from . import step_up
 from .pin_security import verify_pin_attempt, set_account_pin, update_pin_protection
 from . import mfa
 from .models import PasswordResetLink, PasswordSetLink, User, UserMFA
@@ -33,6 +34,7 @@ from .auth import (
 from .permissions import get_user_permissions, require_permission, resolve_permission_organization
 from .schemas import (
     LoginRequest,
+    StepUpRequest,
     LoginResponse,
     MfaAccountSetupStartRequest,
     MfaCodeRequest,
@@ -360,6 +362,17 @@ def get_features(request):
     return {'ai_enabled': ai_client.is_enabled()}
 
 
+@router.get('/account/step-up', response=dict, auth=jwt_auth_any_role)
+def get_step_up_requirements(request):
+    return step_up.requirements(request)
+
+
+@router.post('/account/step-up', response=dict, auth=jwt_auth_any_role)
+@audit_security('auth.step_up')
+def verify_step_up(request, data: StepUpRequest):
+    return step_up.verify(request, data)
+
+
 @router.get('/account/mfa', response=MfaStatusSchema, auth=jwt_auth_any_role)
 def get_my_mfa(request):
     return _mfa_status(request.user)
@@ -527,14 +540,14 @@ def _verify_actor_password(user: User, password: str) -> bool:
 
 
 @router.post('/users/{user_id}/mfa/remove', response={204: None}, auth=jwt_auth)
+@audit_security('auth.mfa_remove')
 def remove_user_mfa(request, user_id: int, data: MfaRemoveRequest):
     require_permission(request, 'admin_users_edit')
+    step_up.require_step_up(request)
     try:
         user = User.objects.get(_same_practice_q(request.user), id=user_id)
     except User.DoesNotExist:
         raise HttpError(404, 'User not found')
-    if not _verify_actor_password(request.user, data.password):
-        raise HttpError(403, 'Incorrect password')
     UserMFA.objects.filter(user=user).delete()
     return 204, None
 
@@ -1205,11 +1218,13 @@ def _list_native_staffs(request, include_inactive: bool) -> list[StaffSchema]:
 
 
 @router.post('/users/{user_id}/password-link', response=PasswordSetLinkGenerateResponse, auth=jwt_auth)
+@audit_security('auth.password_link')
 def generate_password_set_link(request, user_id: int, data: PasswordSetLinkGenerateRequest):
     """Admin-generated one-time link so a synced provider can set their DCM
     login password, instead of relying on TherapyPMS's /ios/login. See
     PasswordSetLink for why generating a new link expires any prior one."""
     require_permission(request, 'admin_users_edit')
+    step_up.require_step_up(request)
     try:
         user = User.objects.get(_same_practice_q(request.user), id=user_id)
     except User.DoesNotExist:
@@ -1370,8 +1385,10 @@ def _assert_can_assign_role(request, target_role: str) -> None:
 
 
 @router.post('/users', response={201: UserSchema, 400: ErrorResponse}, auth=jwt_auth)
+@audit_security('auth.account_create')
 def create_user(request, data: UserCreateRequest):
     require_permission(request, 'admin_users_edit')
+    step_up.require_step_up(request)
     if data.role == User.Role.CAREGIVER:
         return 400, ErrorResponse(detail='Caregiver accounts are provisioned by portal login only')
     _assert_can_assign_role(request, data.role)
@@ -1389,8 +1406,11 @@ def create_user(request, data: UserCreateRequest):
 
 
 @router.patch('/users/{user_id}', response=UserSchema, auth=jwt_auth)
+@audit_security('auth.account_update')
 def update_user(request, user_id: int, data: UserUpdateRequest):
     require_permission(request, 'admin_users_edit')
+    if any(getattr(data, field) is not None for field in ('role', 'is_active', 'mfa_required')):
+        step_up.require_step_up(request)
     try:
         user = User.objects.get(_same_practice_q(request.user), id=user_id)
     except User.DoesNotExist:
@@ -1447,6 +1467,7 @@ def get_role_permissions(request):
 
 
 @router.put('/admin/role-permissions', auth=jwt_auth)
+@audit_security('auth.permissions_change')
 def save_role_permissions(request, body: dict = Body(...)):
     """Save the permission matrix for the login facility.
 
@@ -1454,6 +1475,7 @@ def save_role_permissions(request, body: dict = Body(...)):
     under the Organization resolved from the logged-in user's JWT/tenant.
     """
     require_permission(request, 'admin_privileges')
+    step_up.require_step_up(request)
     from .models import RolePermission
     from .permissions import PERMISSION_DEFAULTS, _apply_role_guarantees
 
