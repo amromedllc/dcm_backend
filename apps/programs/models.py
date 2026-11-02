@@ -235,6 +235,7 @@ class Target(TenantAwareModel):
         DISCRETE_TRIAL  = 'discrete_trial',  'Discrete Trial'
         DURATION        = 'duration',        'Duration'
         RATE            = 'rate',            'Rate'
+        SCATTERPLOT     = 'scatterplot',     'Scatterplot'
         TASK_ANALYSIS   = 'task_analysis',   'Task Analysis'
         SET_OF_TARGETS  = 'set_of_targets',  'Set of Targets'
         SHAPING         = 'shaping',         'Shaping'
@@ -404,6 +405,7 @@ _ACCURACY_MEASUREMENTS = [Target.Measurement.PERCENT_CORRECT, Target.Measurement
 
 MEASUREMENTS_BY_TARGET_TYPE: dict[str, list[str]] = {
     Target.MeasurementType.DISCRETE_TRIAL: _ACCURACY_MEASUREMENTS,
+    Target.MeasurementType.SCATTERPLOT: [Target.Measurement.FREQUENCY],
     Target.MeasurementType.DURATION: [
         Target.Measurement.PERCENT_CORRECT,
         Target.Measurement.FREQUENCY,
@@ -422,6 +424,7 @@ MEASUREMENTS_BY_TARGET_TYPE: dict[str, list[str]] = {
 
 DEFAULT_MEASUREMENT_BY_TARGET_TYPE: dict[str, str] = {
     Target.MeasurementType.DISCRETE_TRIAL: Target.Measurement.PERCENT_CORRECT,
+    Target.MeasurementType.SCATTERPLOT: Target.Measurement.FREQUENCY,
     Target.MeasurementType.DURATION: Target.Measurement.TOTAL_OBSERVED_DURATION,
     Target.MeasurementType.RATE: Target.Measurement.RATE_PER_MINUTE,
 }
