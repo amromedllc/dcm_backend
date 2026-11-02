@@ -11,6 +11,7 @@ from apps.accounts.auth import jwt_auth, partner_auth
 from apps.clients.api import router as clients_router
 from apps.programs.api import router as programs_router
 from apps.sessions.api import router as sessions_router
+from apps.sessions.supervision_api import router as supervision_router
 from apps.notes.api import router as notes_router
 from apps.behavior_plans.api import router as behavior_plans_router
 from apps.caregiver_portal.api import router as caregiver_portal_router
@@ -70,6 +71,7 @@ def _integrity_error(request, exc: IntegrityError):
     return api.create_response(request, {'detail': 'This conflicts with existing data'}, status=409)
 
 
+api.add_router('/supervision', supervision_router, tags=['Supervision'])
 api.add_router('/auth', accounts_router, tags=['Authentication'])
 api.add_router('/clients', clients_router, tags=['Clients'])
 api.add_router('/', programs_router, tags=['Programs'])
