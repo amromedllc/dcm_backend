@@ -270,6 +270,7 @@ class BehaviorEvent(OrganizationScopedMixin):
     target_name = models.CharField(max_length=200)
     occurred_at = models.DateTimeField(db_index=True)
     duration_seconds = models.PositiveIntegerField(null=True, blank=True)
+    observation_ended_at = models.DateTimeField(null=True, blank=True)
     frequency_count = models.PositiveIntegerField(default=1)
     severity = models.CharField(max_length=10, choices=Severity.choices, blank=True)
     notes = models.TextField(blank=True)
@@ -282,6 +283,11 @@ class BehaviorEvent(OrganizationScopedMixin):
         app_label = 'dcm_sessions'
         ordering = ['occurred_at']
         constraints = [
+            models.CheckConstraint(
+                check=models.Q(observation_ended_at__isnull=True) | (
+                    models.Q(observation_ended_at__gt=models.F('occurred_at'), frequency_count=0, duration_seconds__isnull=True)
+                ), name='valid_scatterplot_observation',
+            ),
             models.UniqueConstraint(
                 fields=['session_run', 'client_event_id'],
                 condition=models.Q(client_event_id__isnull=False),

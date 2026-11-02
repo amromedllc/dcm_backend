@@ -118,7 +118,7 @@ def evaluate_session_mastery(session_run) -> list[Target]:
         .distinct()
     )
     behavior_target_ids = (
-        BehaviorEvent.objects
+        BehaviorEvent.objects.filter(observation_ended_at__isnull=True)
         .filter(session_run=session_run)
         .values_list('target_id', flat=True)
         .distinct()
@@ -285,7 +285,7 @@ def _behavior_metric_value(target: Target, session, criteria: dict) -> tuple[int
     """
     from apps.sessions.models import BehaviorEvent
 
-    events = BehaviorEvent.objects.filter(session_run=session, target_id=target.id)
+    events = BehaviorEvent.objects.filter(session_run=session, target_id=target.id, observation_ended_at__isnull=True)
     total_events = events.aggregate(total=Sum('frequency_count'))['total'] or 0
     objective_key = str(criteria.get('objective_key') or '').lower()
 
@@ -396,7 +396,7 @@ def _recent_sessions_for_target(target: Target, limit: int, criteria: dict | Non
     from apps.sessions.models import SessionRun
 
     event_filter = (
-        {'behavior_events__target_id': target.id}
+        {'behavior_events__target_id': target.id, 'behavior_events__observation_ended_at__isnull': True}
         if _uses_behavior_events(target, criteria)
         else {'trial_events__target_id': target.id}
     )

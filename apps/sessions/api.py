@@ -296,7 +296,7 @@ def _build_trial_summary(session_run: SessionRun) -> list[TrialSummaryItem]:
     if behavior_targets:
         rows = list(
             BehaviorEvent.objects
-            .filter(session_run=session_run, target_id__in=behavior_targets)
+            .filter(session_run=session_run, target_id__in=behavior_targets, observation_ended_at__isnull=True)
             .values('target_id', 'target_name', 'frequency_count', 'duration_seconds')
         )
         result += _behavior_summary_items(
@@ -340,7 +340,7 @@ def _trial_summaries_for_sessions(sessions: list[SessionRun]) -> dict[int, list[
     if all_behavior_target_ids:
         for row in (
             BehaviorEvent.objects
-            .filter(session_run_id__in=session_ids, target_id__in=all_behavior_target_ids)
+            .filter(session_run_id__in=session_ids, target_id__in=all_behavior_target_ids, observation_ended_at__isnull=True)
             .values('session_run_id', 'target_id', 'target_name', 'frequency_count', 'duration_seconds')
         ):
             behavior_rows_by_session.setdefault(row['session_run_id'], []).append(row)
@@ -505,7 +505,7 @@ def _serialize_session(
         'rejection_reason': session.rejection_reason,
         'program_snapshot': session.program_snapshot,
         'trial_summary': trial_summary if trial_summary is not None else _build_trial_summary(session),
-        'behavior_event_count': behavior_event_count if behavior_event_count is not None else session.behavior_events.count(),
+        'behavior_event_count': behavior_event_count if behavior_event_count is not None else session.behavior_events.filter(observation_ended_at__isnull=True).count(),
         'abc_event_count': abc_event_count if abc_event_count is not None else session.abc_events.count(),
         'created_at': session.created_at,
     }
@@ -993,7 +993,7 @@ def list_sessions(
     session_ids = [s.id for s in sessions]
     trial_summaries = _trial_summaries_for_sessions(sessions)
     behavior_counts = dict(
-        BehaviorEvent.objects.filter(session_run_id__in=session_ids)
+        BehaviorEvent.objects.filter(session_run_id__in=session_ids, observation_ended_at__isnull=True)
         .values('session_run_id').annotate(c=Count('id')).values_list('session_run_id', 'c')
     )
     abc_counts = dict(
@@ -1163,23 +1163,34 @@ def delete_trial(request, session_id: int, trial_id: int, reason: str = ''):
 # Behavior events
 # ---------------------------------------------------------------------------
 
+def _validate_scatterplot_observation(session: SessionRun, data: BehaviorEventCreateRequest) -> None:
+    if data.observation_ended_at is None:
+        return
+    target = next((target for program in session.program_snapshot.get('programs', [])
+                   for target in program.get('targets', []) if target.get('id') == data.target_id), None)
+    if not target or target.get('measurement_type') != 'scatterplot':
+        raise HttpError(400, 'Observed periods require a scatterplot target in this session snapshot')
+    end = data.observation_ended_at
+    limit = session.ended_at or getattr(session, 'submitted_at', None) or getattr(session, 'reviewed_at', None) or timezone.now()
+    if data.occurred_at < session.started_at or end > limit or end > timezone.now():
+        raise HttpError(400, 'Observed period must be inside the session window and cannot end in the future')
+
+
 def _get_or_create_behavior(session_id: int, data: BehaviorEventCreateRequest) -> tuple[BehaviorEvent, bool]:
-    """
-    Upserts on (session, client_event_id) when the mobile offline queue sends
-    one — closes the crash window where a sync call reaches the server but
-    the app dies before the local row can be flagged synced, which would
-    otherwise resend and duplicate on retry (unlike trials, behavior events
-    have no natural (target, trial_number) key to dedupe on). Falls back to
-    a plain create for older clients that do not send a client_event_id.
-    """
+    """Stable IDs deduplicate both occurrences and explicit observed periods."""
+    if data.observation_ended_at is not None:
+        _validate_scatterplot_observation(SessionRun.objects.get(pk=session_id), data)
     payload = data.dict()
     client_event_id = payload.pop('client_event_id', None)
     if client_event_id:
-        return BehaviorEvent.objects.get_or_create(
-            session_run_id=session_id,
-            client_event_id=client_event_id,
-            defaults=payload,
+        event, created = BehaviorEvent.objects.get_or_create(
+            session_run_id=session_id, client_event_id=client_event_id, defaults=payload,
         )
+        # Never silently acknowledge a different observed interval on a reused ID.
+        if not created and (data.observation_ended_at is not None or event.observation_ended_at is not None):
+            if any(getattr(event, key) != value for key, value in payload.items()):
+                raise HttpError(409, 'Conflicting scatterplot observation for this client_event_id')
+        return event, created
     return BehaviorEvent.objects.create(session_run_id=session_id, **payload), True
 
 
@@ -1193,10 +1204,11 @@ def list_behaviors(request, session_id: int):
 @transaction.atomic
 def add_behavior(request, session_id: int, data: BehaviorEventCreateRequest, reason: str = ''):
     session, closed = _session_for_data_change(request, session_id, reason)
-    data.occurred_at = _clamp_to_manual_window(session, data.occurred_at)
+    if data.observation_ended_at is None:
+        data.occurred_at = _clamp_to_manual_window(session, data.occurred_at)
     event, created = _get_or_create_behavior(session_id, data)
     if closed and created:
-        _record_closed_session_edit(request, session, f'Added behavior event for {event.target_name}', reason)
+        _record_closed_session_edit(request, session, f'Added {"observed period" if event.observation_ended_at else "behavior event"} for {event.target_name}', reason)
     return 201, event
 
 
@@ -1208,7 +1220,7 @@ def delete_behavior(request, session_id: int, event_id: int, reason: str = ''):
         event = BehaviorEvent.objects.get(id=event_id, session_run_id=session_id)
     except BehaviorEvent.DoesNotExist:
         raise HttpError(404, 'Behavior event not found')
-    description = f'Deleted behavior event for {event.target_name}'
+    description = f'Deleted {"observed period" if event.observation_ended_at else "behavior event"} for {event.target_name}'
     event.delete()
     if closed:
         _record_closed_session_edit(request, session, description, reason)

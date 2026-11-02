@@ -32,26 +32,27 @@ class ScatterplotTests(SimpleTestCase):
     def test_complete_empty_grid(self):
         cells = self.bucket([])
         self.assertEqual(len(cells), 24 * 7)
-        self.assertEqual(cells[0], {'weekday': 0, 'minute_of_day': 0, 'count': 0})
-        self.assertTrue(all(c['count'] == 0 for c in cells))
+        self.assertEqual(cells[0]['observation_state'], 'unobserved')
+        self.assertIsNone(cells[0]['count'])
+        self.assertTrue(all(c['count'] is None for c in cells))
 
     def test_local_weekday_rollover_and_half_hour_grid(self):
         cells = self.bucket([self.event('2026-01-04T18:45:00+00:00', 3)], 30, 'Asia/Kolkata')
         self.assertEqual(len(cells), 48 * 7)
-        self.assertEqual([c for c in cells if c['count']], [{'weekday': 0, 'minute_of_day': 0, 'count': 3}])
+        self.assertEqual([{key: c[key] for key in ('weekday', 'minute_of_day', 'count')} for c in cells if c['count']], [{'weekday': 0, 'minute_of_day': 0, 'count': 3}])
 
     def test_repeated_weekdays_sum_counts(self):
         cells = self.bucket([self.event('2026-01-05T10:01:00+00:00', 2), self.event('2026-01-12T10:59:59+00:00', 4)])
-        self.assertEqual([c for c in cells if c['count']], [{'weekday': 0, 'minute_of_day': 600, 'count': 6}])
+        self.assertEqual([{key: c[key] for key in ('weekday', 'minute_of_day', 'count')} for c in cells if c['count']], [{'weekday': 0, 'minute_of_day': 600, 'count': 6}])
 
     def test_date_and_bucket_boundaries(self):
         cells = self.bucket([self.event('2026-01-05T10:29:59+00:00'), self.event('2026-01-05T10:30:00+00:00'), self.event('2025-12-31T23:59:59+00:00', 9), self.event('2026-02-01T00:00:00+00:00', 9), self.event('2026-01-31T23:59:59+00:00', 2)], 30)
-        self.assertEqual(sum(c['count'] for c in cells), 4)
+        self.assertEqual(sum(c['count'] or 0 for c in cells), 4)
         self.assertEqual([(c['minute_of_day'], c['count']) for c in cells if c['count']], [(600, 1), (630, 1), (1410, 2)])
 
     def test_dst_repeated_hour_keeps_both_events(self):
         cells = self.bucket([self.event('2026-11-01T05:30:00+00:00'), self.event('2026-11-01T06:30:00+00:00')], zone='America/New_York', start=date(2026, 11, 1), end=date(2026, 11, 1))
-        self.assertEqual([c for c in cells if c['count']], [{'weekday': 6, 'minute_of_day': 60, 'count': 2}])
+        self.assertEqual([{key: c[key] for key in ('weekday', 'minute_of_day', 'count')} for c in cells if c['count']], [{'weekday': 6, 'minute_of_day': 60, 'count': 2}])
 
     def test_invalid_bucket_size(self):
         with self.assertRaises(ValueError):
@@ -68,7 +69,7 @@ class ScatterplotTests(SimpleTestCase):
             self.assertEqual(filters['target_id__in'], [1])
             self.assertEqual(filters['session_run__external_client_id__in'], [101])
             self.assertEqual(filters['session_run__organization_id'], 10)
-            self.assertEqual(filters['occurred_at__gte'].astimezone(utc.utc), datetime(2025, 12, 31, 18, 30, tzinfo=utc.utc))
+            self.assertEqual(dict(events_manager.filter.call_args.args[0].children)['occurred_at__gte'].astimezone(utc.utc), datetime(2025, 12, 31, 18, 30, tzinfo=utc.utc))
             self.assertEqual(filters['occurred_at__lt'].astimezone(utc.utc), datetime(2026, 1, 31, 18, 30, tzinfo=utc.utc))
             self.assertEqual(data['total_occurrences'], 3)
             self.assertEqual(data['timezone'], 'Asia/Kolkata')
@@ -105,3 +106,62 @@ class ScatterplotTests(SimpleTestCase):
                 with self.assertRaises(HttpError) as error:
                     api.program_scatterplot(self.request, 1, self.start, self.end, target_ids=invalid)
                 self.assertEqual(error.exception.status_code, 400)
+
+
+    def observed(self, start, end, target=1):
+        row = self.event(start, 0)
+        row.update(target_id=target, observation_ended_at=datetime.fromisoformat(end))
+        return row
+
+    def cell(self, events, start=date(2026, 1, 5), end=date(2026, 1, 5), targets=(1,), minutes=60):
+        rows = scatterplot.bucket_scatterplot(events, start, end, minutes, ZoneInfo('UTC'), targets)
+        return next(row for row in rows if row['weekday'] == 0 and row['minute_of_day'] == 600)
+
+    def test_observed_zero_is_distinct_from_unobserved(self):
+        empty = self.cell([])
+        zero = self.cell([self.observed('2026-01-05T10:00:00+00:00', '2026-01-05T11:00:00+00:00')])
+        self.assertEqual(empty['observation_state'], 'unobserved')
+        self.assertIsNone(empty['count'])
+        self.assertEqual(zero['observation_state'], 'observed')
+        self.assertEqual(zero['count'], 0)
+        self.assertEqual(zero['observed_seconds'], 3600)
+
+    def test_partial_coverage_does_not_claim_full_zero(self):
+        row = self.cell([self.observed('2026-01-05T10:15:00+00:00', '2026-01-05T10:45:00+00:00')])
+        self.assertEqual(row['observation_state'], 'partial')
+        self.assertEqual(row['observed_seconds'], 1800)
+        self.assertEqual(row['expected_seconds'], 3600)
+
+    def test_overlapping_and_replayed_periods_count_only_once(self):
+        periods = [self.observed('2026-01-05T10:00:00+00:00', '2026-01-05T10:45:00+00:00'), self.observed('2026-01-05T10:30:00+00:00', '2026-01-05T11:00:00+00:00')]
+        row = self.cell(periods + periods)
+        self.assertEqual(row['observed_seconds'], 3600)
+        self.assertEqual(row['observation_state'], 'observed')
+
+    def test_multiple_dates_and_targets_require_all_selected_coverage(self):
+        period = self.observed('2026-01-05T10:00:00+00:00', '2026-01-05T11:00:00+00:00')
+        self.assertEqual(self.cell([period], end=date(2026, 1, 12))['observation_state'], 'partial')
+        self.assertEqual(self.cell([period], targets=(1, 2))['observation_state'], 'partial')
+        second = self.observed('2026-01-05T10:00:00+00:00', '2026-01-05T11:00:00+00:00', 2)
+        self.assertEqual(self.cell([period, second], targets=(1, 2))['observation_state'], 'observed')
+
+    def test_occurrences_without_coverage_do_not_create_observation(self):
+        row = self.cell([self.event('2026-01-05T10:10:00+00:00', 2)])
+        self.assertEqual(row['count'], 2)
+        self.assertEqual(row['observation_state'], 'unobserved')
+        self.assertEqual(row['observed_seconds'], 0)
+
+    def test_period_clipping_and_half_hour_coverage(self):
+        rows = scatterplot.bucket_scatterplot([self.observed('2026-01-04T23:30:00+00:00', '2026-01-05T00:30:00+00:00')], date(2026, 1, 5), date(2026, 1, 5), 30, ZoneInfo('UTC'), [1])
+        cell = next(row for row in rows if row['weekday'] == 0 and row['minute_of_day'] == 0)
+        self.assertEqual(cell['observed_seconds'], 1800)
+        self.assertEqual(cell['observation_state'], 'observed')
+        self.assertEqual(sum(row['observed_seconds'] for row in rows), 1800)
+
+    def test_dst_coverage_uses_elapsed_time_not_wall_clock_subtraction(self):
+        events = [self.observed('2026-11-01T05:00:00+00:00', '2026-11-01T07:00:00+00:00')]
+        rows = scatterplot.bucket_scatterplot(events, date(2026, 11, 1), date(2026, 11, 1), 60, ZoneInfo('America/New_York'), [1])
+        cell = next(row for row in rows if row['weekday'] == 6 and row['minute_of_day'] == 60)
+        self.assertEqual(cell['observed_seconds'], 7200)
+        self.assertEqual(cell['expected_seconds'], 7200)
+        self.assertEqual(cell['observation_state'], 'observed')
