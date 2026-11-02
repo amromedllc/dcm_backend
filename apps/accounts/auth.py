@@ -1,3 +1,4 @@
+import math
 import secrets
 import jwt
 from datetime import timedelta
@@ -32,6 +33,20 @@ def blocklist_token(payload: dict) -> None:
         _redis().setex(_blocklist_key(jti), ttl, '1')
 
 
+def consume_refresh_token(payload: dict) -> bool:
+    """Atomically invalidate a refresh token through its PIN-unlock deadline.
+
+    Its ordinary expiry may already have passed, so retaining the marker only
+    until exp would let the same token unlock again inside the session window.
+    """
+    jti = payload.get('jti')
+    if payload.get('type') != 'refresh' or not isinstance(jti, str) or not jti:
+        raise jwt.InvalidTokenError('Invalid refresh token identity')
+    start = session_start_from_payload(payload)
+    ttl = max(1, math.ceil(start + settings.AUTH_SESSION_MAX_HOURS * 3600 - timezone.now().timestamp()))
+    return bool(_redis().set(_blocklist_key(jti), '1', nx=True, ex=ttl))
+
+
 def is_token_blocked(payload: dict) -> bool:
     jti = payload.get('jti')
     user_id = payload.get('sub')
@@ -48,7 +63,28 @@ def is_token_blocked(payload: dict) -> bool:
     return False
 
 
-def create_access_token(user: User, tenant_id: int) -> str:
+def session_start_from_payload(payload: dict) -> float:
+    """Legacy tokens use their signed issuance time, never the unlock time."""
+    start = payload.get('session_started_at', payload.get('iat'))
+    if isinstance(start, bool) or not isinstance(start, (int, float)) or not math.isfinite(start):
+        raise jwt.InvalidTokenError('Invalid session start')
+    now = timezone.now().timestamp()
+    if start <= 0 or start > now or now >= start + settings.AUTH_SESSION_MAX_HOURS * 3600:
+        raise jwt.ExpiredSignatureError('Maximum session lifetime reached')
+    return float(start)
+
+
+def create_access_token(
+    user: User,
+    tenant_id: int,
+    *,
+    session_started_at: float | None = None,
+    session_id: str | None = None,
+    idle_started_at: float | None = None,
+) -> str:
+    now = timezone.now()
+    start = now.timestamp() if session_started_at is None else session_start_from_payload({'session_started_at': session_started_at})
+    deadline = start + settings.AUTH_SESSION_MAX_HOURS * 3600
     payload: dict[str, Any] = {
         'sub': str(user.id),
         'email': user.email,
@@ -64,27 +100,40 @@ def create_access_token(user: User, tenant_id: int) -> str:
         'org_id': tenant_id,
         'type': 'access',
         'jti': secrets.token_hex(16),
-        'iat': timezone.now().timestamp(),
-        'exp': (timezone.now() + timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)).timestamp(),
+        'iat': now.timestamp(),
+        'session_started_at': start,
+        'sid': session_id or secrets.token_hex(16),
+        'idle_started_at': now.timestamp() if idle_started_at is None else idle_started_at,
+        'exp': min((now + timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)).timestamp(), deadline),
     }
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
-def create_refresh_token(user: User, tenant_id: int) -> str:
-    from apps.tenants.models import Organization
-    org = Organization.objects.filter(pk=tenant_id).only('automatic_logout_enabled', 'automatic_logout_minutes').first()
-    if org and org.automatic_logout_enabled:
-        lifetime = timedelta(minutes=org.automatic_logout_minutes)
-    else:
-        lifetime = timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS)
+def create_refresh_token(
+    user: User,
+    tenant_id: int,
+    *,
+    session_started_at: float | None = None,
+    session_id: str | None = None,
+    idle_started_at: float | None = None,
+) -> str:
+    now = timezone.now()
+    start = now.timestamp() if session_started_at is None else session_start_from_payload({'session_started_at': session_started_at})
+    deadline = start + settings.AUTH_SESSION_MAX_HOURS * 3600
+    # Inactivity is enforced by server session state; refresh credentials stay
+    # usable during an active session, bounded by the absolute sign-in limit.
+    lifetime = timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS)
 
     payload: dict[str, Any] = {
         'sub': str(user.id),
         'org_id': tenant_id,
         'type': 'refresh',
         'jti': secrets.token_hex(16),
-        'iat': timezone.now().timestamp(),
-        'exp': (timezone.now() + lifetime).timestamp(),
+        'iat': now.timestamp(),
+        'session_started_at': start,
+        'sid': session_id or secrets.token_hex(16),
+        'idle_started_at': now.timestamp() if idle_started_at is None else idle_started_at,
+        'exp': min((now + lifetime).timestamp(), deadline),
     }
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
@@ -116,12 +165,15 @@ class _BaseJWTAuth(HttpBearer):
     def authenticate(self, request, token: str) -> User | None:
         try:
             payload = decode_token(token)
+            session_start_from_payload(payload)
             if payload.get('type') != 'access':
                 return None
             if token_tenant_mismatch(payload, request):
                 return None
             if is_token_blocked(payload):
                 return None
+            from .session_security import enforce_session_activity
+            enforce_session_activity(payload, getattr(request, 'tenant', None))
             user = User.objects.get(id=int(payload['sub']), is_active=True)
             if self.allowed_roles is not None and user.role not in self.allowed_roles:
                 return None

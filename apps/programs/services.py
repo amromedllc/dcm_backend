@@ -18,6 +18,7 @@ from apps.programs.measurements import (
 BEHAVIOR_MEASUREMENT_TYPES = {
     Target.MeasurementType.DURATION,
     Target.MeasurementType.RATE,
+    Target.MeasurementType.SCATTERPLOT,
     'frequency',
 }
 

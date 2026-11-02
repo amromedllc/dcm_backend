@@ -496,3 +496,42 @@ class SessionSupervisionNote(TenantAwareModel):
 
     def __str__(self) -> str:
         return f'Supervision note on session {self.session_run_id}'
+
+
+class SupervisionContact(TenantAwareModel):
+    """An individual RBT's participation in one supervision contact."""
+    _org_scoped_fk_fields = ('rbt', 'supervisor')
+    rbt = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+', db_constraint=False)
+    supervisor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+', db_constraint=False)
+    date = models.DateField(db_index=True)
+    hours = models.DecimalField(max_digits=5, decimal_places=2)
+    face_to_face = models.BooleanField(default=True)
+    individual = models.BooleanField(default=True)
+    observed_services = models.BooleanField(default=False)
+    qualifications_confirmed = models.BooleanField(default=False)
+    notes = models.TextField(blank=True)
+    void_reason = models.CharField(max_length=500, blank=True)
+
+    class Meta:
+        ordering = ['-date', '-id']
+        constraints = [models.CheckConstraint(check=models.Q(hours__gt=0, hours__lte=24), name='supervision_contact_hours_range')]
+
+    def __str__(self):
+        return f'Supervision contact #{self.pk}'
+
+
+class SupervisionServiceHours(TenantAwareModel):
+    """Explicit monthly total; never infer all ABA work from DCM appointments."""
+    _org_scoped_fk_fields = ('rbt',)
+    rbt = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+', db_constraint=False)
+    month = models.DateField()
+    hours = models.DecimalField(max_digits=6, decimal_places=2)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['organization', 'rbt', 'month'], name='unique_supervision_service_month'),
+            models.CheckConstraint(check=models.Q(hours__gte=0, hours__lte=744), name='supervision_service_hours_range'),
+        ]
+
+    def __str__(self):
+        return f'Supervision service hours #{self.pk}'

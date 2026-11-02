@@ -47,12 +47,12 @@ def extract_json(text: str) -> dict:
     return parsed
 
 
-def chat_json(system: str, user: str, *, max_tokens: int = 2000, temperature: float = 0.4) -> dict:
-    """Send one system+user prompt and return the reply parsed as a JSON object."""
+def _complete(messages: list[dict], *, max_tokens: int, temperature: float) -> str:
+    """Send a chat-completions request and return the raw reply text."""
     if not getattr(settings, 'AI_ENABLED', False):
         raise AIError('AI features are turned off.', status=403)
     if not is_configured():
-        raise AIError('AI drafting is not set up. Ask an administrator to add an AI key.', status=503)
+        raise AIError('AI features are not set up. Ask an administrator to add an AI key.', status=503)
     url = settings.AI_API_BASE_URL.rstrip('/') + '/chat/completions'
     try:
         response = requests.post(
@@ -60,7 +60,7 @@ def chat_json(system: str, user: str, *, max_tokens: int = 2000, temperature: fl
             headers={'Authorization': f'Bearer {settings.AI_API_KEY}', 'Content-Type': 'application/json'},
             json={
                 'model': settings.AI_MODEL,
-                'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}],
+                'messages': messages,
                 'temperature': temperature,
                 'max_tokens': max_tokens,
             },
@@ -92,4 +92,24 @@ def chat_json(system: str, user: str, *, max_tokens: int = 2000, temperature: fl
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         logger.warning('AI reply had an unexpected shape: %s', (getattr(response, 'text', '') or '')[:500])
         raise AIError('The AI response could not be understood. Please try again.') from exc
+    # Some providers return `content: null` instead of an error status — e.g.
+    # a free-tier model that refused or returned nothing under load.
+    if not content:
+        logger.warning('AI reply had empty/null content: %s', (getattr(response, 'text', '') or '')[:500])
+        raise AIError('The AI did not return a response. Please try again.')
+    return content
+
+
+def chat_json(system: str, user: str, *, max_tokens: int = 2000, temperature: float = 0.4) -> dict:
+    """Send one system+user prompt and return the reply parsed as a JSON object."""
+    content = _complete(
+        [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}],
+        max_tokens=max_tokens, temperature=temperature,
+    )
     return extract_json(content)
+
+
+def chat(messages: list[dict], *, max_tokens: int = 800, temperature: float = 0.4) -> str:
+    """Send a full system + conversation history and return the raw text reply
+    (no JSON parsing — for free-form conversational replies)."""
+    return _complete(messages, max_tokens=max_tokens, temperature=temperature).strip()

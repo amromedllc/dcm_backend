@@ -12,7 +12,7 @@ from apps.clients.id_aliases import client_identifier_aliases
 from apps.programs.models import Program, Target, ProgramModule
 from .models import GraphAnnotation, ClientAnnotation, ClientReportDraft, SavedInsightGraph, AssessmentRecord
 from .schemas import (
-    TrialDataPointSchema, BehaviorDataPointSchema, ABCDataPointSchema,
+    TrialDataPointSchema, BehaviorDataPointSchema, ABCDataPointSchema, ScatterplotSchema,
     AssessmentRecordSchema, AssessmentRecordCreateRequest, AssessmentDataPointSchema,
     ProgramSummarySchema, ModuleSummarySchema, TargetSummarySchema,
     GraphAnnotationSchema, GraphAnnotationCreateRequest, GraphAnnotationUpdateRequest,
@@ -616,3 +616,43 @@ def delete_annotation(request, annotation_id: int):
     except GraphAnnotation.DoesNotExist:
         raise HttpError(404, 'Annotation not found')
     return 204, None
+
+
+@router.get('/analytics/programs/{program_id}/scatterplot', response=ScatterplotSchema)
+@with_user_timezone
+def program_scatterplot(
+    request,
+    program_id: int,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    target_ids: str | None = None,
+    bin_minutes: int = 60,
+):
+    """Recorded occurrences by local weekday/time, never an absence-of-behavior score."""
+    from apps.accounts.permissions import require_permission
+    from apps.programs.api import _get_program_or_404
+    from .scatterplot import get_scatterplot_data
+
+    require_permission(request, 'client_progress')
+    program = _get_program_or_404(request, program_id)
+    if program.is_template:
+        raise HttpError(400, 'Scatterplots require a client program')
+    frm, to = _resolve_dates(date_from, date_to)
+    if frm > to or (to - frm).days > 365 or to == date.max:
+        raise HttpError(400, 'Choose a date range of at most 366 days in chronological order')
+    if bin_minutes not in (30, 60):
+        raise HttpError(400, 'bin_minutes must be 30 or 60')
+    targets = Target.objects.filter(program_id=program_id, measurement_type='scatterplot')
+    if target_ids is not None:
+        parts = target_ids.split(',')
+        if not parts or any(not part.strip().isascii() or not part.strip().isdigit() or len(part.strip()) > 10 for part in parts) or len(parts) > 100:
+            raise HttpError(400, 'target_ids must contain up to 100 comma-separated target IDs')
+        requested = {int(part.strip()) for part in parts}
+        available = set(targets.values_list('id', flat=True))
+        if not requested.issubset(available):
+            raise HttpError(404, 'Scatterplot target not found')
+        targets = targets.filter(id__in=requested)
+    return get_scatterplot_data(
+        list(targets.values_list('id', flat=True)),
+        client_identifier_aliases(program.external_client_id), frm, to, bin_minutes,
+    )

@@ -44,6 +44,7 @@ class NotificationPreference(TenantAwareModel):
     event_type = models.CharField(max_length=80, db_index=True)
     email_enabled = models.BooleanField(default=True)
     web_enabled = models.BooleanField(default=True)
+    mobile_enabled = models.BooleanField(default=True)
     locked = models.BooleanField(null=True, blank=True, default=None)
 
     class Meta:
@@ -68,6 +69,7 @@ class RoleNotificationPolicy(TenantAwareModel):
     event_type = models.CharField(max_length=80, db_index=True)
     email_enabled = models.BooleanField(default=True)
     web_enabled = models.BooleanField(default=True)
+    mobile_enabled = models.BooleanField(default=True)
     locked = models.BooleanField(default=False)
 
     class Meta:
@@ -88,6 +90,7 @@ class FirebaseMessagingToken(TenantAwareModel):
     )
     token = models.TextField(unique=True)
     user_agent = models.TextField(blank=True)
+    platform = models.CharField(max_length=10, choices=[('web', 'Web'), ('android', 'Android')], default='web')
     is_active = models.BooleanField(default=True)
     last_sent_at = models.DateTimeField(null=True, blank=True)
 

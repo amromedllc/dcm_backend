@@ -382,11 +382,12 @@ def _max_score_for_target(snapshot: dict, target_id: int) -> int | None:
     return None
 
 
-_BEHAVIOR_TARGET_TYPES = {'duration', 'rate', 'frequency'}
+_BEHAVIOR_TARGET_TYPES = {'duration', 'rate', 'frequency', 'scatterplot'}
 _DEFAULT_MEASUREMENT_FOR_TYPE = {
     'duration': 'total_observed_duration',
     'rate': 'rate_per_minute',
     'frequency': 'frequency',
+    'scatterplot': 'frequency',
 }
 
 

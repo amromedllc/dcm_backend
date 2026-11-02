@@ -282,3 +282,18 @@ class AssessmentAreaSummarySchema(Schema):
 class AssessmentProgramSummarySchema(Schema):
     program_id: int
     areas: list[AssessmentAreaSummarySchema]
+
+
+class ScatterplotCellSchema(Schema):
+    weekday: int  # Monday=0, Sunday=6
+    minute_of_day: int
+    count: int
+
+
+class ScatterplotSchema(Schema):
+    date_from: Date
+    date_to: Date
+    timezone: str
+    bin_minutes: int
+    total_occurrences: int
+    cells: list[ScatterplotCellSchema]

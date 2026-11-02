@@ -7,6 +7,7 @@ from unittest import mock
 import pyotp
 from django.core import mail
 from django.test import TestCase
+from django.db import connection
 from ninja.errors import HttpError
 
 from apps.accounts import api as accounts_api
@@ -21,6 +22,8 @@ from apps.tenants.models import Organization
 
 class MfaTests(TestCase):
     def setUp(self):
+        connection.set_schema_to_public()
+        self.addCleanup(connection.set_schema_to_public)
         self.org = Organization.objects.create(name='MFA Org', slug='mfa-org', schema_name='mfa_org')
         self.user = User.objects.create_user(
             email='mfa-user@example.com', password='x', organization=self.org, role=User.Role.STAFF,
@@ -129,16 +132,18 @@ class MfaTests(TestCase):
         with self.assertRaises(HttpError):
             accounts_api.disable_my_mfa(self._request(self.user), MfaCodeRequest(code='123456'))
 
-    def test_admin_can_remove_mfa_with_password(self):
+    def test_admin_mfa_removal_requires_step_up(self):
         self._enrol()
         request = self._request(self.admin)
-        with mock.patch.object(accounts_api, '_verify_actor_password', return_value=False):
-            with self.assertRaises(HttpError) as ctx:
-                accounts_api.remove_user_mfa(request, self.user.id, MfaRemoveRequest(password='bad'))
-            self.assertEqual(ctx.exception.status_code, 403)
         with mock.patch.object(accounts_api, 'require_permission'), \
-                mock.patch.object(accounts_api, '_verify_actor_password', return_value=True):
-            accounts_api.remove_user_mfa(request, self.user.id, MfaRemoveRequest(password='ok'))
+             mock.patch.object(accounts_api.step_up, 'require_step_up', side_effect=HttpError(428, 'Verify again')):
+            with self.assertRaises(HttpError) as error:
+                accounts_api.remove_user_mfa(request, self.user.id, MfaRemoveRequest())
+            self.assertEqual(error.exception.status_code, 428)
+            self.assertTrue(UserMFA.objects.filter(user=self.user).exists())
+        with mock.patch.object(accounts_api, 'require_permission'), \
+             mock.patch.object(accounts_api.step_up, 'require_step_up'):
+            accounts_api.remove_user_mfa(request, self.user.id, MfaRemoveRequest())
         self.assertFalse(UserMFA.objects.filter(user=self.user).exists())
 
 
@@ -151,6 +156,8 @@ def _latest_emailed_code() -> str:
 
 class EmailOtpMfaTests(TestCase):
     def setUp(self):
+        connection.set_schema_to_public()
+        self.addCleanup(connection.set_schema_to_public)
         self.org = Organization.objects.create(name='Email MFA Org', slug='email-mfa-org', schema_name='email_mfa_org')
         self.user = User.objects.create_user(
             email='email-mfa-user@example.com', password='x', organization=self.org, role=User.Role.STAFF,
