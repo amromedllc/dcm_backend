@@ -222,6 +222,13 @@ if USE_S3:
     AWS_S3_FILE_OVERWRITE = False
     AWS_DEFAULT_ACL = 'private'
 
+# Client documents never use the publicly served MEDIA_ROOT or media URLs.
+CLIENT_DOCUMENT_ROOT = BASE_DIR / 'private_documents'
+STORAGES['client_documents'] = {
+    'BACKEND': ('apps.clients.document_s3_storage.PrivateDocumentS3Storage' if USE_S3
+                else 'apps.clients.document_storage.PrivateDocumentStorage'),
+}
+
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'UTC'
 USE_I18N = True

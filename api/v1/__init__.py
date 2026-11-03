@@ -9,6 +9,7 @@ from shared.tenancy import CrossOrganizationReferenceError
 from apps.accounts.api import router as accounts_router
 from apps.accounts.auth import jwt_auth, partner_auth
 from apps.clients.api import router as clients_router
+from apps.clients.documents_api import router as client_documents_router
 from apps.programs.api import router as programs_router
 from apps.sessions.api import router as sessions_router
 from apps.sessions.supervision_api import router as supervision_router
@@ -74,6 +75,7 @@ def _integrity_error(request, exc: IntegrityError):
 api.add_router('/supervision', supervision_router, tags=['Supervision'])
 api.add_router('/auth', accounts_router, tags=['Authentication'])
 api.add_router('/clients', clients_router, tags=['Clients'])
+api.add_router('/clients', client_documents_router, tags=['Client Documents'])
 api.add_router('/', programs_router, tags=['Programs'])
 api.add_router('/', sessions_router, tags=['Sessions'])
 api.add_router('/', notes_router, tags=['Notes'])
