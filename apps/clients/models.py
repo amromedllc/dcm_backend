@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.db import models
 from shared.models import OrganizationScopedMixin, TenantAwareModel
+from .document_storage import get_document_storage, document_upload_path
 
 
 class Client(TenantAwareModel):
@@ -197,3 +198,60 @@ class ClientDirectoryView(OrganizationScopedMixin):
 
     def __str__(self) -> str:
         return f'{self.name} ({self.created_by_id})'
+
+
+class ClientDocumentFolder(TenantAwareModel):
+    _org_scoped_fk_fields = ('client',)
+    client = models.ForeignKey(Client, on_delete=models.CASCADE, related_name='document_folders')
+    name = models.CharField(max_length=100)
+
+    def _derive_organization_id(self):
+        return self.client.organization_id
+
+    class Meta:
+        ordering = ['name', 'id']
+        constraints = [models.UniqueConstraint(
+            models.functions.Lower('name'), 'client', 'organization', name='unique_client_document_folder_name',
+        )]
+
+    def __str__(self):
+        return f'Client document folder #{self.pk}'
+
+
+class ClientDocument(TenantAwareModel):
+    class Category(models.TextChoices):
+        INTAKE = 'intake', 'Intake forms'
+        CONSENT = 'consent', 'Consent forms'
+        INSURANCE = 'insurance', 'Insurance cards'
+        EVALUATION = 'evaluation', 'Evaluation reports'
+        OTHER = 'other', 'Other'
+
+    _org_scoped_fk_fields = ('client', 'folder')
+    client = models.ForeignKey(Client, on_delete=models.CASCADE, related_name='documents')
+    folder = models.ForeignKey(ClientDocumentFolder, on_delete=models.SET_NULL, null=True, blank=True, related_name='documents')
+    title = models.CharField(max_length=200)
+    category = models.CharField(max_length=20, choices=Category.choices, default=Category.OTHER)
+    file = models.FileField(upload_to=document_upload_path, storage=get_document_storage, max_length=500)
+    original_name = models.CharField(max_length=240)
+    content_type = models.CharField(max_length=120)
+    size_bytes = models.PositiveIntegerField()
+    sha256 = models.CharField(max_length=64)
+    upload_id = models.UUIDField()
+    archived_at = models.DateTimeField(null=True, blank=True)
+    archived_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+', db_constraint=False)
+
+    def _derive_organization_id(self):
+        return self.client.organization_id
+
+    def _validate_cross_org_fks(self):
+        super()._validate_cross_org_fks()
+        if self.folder_id and self.folder.client_id != self.client_id:
+            from django.core.exceptions import ValidationError
+            raise ValidationError('Document folder must belong to the same client')
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        constraints = [models.UniqueConstraint(fields=['client', 'upload_id'], name='unique_client_document_upload')]
+
+    def __str__(self):
+        return f'Client document #{self.pk}'
