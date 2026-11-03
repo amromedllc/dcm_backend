@@ -1,5 +1,5 @@
 from datetime import date as Date, datetime
-from typing import Any
+from typing import Any, Literal
 from ninja import Schema
 
 
@@ -287,7 +287,10 @@ class AssessmentProgramSummarySchema(Schema):
 class ScatterplotCellSchema(Schema):
     weekday: int  # Monday=0, Sunday=6
     minute_of_day: int
-    count: int
+    count: int | None
+    observation_state: Literal['unobserved', 'partial', 'observed']
+    observed_seconds: float
+    expected_seconds: float
 
 
 class ScatterplotSchema(Schema):
@@ -296,4 +299,5 @@ class ScatterplotSchema(Schema):
     timezone: str
     bin_minutes: int
     total_occurrences: int
+    total_observed_seconds: float
     cells: list[ScatterplotCellSchema]

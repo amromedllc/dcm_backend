@@ -383,7 +383,7 @@ def get_behavior_data_by_day(
         return []
 
     raw = list(
-        BehaviorEvent.objects
+        BehaviorEvent.objects.filter(observation_ended_at__isnull=True)
         .filter(
             target_id__in=target_ids,
             occurred_at__date__gte=date_from,
@@ -714,7 +714,7 @@ def _behavior_activity_by_target(target_ids: list[int], date_from: date, date_to
     summaries use this for targets that have no trials in the period."""
     stats: dict[int, dict] = defaultdict(lambda: {'events': 0, 'sessions': set(), 'dates': []})
     for row in (
-        BehaviorEvent.objects
+        BehaviorEvent.objects.filter(observation_ended_at__isnull=True)
         .filter(target_id__in=target_ids, occurred_at__date__gte=date_from, occurred_at__date__lte=date_to)
         .values('target_id', 'session_run_id', 'occurred_at__date')
     ):
@@ -1342,7 +1342,7 @@ def get_duration_occurrences(target_ids: list[int], date_from: date, date_to: da
         thresholds[target_id] = _duration_threshold_for_target(phases) if isinstance(phases, list) else None
 
     events = (
-        BehaviorEvent.objects
+        BehaviorEvent.objects.filter(observation_ended_at__isnull=True)
         .filter(
             target_id__in=target_ids,
             duration_seconds__isnull=False,

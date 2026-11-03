@@ -166,7 +166,7 @@ def generate_behavior_csv(export_id: int) -> None:
         writer = csv.writer(buf)
         writer.writerow([
             'session_id', 'target_id', 'target_name', 'occurred_at',
-            'frequency_count', 'duration_seconds', 'severity', 'notes',
+            'frequency_count', 'duration_seconds', 'severity', 'notes', 'observation_ended_at',
         ])
         row_count = 0
         for event in qs.iterator(chunk_size=500):
@@ -179,6 +179,7 @@ def generate_behavior_csv(export_id: int) -> None:
                 event.duration_seconds or '',
                 event.severity,
                 event.notes,
+                timezone.localtime(event.observation_ended_at).isoformat() if event.observation_ended_at else '',
             ])
             row_count += 1
 
@@ -296,11 +297,12 @@ def generate_raw_zip(export_id: int) -> None:
             behavior_buf = io.StringIO()
             bw = csv.writer(behavior_buf)
             bw.writerow(['session_id', 'target_id', 'target_name', 'occurred_at',
-                         'frequency_count', 'duration_seconds', 'severity', 'notes'])
+                         'frequency_count', 'duration_seconds', 'severity', 'notes', 'observation_ended_at'])
             for event in behavior_qs.iterator(chunk_size=500):
                 bw.writerow([event.session_run_id, event.target_id, event.target_name,
                               timezone.localtime(event.occurred_at).isoformat(), event.frequency_count,
-                              event.duration_seconds or '', event.severity, event.notes])
+                              event.duration_seconds or '', event.severity, event.notes,
+                              timezone.localtime(event.observation_ended_at).isoformat() if event.observation_ended_at else ''])
                 total_rows += 1
             zf.writestr('behaviors.csv', behavior_buf.getvalue())
 
@@ -410,7 +412,7 @@ def generate_notes_csv(export_id: int) -> None:
 def generate_sessions_csv(export_id: int) -> None:
     from .models import Export
     from apps.sessions.models import SessionRun
-    from django.db.models import Count
+    from django.db.models import Count, Q
 
     export = Export.objects.get(id=export_id)
     try:
@@ -421,7 +423,7 @@ def generate_sessions_csv(export_id: int) -> None:
             external_client_id=params['client_id']
         ).select_related('staff').annotate(
             trial_count=Count('trial_events'),
-            behavior_count=Count('behavior_events'),
+            behavior_count=Count('behavior_events', filter=Q(behavior_events__observation_ended_at__isnull=True)),
         ).order_by('started_at')
 
         if params.get('date_from'):

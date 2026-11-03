@@ -74,7 +74,7 @@ def _target_due_for_session(target) -> bool:
         .first()
     )
     last_behavior = (
-        BehaviorEvent.objects
+        BehaviorEvent.objects.filter(observation_ended_at__isnull=True)
         .filter(target_id=target.id, **data_since)
         .order_by('-session_run__submitted_at')
         .values_list('session_run__submitted_at', flat=True)

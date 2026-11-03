@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 from ninja import Schema
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from shared.schema_types import NonEmptyStr
 from .models import BehaviorEvent
@@ -252,6 +252,7 @@ class BehaviorEventSchema(Schema):
     target_id: int
     target_name: str
     occurred_at: datetime
+    observation_ended_at: datetime | None = None
     duration_seconds: int | None
     frequency_count: int
     severity: str
@@ -263,11 +264,28 @@ class BehaviorEventCreateRequest(Schema):
     target_id: int
     target_name: str
     occurred_at: datetime
+    observation_ended_at: datetime | None = None
     duration_seconds: int | None = Field(default=None, ge=0)
     frequency_count: int = Field(default=1, ge=0)
     severity: BehaviorEvent.Severity | Literal[''] = ''
     notes: str = ''
     client_event_id: str | None = None
+
+    @model_validator(mode='after')
+    def validate_observation(self):
+        if self.observation_ended_at is not None:
+            from datetime import timedelta
+            from django.utils.timezone import is_aware
+            if not is_aware(self.occurred_at) or not is_aware(self.observation_ended_at):
+                raise ValueError('Observation times must include a timezone')
+            duration = self.observation_ended_at - self.occurred_at
+            if duration <= timedelta(0) or duration > timedelta(hours=24):
+                raise ValueError('Observed periods must be positive and no longer than 24 hours')
+            if self.frequency_count != 0 or self.duration_seconds is not None or self.severity:
+                raise ValueError('Observed periods must have zero occurrences, no duration metric, and no severity')
+            if not self.client_event_id:
+                raise ValueError('Observed periods require a stable client_event_id')
+        return self
 
 
 # ---------------------------------------------------------------------------
