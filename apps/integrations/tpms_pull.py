@@ -803,13 +803,15 @@ def pull_appointments(
     to_date: date,
     patient_ids: list[int] | None = None,
     staff_ids: list[int] | None = None,
+    updated_after: str | None = None,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> PullResult:
     """Pulls appointments for [from_date, to_date] one calendar month at a
     time via _pull_appointments_window, aggregating the results. Chunking
     makes a years-long backfill tractable (each TPMS request covers at most
     one month) and gives on_progress something meaningful to report when
-    this runs as a long Celery task."""
+    this runs as a long Celery task. When updated_after is set, each window
+    also fetches changed rows and merges them by TherapyPMS appointment ID."""
     if to_date < from_date:
         raise HttpError(400, 'to_date must be on or after from_date')
 
@@ -822,6 +824,7 @@ def pull_appointments(
             to_date=window_end,
             patient_ids=patient_ids,
             staff_ids=staff_ids,
+            updated_after=updated_after,
         )
         total.created += chunk.created
         total.updated += chunk.updated
@@ -839,6 +842,7 @@ def _pull_appointments_window(
     to_date: date,
     patient_ids: list[int] | None = None,
     staff_ids: list[int] | None = None,
+    updated_after: str | None = None,
 ) -> PullResult:
     result = PullResult()
     practice_admin_id = org.integration_admin_id
@@ -848,16 +852,31 @@ def _pull_appointments_window(
     if to_date < from_date:
         raise HttpError(400, 'to_date must be on or after from_date')
 
-    def _fetch(token: str):
+    def _fetch(token: str, *, updates_only: bool = False):
         return admin_list_appointments(
             token,
             from_date=from_date.isoformat(),
             to_date=to_date.isoformat(),
             patient_ids=patient_ids,
             staff_ids=staff_ids,
+            updated_after=updated_after if updates_only else None,
         )
 
     rows = _with_admin_token(org, _fetch)
+    if updated_after:
+        update_rows = _with_admin_token(org, lambda token: _fetch(token, updates_only=True))
+        rows_by_id: dict[str, dict[str, Any]] = {}
+        rows_without_id: list[Any] = []
+        for row in [*rows, *update_rows]:
+            if not isinstance(row, dict):
+                rows_without_id.append(row)
+                continue
+            external_id = _dig(row, 'id', 'appointment_id', 'session_id')
+            if external_id is None:
+                rows_without_id.append(row)
+                continue
+            rows_by_id[str(external_id)] = row
+        rows = [*rows_by_id.values(), *rows_without_id]
 
     # Only link staff that belong to this org + practice.
     staff_by_employee = {

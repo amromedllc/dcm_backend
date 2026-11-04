@@ -707,12 +707,14 @@ def admin_list_appointments(
     to_date: str,
     patient_ids: list[int] | None = None,
     staff_ids: list[int] | None = None,
+    updated_after: str | None = None,
 ) -> list[dict[str, Any]]:
     """POST /api/v1/admin/get/appointment — practice sessions for Integrations Pull.
 
     from_date / to_date are mandatory (YYYY-MM-DD). patient_ids and staff_ids
-    are optional filters forwarded when non-empty. Request Zoom links explicitly
-    for Progressly's internal use; TherapyPMS omits them by default.
+    are optional filters forwarded when non-empty. updated_after is optional
+    and asks TherapyPMS for records changed since that timestamp. Request Zoom
+    links explicitly for Progressly's internal use; TherapyPMS omits them by default.
     """
     body: dict[str, Any] = {
         'from_date': from_date,
@@ -723,6 +725,8 @@ def admin_list_appointments(
         body['patient_ids'] = [int(p) for p in patient_ids]
     if staff_ids:
         body['staff_ids'] = [int(s) for s in staff_ids]
+    if updated_after:
+        body['updated_after'] = updated_after
 
     payload = _request(
         'POST',

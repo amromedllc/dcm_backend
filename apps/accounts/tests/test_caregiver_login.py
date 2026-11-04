@@ -11,6 +11,7 @@ from unittest.mock import patch
 from django.db import IntegrityError
 from django.test import TestCase
 from django_tenants.utils import schema_context
+from django.utils import timezone
 from ninja.errors import HttpError
 
 from apps.accounts.api import login
@@ -18,6 +19,7 @@ from apps.accounts.auth import JWTAuth, CaregiverJWTAuth, create_access_token, d
 from apps.accounts.models import User
 from apps.accounts.schemas import LoginRequest
 from apps.clients.models import Client
+from apps.integrations.models import PullJob
 from apps.integrations.tpms_auth_client import account_type_of, normalize_client_portal_payload, TpmsAuthError
 from apps.tenants.models import Organization, OrganizationTpmsAdminId
 from shared.tenancy import tenant_context
@@ -98,6 +100,86 @@ class LoginDispatchTests(TestCase):
             self.assertEqual(user.external_client_id, 13086)
             self.assertIsNone(user.external_employee_id)
             self.assertEqual(user.external_admin_id, 501)
+
+    def test_client_login_queues_incremental_sync_after_initial_manual_sync(self):
+        facility = OrganizationTpmsAdminId.objects.get(organization=self.org, admin_id=501)
+        facility.integration_platform = Organization.IntegrationPlatform.THERAPY_PMS
+        facility.last_appointment_sync_at = timezone.now()
+        facility.save(update_fields=['integration_platform', 'last_appointment_sync_at'])
+        with (
+            schema_context(self.org.schema_name),
+            tenant_context(self.org.pk),
+            patch('apps.integrations.tasks.run_pull_job.delay') as dispatch,
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            Client.objects.create(
+                first_name='Antony', last_name='R', external_id='13086',
+                external_admin_id=501, organization=self.org,
+            )
+            tokens = self._login(CLIENT_PORTAL_LOGIN_PAYLOAD)
+            self._login(CLIENT_PORTAL_LOGIN_PAYLOAD)
+
+        dispatch.assert_called_once()
+        job = PullJob.objects.get(job_type=PullJob.JobType.APPOINTMENTS)
+        self.assertTrue(job.params['auto_sync'])
+        self.assertEqual(job.params['facility_admin_id'], 501)
+        self.assertEqual(job.params['updated_after'], facility.last_appointment_sync_at.isoformat())
+        today = timezone.localdate()
+        try:
+            expected_from_date = today.replace(year=today.year - 1)
+        except ValueError:
+            expected_from_date = today.replace(year=today.year - 1, day=28)
+        self.assertEqual(job.params['from_date'], expected_from_date.isoformat())
+        self.assertEqual(job.params['to_date'], today.isoformat())
+        self.assertEqual(tokens.role, User.Role.CAREGIVER)
+
+    def test_client_login_does_not_auto_sync_before_initial_manual_pull(self):
+        facility = OrganizationTpmsAdminId.objects.get(organization=self.org, admin_id=501)
+        facility.integration_platform = Organization.IntegrationPlatform.THERAPY_PMS
+        facility.save(update_fields=['integration_platform'])
+        with (
+            schema_context(self.org.schema_name),
+            tenant_context(self.org.pk),
+            patch('apps.integrations.tasks.run_pull_job.delay') as dispatch,
+        ):
+            Client.objects.create(
+                first_name='Antony', last_name='R', external_id='13086',
+                external_admin_id=501, organization=self.org,
+            )
+            self._login(CLIENT_PORTAL_LOGIN_PAYLOAD)
+
+        dispatch.assert_not_called()
+        self.assertFalse(PullJob.objects.filter(job_type=PullJob.JobType.APPOINTMENTS).exists())
+
+    def test_provider_login_queues_incremental_sync_after_initial_manual_sync(self):
+        facility = OrganizationTpmsAdminId.objects.get(organization=self.org, admin_id=501)
+        facility.integration_platform = Organization.IntegrationPlatform.THERAPY_PMS
+        facility.last_appointment_sync_at = timezone.now()
+        facility.save(update_fields=['integration_platform', 'last_appointment_sync_at'])
+        provider = User.objects.create_user(
+            email='provider@example.com',
+            password='secret-pass',
+            first_name='Pat',
+            last_name='Provider',
+            role=User.Role.STAFF,
+            external_admin_id=501,
+            external_employee_id=2956,
+            organization=self.org,
+        )
+        with (
+            schema_context(self.org.schema_name),
+            tenant_context(self.org.pk),
+            patch('apps.integrations.tasks.run_pull_job.delay') as dispatch,
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            tokens = login(
+                self.request,
+                LoginRequest(email=provider.email, password='secret-pass'),
+            )
+
+        dispatch.assert_called_once()
+        self.assertEqual(tokens.user_id, provider.pk)
+        self.assertTrue(PullJob.objects.get(job_type=PullJob.JobType.APPOINTMENTS).params['auto_sync'])
 
     def test_staff_login_with_local_password_works(self):
         """Staff/provider login no longer goes through TherapyPMS at all —

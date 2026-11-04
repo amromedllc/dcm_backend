@@ -11,11 +11,12 @@ import logging
 from datetime import date, timedelta
 
 from celery import shared_task
+from django.db import transaction
 from django.utils import timezone
 
 from apps.integrations import tpms_pull
 from apps.integrations.models import PullJob
-from apps.tenants.models import Organization
+from apps.tenants.models import Organization, OrganizationTpmsAdminId
 from shared.tenancy import tenant_context
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,56 @@ def _mark_failed(job: PullJob, error: str) -> None:
     job.error_message = error
     job.finished_at = timezone.now()
     job.save(update_fields=['status', 'error_message', 'finished_at'])
+
+
+def queue_login_appointment_sync(org_id: int, facility_admin_id: int) -> PullJob | None:
+    """Queue one facility-wide incremental sync after its initial manual pull."""
+    with transaction.atomic():
+        facility = OrganizationTpmsAdminId.objects.select_for_update().filter(
+            organization_id=org_id,
+            admin_id=facility_admin_id,
+            integration_platform=Organization.IntegrationPlatform.THERAPY_PMS,
+        ).first()
+        if facility is None or facility.last_appointment_sync_at is None:
+            return None
+
+        active_job = PullJob.objects.filter(
+            job_type=PullJob.JobType.APPOINTMENTS,
+            status__in=(PullJob.Status.PENDING, PullJob.Status.RUNNING),
+            params__facility_admin_id=facility_admin_id,
+        ).first()
+        if active_job is not None:
+            return active_job
+
+        today = timezone.localdate()
+        try:
+            from_date = today.replace(year=today.year - 1)
+        except ValueError:
+            from_date = today.replace(year=today.year - 1, day=28)
+        job = PullJob.objects.create(
+            job_type=PullJob.JobType.APPOINTMENTS,
+            params={
+                'facility_admin_id': facility_admin_id,
+                'from_date': from_date.isoformat(),
+                'to_date': today.isoformat(),
+                'updated_after': facility.last_appointment_sync_at.isoformat(),
+                'auto_sync': True,
+            },
+        )
+
+        def dispatch() -> None:
+            try:
+                run_pull_job.delay(job_id=job.id, org_id=org_id)
+            except Exception as exc:
+                logger.exception('Failed to dispatch login appointment sync job %s', job.id)
+                PullJob.objects.filter(pk=job.pk).update(
+                    status=PullJob.Status.FAILED,
+                    error_message=f'Failed to dispatch background task: {exc}',
+                    finished_at=timezone.now(),
+                )
+
+        transaction.on_commit(dispatch)
+        return job
 
 
 @shared_task(bind=True)
@@ -80,6 +131,7 @@ def run_pull_job(self, job_id: int, org_id: int) -> None:
             elif job.job_type == PullJob.JobType.APPOINTMENTS:
                 from_date = date.fromisoformat(job.params['from_date'])
                 to_date = date.fromisoformat(job.params['to_date'])
+                sync_started_at = timezone.now()
                 windows = tpms_pull._month_windows(from_date, to_date)
                 job.progress_total = len(windows)
                 job.save(update_fields=['progress_total'])
@@ -94,8 +146,15 @@ def run_pull_job(self, job_id: int, org_id: int) -> None:
                     to_date=to_date,
                     patient_ids=job.params.get('patient_ids'),
                     staff_ids=job.params.get('staff_ids'),
+                    updated_after=job.params.get('updated_after'),
                     on_progress=on_progress,
                 )
+                if (
+                    facility.last_appointment_sync_at is None
+                    or facility.last_appointment_sync_at < sync_started_at
+                ):
+                    facility.last_appointment_sync_at = sync_started_at
+                    facility.save(update_fields=['last_appointment_sync_at'])
             else:
                 raise ValueError(f'Unknown pull job type: {job.job_type}')
             _mark_completed(job, result)
@@ -107,4 +166,3 @@ def run_pull_job(self, job_id: int, org_id: int) -> None:
             logger.exception('Pull job %s failed', job_id)
             if job is not None:
                 _mark_failed(job, str(exc))
-
