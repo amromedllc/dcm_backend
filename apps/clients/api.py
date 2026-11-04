@@ -11,6 +11,7 @@ from ninja.errors import HttpError
 from django.conf import settings
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db.models import Q, Count
+from django.db import transaction
 from django.utils import timezone
 
 from apps.accounts.auth import partner_auth
@@ -372,10 +373,13 @@ def _upsert_clients_from_patients(
             if changed:
                 to_update.append(dcm_client)
 
-    if to_create:
-        Client.objects.bulk_create(to_create, batch_size=200)
-    if to_update:
-        Client.objects.bulk_update(to_update, list(update_attrs), batch_size=200)
+    with transaction.atomic():
+        if to_create:
+            Client.objects.bulk_create(to_create, batch_size=200)
+        if to_update:
+            Client.objects.bulk_update(to_update, list(update_attrs), batch_size=200)
+        from .status_history import record_client_statuses
+        record_client_statuses([client.pk for client in to_create + to_update])
 
     # Prefer DB rows (with PKs) for the response when available.
     persisted = {

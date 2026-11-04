@@ -453,6 +453,8 @@ def pull_clients(org: Organization) -> PullResult:
             Client.objects.bulk_create(to_create, batch_size=200)
         if to_update:
             Client.objects.bulk_update(to_update, list(update_attrs), batch_size=200)
+        from apps.clients.status_history import record_client_statuses
+        record_client_statuses([client.pk for client in to_create + to_update])
 
     return result
 
