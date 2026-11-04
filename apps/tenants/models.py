@@ -80,6 +80,7 @@ class OrganizationTpmsAdminId(models.Model):
     integration_email = models.EmailField(blank=True, default='')
     integration_password_encrypted = models.TextField(blank=True, default='')
     integration_admin_id = models.IntegerField(null=True, blank=True)
+    last_appointment_sync_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

@@ -94,6 +94,38 @@ class PullAppointmentsTests(TestCase):
 
             self.assertEqual(Appointment.objects.filter(external_id='2038296').count(), 1)
 
+    def test_incremental_pull_merges_date_range_and_updated_after_rows(self):
+        updated_row = {**SAMPLE_ROW, 'session_title': 'Updated appointment title'}
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            Client.objects.create(
+                organization=self.org, external_id='15808', external_admin_id=PRACTICE_ADMIN_ID,
+                first_name='Pat', last_name='Ient',
+            )
+            with mock.patch(
+                'apps.integrations.tpms_pull.admin_list_appointments',
+                side_effect=[[SAMPLE_ROW], [updated_row]],
+            ) as fetch:
+                result = pull_appointments(
+                    self.org,
+                    from_date=date(2026, 10, 1),
+                    to_date=date(2026, 10, 31),
+                    updated_after='2026-10-01T12:00:00+00:00',
+                )
+
+            self.assertEqual(result.created, 1)
+            self.assertEqual(result.updated, 0)
+            self.assertEqual(Appointment.objects.count(), 1)
+            self.assertEqual(
+                Appointment.objects.get(external_id=str(SAMPLE_ROW['id'])).session_title,
+                'Updated appointment title',
+            )
+            self.assertEqual(fetch.call_count, 2)
+            self.assertIsNone(fetch.call_args_list[0].kwargs['updated_after'])
+            self.assertEqual(
+                fetch.call_args_list[1].kwargs['updated_after'],
+                '2026-10-01T12:00:00+00:00',
+            )
+
     def test_zoom_link_is_saved_updated_cleared_and_exposed_by_api(self):
         from apps.sessions.schemas import AppointmentSchema
         with schema_context(self.org.schema_name), tenant_context(self.org.pk):
@@ -137,3 +169,24 @@ class PullAppointmentsTests(TestCase):
             with override_settings(TPMS_API_BASE_URL=os.environ['DCM_TPMS_APPOINTMENTS_SIMULATION_URL']):
                 pull_appointments(self.org, from_date=date(2026, 10, 1), to_date=date(2026, 10, 31))
             self.assertEqual(Appointment.objects.get(external_id=str(SAMPLE_ROW['id'])).telehealth_link, 'https://meet.example.com/appointment-room')
+
+
+class AdminAppointmentRequestTests(TestCase):
+    def test_updated_after_is_forwarded_to_therapypms(self):
+        from apps.integrations.tpms_auth_client import admin_list_appointments
+
+        with mock.patch(
+            'apps.integrations.tpms_auth_client._request',
+            return_value={'status': 'success', 'appointments': []},
+        ) as request:
+            admin_list_appointments(
+                'token',
+                from_date='2026-10-01',
+                to_date='2026-10-31',
+                updated_after='2026-10-01T12:00:00+00:00',
+            )
+
+        self.assertEqual(
+            request.call_args.kwargs['body']['updated_after'],
+            '2026-10-01T12:00:00+00:00',
+        )

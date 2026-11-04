@@ -108,6 +108,7 @@ def _issue_tokens(user: User, tenant_id: int) -> TokenResponse:
     # through this one function. Downstream: the provider admin screen's
     # "Active" status is keyed off last_login being non-null.
     User.objects.filter(pk=user.pk).update(last_login=timezone.now())
+
     session_start = timezone.now().timestamp()
     session_id = secrets.token_hex(16)
     return TokenResponse(
@@ -118,6 +119,25 @@ def _issue_tokens(user: User, tenant_id: int) -> TokenResponse:
         role=user.role,
         full_name=user.full_name,
     )
+
+
+def _queue_login_appointment_sync(user: User, tenant_id: int) -> None:
+    if (
+        user.external_admin_id is not None
+        and (
+            (user.role == User.Role.CAREGIVER and user.external_client_id is not None)
+            or (user.role != User.Role.CAREGIVER and user.external_employee_id is not None)
+        )
+    ):
+        try:
+            from apps.integrations.tasks import queue_login_appointment_sync
+            queue_login_appointment_sync(tenant_id, user.external_admin_id)
+        except Exception:
+            logger.exception(
+                'Could not queue appointment sync for login user=%s facility=%s',
+                user.pk,
+                user.external_admin_id,
+            )
 
 
 @router.post('/login', response=LoginResponse, auth=None)
@@ -170,6 +190,7 @@ def _mfa_gate(tenant, tokens: TokenResponse):
     through /mfa/verify or the /mfa/setup/* endpoints."""
     user = User.objects.select_related('mfa').get(id=tokens.user_id)
     if not mfa.needs_mfa(user):
+        _queue_login_appointment_sync(user, tenant.pk)
         return tokens
     setup_required = not user.mfa_enabled
     method = None
@@ -321,7 +342,9 @@ def mfa_verify(request, data: MfaTokenCodeRequest):
     user, org_id = mfa.user_from_mfa_token(data.mfa_token, getattr(tenant, 'pk', None))
     request._security_actor_id = user.pk
     mfa.check_code(user, data.code)
-    return _issue_tokens(user, org_id)
+    tokens = _issue_tokens(user, org_id)
+    _queue_login_appointment_sync(user, org_id)
+    return tokens
 
 
 @router.post('/mfa/resend', response={204: None}, auth=None)
@@ -346,7 +369,9 @@ def mfa_login_setup_confirm(request, data: MfaTokenCodeRequest):
     user, org_id = mfa.user_from_mfa_token(data.mfa_token, getattr(tenant, 'pk', None))
     request._security_actor_id = user.pk
     mfa.check_code(user, data.code, activate=True)
-    return _issue_tokens(user, org_id)
+    tokens = _issue_tokens(user, org_id)
+    _queue_login_appointment_sync(user, org_id)
+    return tokens
 
 
 def _mfa_status(user: User) -> MfaStatusSchema:

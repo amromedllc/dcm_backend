@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import date, timedelta
 from unittest import mock
 from types import SimpleNamespace
 
@@ -11,6 +11,41 @@ from apps.integrations.tpms_pull import FacilityConnection, PullResult
 
 
 class PullJobRecoveryTests(SimpleTestCase):
+    def test_successful_appointment_pull_advances_facility_checkpoint(self):
+        facility = SimpleNamespace(
+            organization_id=1,
+            admin_id=702,
+            integration_email='south@example.com',
+            last_appointment_sync_at=None,
+            save=mock.Mock(),
+        )
+        org = SimpleNamespace(id=1, pk=1, tpms_admin_ids=mock.Mock())
+        org.tpms_admin_ids.get.return_value = facility
+        job = mock.Mock(
+            status=PullJob.Status.PENDING,
+            created_at=timezone.now(),
+            params={
+                'facility_admin_id': 702,
+                'from_date': '2026-10-01',
+                'to_date': '2026-10-31',
+                'updated_after': '2026-09-30T12:00:00+00:00',
+            },
+            job_type=PullJob.JobType.APPOINTMENTS,
+        )
+        with (
+            mock.patch('apps.integrations.tasks.Organization.objects.get', return_value=org),
+            mock.patch('django.db.connection.set_tenant'),
+            mock.patch('apps.integrations.tasks.PullJob.objects.get', return_value=job),
+            mock.patch('apps.integrations.tasks.tpms_pull._month_windows', return_value=[(date(2026, 10, 1), date(2026, 10, 31))]),
+            mock.patch('apps.integrations.tasks.tpms_pull.pull_appointments', return_value=PullResult()) as pull,
+            mock.patch('apps.integrations.tasks._mark_completed'),
+        ):
+            run_pull_job.run(job_id=1, org_id=1)
+
+        self.assertIsNotNone(facility.last_appointment_sync_at)
+        facility.save.assert_called_once_with(update_fields=['last_appointment_sync_at'])
+        self.assertEqual(pull.call_args.kwargs['updated_after'], job.params['updated_after'])
+
     def test_worker_uses_the_facility_recorded_on_the_job(self):
         facility = SimpleNamespace(organization_id=1, admin_id=702, integration_email='south@example.com')
         org = SimpleNamespace(id=1, pk=1, tpms_admin_ids=mock.Mock())
