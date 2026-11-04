@@ -7,20 +7,21 @@ from django.utils import timezone
 
 from apps.tenants.models import Organization
 from shared.tenancy import tenant_context
+from django_tenants.utils import schema_context, get_public_schema_name
 
 logger = logging.getLogger(__name__)
 
 
 @shared_task(ignore_result=True)
 def send_upcoming_appointment_reminders() -> None:
-    """Send one reminder for scheduled appointments starting within 30 minutes."""
+    """Send 30-minute push reminders and independently configured email reminders."""
     from apps.sessions.models import Appointment
     from apps.notifications.service import notify_appointment_reminder
 
     now = timezone.now()
     horizon = now + timedelta(minutes=30)
-    for organization in Organization.objects.filter(is_active=True).iterator():
-        with tenant_context(organization.id):
+    for organization in Organization.objects.filter(is_active=True).exclude(schema_name=get_public_schema_name()).iterator():
+        with schema_context(organization.schema_name), tenant_context(organization.id):
             appointments = Appointment.objects.filter(
                 status=Appointment.Status.SCHEDULED,
                 staff__isnull=False,
@@ -43,3 +44,5 @@ def send_upcoming_appointment_reminders() -> None:
                         appointment.id,
                         organization.id,
                     )
+            from .appointment_reminders import send_organization_email_reminders
+            send_organization_email_reminders()

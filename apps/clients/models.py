@@ -22,6 +22,10 @@ class Client(TenantAwareModel):
     intake_date = models.DateField(null=True, blank=True)
     discharge_date = models.DateField(null=True, blank=True)
     internal_notes = models.TextField(blank=True)
+    appointment_email_reminders_enabled = models.BooleanField(
+        null=True, blank=True, default=None,
+        help_text='Inherit organization settings when unset; false opts this client out.',
+    )
 
     class Meta:
         app_label = 'clients'

@@ -19,11 +19,72 @@ from .models import (
     Notification,
     NotificationPreference,
     RoleNotificationPolicy,
+    AppointmentReminderSettings,
 )
 from .preferences import PREFERENCE_TYPES
 from .service import _practice_email_notifications_enabled, _send_firebase_push
 
 router = Router(auth=jwt_auth)
+
+
+class AppointmentReminderSettingsInput(Schema):
+    email_enabled: bool
+    lead_minutes: int = Field(ge=5, le=10080)
+    staff_enabled: bool
+    caregivers_enabled: bool
+
+
+@router.get('/notifications/appointment-reminder-settings', response=AppointmentReminderSettingsInput)
+def get_appointment_reminder_settings(request):
+    require_permission(request, 'admin_privileges')
+    from .appointment_reminders import reminder_settings
+    return reminder_settings()
+
+
+@router.put('/notifications/appointment-reminder-settings', response=AppointmentReminderSettingsInput)
+@transaction.atomic
+def update_appointment_reminder_settings(request, payload: AppointmentReminderSettingsInput):
+    require_permission(request, 'admin_privileges')
+    org = resolve_permission_organization(request)
+    row, _ = AppointmentReminderSettings.objects.update_or_create(organization=org, defaults=payload.dict())
+    from shared.audit import log_event
+    log_event('appointment_reminder_settings_changed', request.user.pk, 'organization', org.pk, payload.dict())
+    return row
+
+
+class ClientAppointmentReminderInput(Schema):
+    email_enabled: bool | None
+
+
+def _client_reminder_values(client):
+    from .appointment_reminders import reminder_settings
+    config = reminder_settings()
+    return {'email_enabled': client.appointment_email_reminders_enabled,
+            'organization_enabled': config.email_enabled,
+            'effective_email_enabled': config.email_enabled and client.appointment_email_reminders_enabled is not False}
+
+
+@router.get('/notifications/clients/{client_id}/appointment-reminders')
+def get_client_appointment_reminders(request, client_id: int):
+    require_permission(request, 'clients_view')
+    from apps.clients.api import _get_client_or_404
+    client = _get_client_or_404(request, client_id)
+    return _client_reminder_values(client)
+
+
+@router.put('/notifications/clients/{client_id}/appointment-reminders')
+@transaction.atomic
+def update_client_appointment_reminders(request, client_id: int, payload: ClientAppointmentReminderInput):
+    require_permission(request, 'clients_edit')
+    from apps.clients.api import _get_client_or_404
+    client = _get_client_or_404(request, client_id)
+    client.appointment_email_reminders_enabled = payload.email_enabled
+    client.save(update_fields=['appointment_email_reminders_enabled', 'updated_at'])
+    from shared.audit import log_event
+    log_event('client_appointment_reminder_preference_changed', request.user.pk, 'client', client.pk,
+              {'email_enabled': payload.email_enabled, 'organization_id': client.organization_id})
+    return _client_reminder_values(client)
+
 
 POLICY_ROLES = [User.Role.ADMIN, User.Role.SUPERVISOR, User.Role.STAFF]
 
