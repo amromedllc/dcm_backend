@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.db import models
 from shared.models import TenantAwareModel
+from django.core.validators import MinValueValidator, MaxValueValidator
 
 
 class Notification(TenantAwareModel):
@@ -100,3 +101,29 @@ class FirebaseMessagingToken(TenantAwareModel):
 
     def __str__(self) -> str:
         return f'firebase token for {self.recipient_id}'
+
+
+class AppointmentReminderSettings(TenantAwareModel):
+    email_enabled = models.BooleanField(default=True)
+    lead_minutes = models.PositiveIntegerField(default=30, validators=[MinValueValidator(5), MaxValueValidator(10080)])
+    staff_enabled = models.BooleanField(default=True)
+    caregivers_enabled = models.BooleanField(default=False)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['organization'], name='one_appointment_reminder_settings_per_org')]
+
+
+class AppointmentEmailDelivery(TenantAwareModel):
+    appointment = models.ForeignKey('dcm_sessions.Appointment', on_delete=models.CASCADE)
+    recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, db_constraint=False)
+    scheduled_start = models.DateTimeField()
+    status = models.CharField(max_length=10, default='pending', choices=[('pending', 'Pending'), ('sending', 'Sending'), ('sent', 'Sent'), ('failed', 'Failed')])
+    attempts = models.PositiveIntegerField(default=0)
+    claimed_at = models.DateTimeField(null=True)
+    retry_at = models.DateTimeField(null=True)
+    sent_at = models.DateTimeField(null=True)
+
+    _org_scoped_fk_fields = ('appointment', 'recipient')
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['appointment', 'recipient', 'scheduled_start'], name='unique_appointment_email_occurrence')]

@@ -1,5 +1,6 @@
 from django.conf import settings
-from django.db import models
+from django.db import models, transaction
+from django.utils import timezone
 from shared.models import OrganizationScopedMixin, TenantAwareModel
 from .document_storage import get_document_storage, document_upload_path
 
@@ -22,6 +23,10 @@ class Client(TenantAwareModel):
     intake_date = models.DateField(null=True, blank=True)
     discharge_date = models.DateField(null=True, blank=True)
     internal_notes = models.TextField(blank=True)
+    appointment_email_reminders_enabled = models.BooleanField(
+        null=True, blank=True, default=None,
+        help_text='Inherit organization settings when unset; false opts this client out.',
+    )
 
     class Meta:
         app_label = 'clients'
@@ -34,6 +39,25 @@ class Client(TenantAwareModel):
 
     def __str__(self) -> str:
         return self.full_name
+
+    @transaction.atomic
+    def save(self, *args, **kwargs):
+        # The status observation receiver must commit with the owning client row.
+        return super().save(*args, **kwargs)
+
+
+class ClientStatusObservation(OrganizationScopedMixin):
+    """Observed status history, never backdated to invent pre-tracking census."""
+    client = models.ForeignKey(Client, on_delete=models.CASCADE, related_name='status_observations')
+    status = models.CharField(max_length=20, choices=Client.Status.choices)
+    observed_at = models.DateTimeField(default=timezone.now, db_index=True)
+    _org_scoped_fk_fields = ('client',)
+
+    def _derive_organization_id(self):
+        return self.client.organization_id
+
+    class Meta:
+        indexes = [models.Index(fields=['client', 'observed_at'], name='client_status_observed_idx')]
 
 
 class ClientStaffAssignment(OrganizationScopedMixin):

@@ -14,7 +14,7 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 
-def _create(recipient_id: int, event_type: str, title: str, body: str = '', data: dict | None = None):
+def _create(recipient_id: int, event_type: str, title: str, body: str = '', data: dict | None = None, *, send_email: bool = True):
     try:
         from apps.accounts.models import User
         recipient = User.objects.get(id=recipient_id)
@@ -32,7 +32,7 @@ def _create(recipient_id: int, event_type: str, title: str, body: str = '', data
         if web_enabled or mobile_enabled:
             platforms = (['web'] if web_enabled else []) + (['android'] if mobile_enabled else [])
             _send_firebase_push(recipient, title, body, data or {}, platforms=platforms)
-        if _channel_enabled(recipient, event_type, 'email'):
+        if send_email and _channel_enabled(recipient, event_type, 'email'):
             _send_email(recipient.email, title, body, data or {})
     except Exception:
         logger.exception('Failed to create notification (event=%s recipient=%s)', event_type, recipient_id)
@@ -468,6 +468,7 @@ def notify_appointment_reminder(appointment):
         recipient_id=appointment.staff_id,
         event_type='appointment_reminder',
         title='Upcoming appointment',
+        send_email=False,
         body=f'Your appointment with {client_name} starts at {start}.',
         data={
             'appointment_id': appointment.id,

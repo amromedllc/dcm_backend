@@ -7,7 +7,8 @@ from ninja import Router
 from ninja.errors import HttpError
 
 from apps.accounts.api import _same_practice_q
-from apps.accounts.auth import partner_auth
+from apps.accounts.auth import partner_auth, jwt_auth
+from apps.accounts.permissions import require_permission
 from apps.clients.id_aliases import client_identifier_aliases
 from apps.programs.models import Program, Target, ProgramModule
 from .models import GraphAnnotation, ClientAnnotation, ClientReportDraft, SavedInsightGraph, AssessmentRecord
@@ -28,6 +29,27 @@ from .services import (
 )
 
 router = Router(auth=partner_auth)
+
+
+@router.get('/analytics/organization', auth=jwt_auth)
+def organization_analytics(request, date_from: date | None = None, date_to: date | None = None, group_by: str = 'week'):
+    _require_supervisor(request)
+    require_permission(request, 'dashboard')
+    if getattr(request, 'api_key', None) is not None:
+        raise HttpError(403, 'Interactive administrator or supervisor access required.')
+    try:
+        zone = ZoneInfo(request.user.timezone or 'UTC')
+    except (ZoneInfoNotFoundError, ValueError):
+        zone = ZoneInfo('UTC')
+    with timezone.override(zone):
+        to = date_to or timezone.localdate()
+        frm = date_from or (to - timedelta(days=89))
+        if frm > to or (to - frm).days > 365 or to > timezone.localdate():
+            raise HttpError(400, 'Choose a valid past/current date range of at most 366 days.')
+        if group_by not in ('week', 'month'):
+            raise HttpError(400, 'Group by week or month.')
+        from .organization_reporting import get_organization_report
+        return get_organization_report(request, frm, to, group_by, zone)
 
 _DEFAULT_DAYS = 90
 
