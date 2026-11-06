@@ -329,6 +329,7 @@ class ProgramSubmoduleRequest(Schema):
 
 
 class TargetSchema(TargetCodeSchema):
+    data_definition_locked: bool = False
     id: int
     program_id: int
     name: str

@@ -1,4 +1,5 @@
 import os
+from copy import copy
 from types import SimpleNamespace
 
 from django.core.exceptions import ObjectDoesNotExist
@@ -22,6 +23,10 @@ from shared.ai_client import AIError
 from shared.html_sanitize import sanitize_kb_html
 from apps.central_library.settings_service import (
     validate_setting_links, sync_legacy_links, apply_program_settings, pull_links, pull_setting,
+)
+from .data_protection import (
+    MESSAGE as DATA_PROTECTION_MESSAGE, guard_target_changes, protected_target_ids,
+    scoring_signature, template_has_history,
 )
 from .assessment_draft import generate_assessment_draft, normalize_assessment_draft
 from apps.clients.id_aliases import client_identifier_aliases
@@ -99,6 +104,8 @@ def _require_program_write(request, action: str) -> None:
 def _check_program_write(request, program: Program, action: str) -> None:
     """Library (template) programs need org_programs_<action>; a client's programs need client_programs_<action>."""
     require_permission(request, f"{'org' if program.is_template else 'client'}_programs_{action}")
+    if action == 'edit' and program.is_locked:
+        raise HttpError(423, 'This program is locked. Unlock it before making changes.')
 
 
 def _require_any_permission(request, permissions: tuple[str, ...]) -> None:
@@ -1016,6 +1023,7 @@ def get_program(request, program_id: int):
 
 
 @router.patch('/programs/{program_id}', response=ProgramSchema)
+@transaction.atomic
 def update_program(request, program_id: int, data: ProgramUpdateRequest):
     _require_program_write(request, 'edit')
     program = _get_program_or_404(request, program_id)
@@ -1023,6 +1031,15 @@ def update_program(request, program_id: int, data: ProgramUpdateRequest):
     if program.is_locked:
         raise HttpError(400, 'This program is locked. Unlock it before making changes.')
     updates = data.dict(exclude_none=True)
+    if updates.get('prompting_template_id') == program.prompting_template_id:
+        updates.pop('prompting_template_id', None)
+    targets = list(program.targets.all())
+    protected = protected_target_ids(t.id for t in targets)
+    if protected and 'category' in updates and updates['category'] != program.category:
+        raise HttpError(409, DATA_PROTECTION_MESSAGE)
+    if 'prompting_template_id' in updates:
+        for target in targets:
+            guard_target_changes(target, {'prompting_template_id': updates['prompting_template_id']}, protected)
     _validate_template_refs(request, updates.get('prompting_template_id'), updates.get('workflow_template_id'))
     if updates.get('category') == Program.Category.INSTRUCTIONS_ONLY and program.targets.exists():
         raise HttpError(400, 'Cannot switch to Instructions Only while this program still has targets — remove them first')
@@ -1130,8 +1147,8 @@ def delete_program_permanently(request, program_id: int):
     _check_program_write(request, program, 'delete')
     if program.archived_at is None:
         raise HttpError(400, 'Archive the program first — only archived programs can be permanently deleted')
-    if _last_run_by_target(program.targets.values_list('id', flat=True)):
-        raise HttpError(409, 'This program has recorded session data, so it cannot be permanently deleted. Leave it archived.')
+    if protected_target_ids(program.targets.values_list('id', flat=True)):
+        raise HttpError(409, 'This program has recorded data or saved sessions, so it cannot be permanently deleted. Leave it archived.')
     try:
         with transaction.atomic():
             program.delete()
@@ -1341,6 +1358,23 @@ def _validate_default_sub_fields(request, data: dict) -> None:
     )
 
 
+def _guard_recorded_sub_items(request, target, items):
+    existing = list(target.child_items.order_by('display_order', 'id'))
+    if not existing:
+        original = Target.objects.get(id=target.id)
+        before = original.sub_items
+        fields = ('key', 'measurement_type', 'measurement', 'prompting_template_id')
+        if [[raw.get(field) for field in fields] for raw in before] != [[raw.get(field) for field in fields] for raw in items]:
+            raise HttpError(409, DATA_PROTECTION_MESSAGE)
+        return
+    if [item.key for item in existing] != [str(raw.get('key') or f'item_{i + 1}')[:100] for i, raw in enumerate(items)]:
+        raise HttpError(409, DATA_PROTECTION_MESSAGE)
+    for child, raw in zip(existing, items):
+        config = _resolve_sub_item_config(request, target, raw)
+        if any(config[field] != getattr(child, field) for field in ('measurement_type', 'measurement', 'prompting_template_id')):
+            raise HttpError(409, DATA_PROTECTION_MESSAGE)
+
+
 def _sync_target_sub_items(request, target: Target, items: list[dict], user=None) -> None:
     existing = {item.key: item for item in target.child_items.all()}
     seen: set[str] = set()
@@ -1441,6 +1475,9 @@ def list_targets(request, program_id: int, staff_view: bool = False):
     if staff_view:
         qs = qs.visible_to_staff()
     targets = list(qs)
+    protected = protected_target_ids(t.id for t in targets)
+    for target in targets:
+        target.data_definition_locked = target.id in protected
     last_by_target = _last_run_by_target(t.id for t in targets)
     for target in targets:
         target.last_run_at = last_by_target.get(target.id)
@@ -1501,15 +1538,22 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
 @router.get('/targets/{target_id}', response=TargetSchema)
 def get_target(request, target_id: int):
     _require_program_read(request)
-    return _get_target_or_404(request, target_id)
+    target = _get_target_or_404(request, target_id)
+    target.data_definition_locked = bool(protected_target_ids([target.id]))
+    return target
 
 
 @router.patch('/targets/{target_id}', response=TargetSchema)
+@transaction.atomic
 def update_target(request, target_id: int, data: TargetUpdateRequest):
     _require_program_write(request, 'edit')
     target = _get_target_or_404(request, target_id)
     _check_program_write(request, target.program, 'edit')
+    original = copy(target)
+    protected = protected_target_ids([target.id])
     updates = data.dict(exclude_none=True)
+    if updates.get('prompting_template_id') == target.prompting_template_id:
+        updates.pop('prompting_template_id', None)
     _validate_template_refs(request, updates.get('prompting_template_id'), updates.get('workflow_template_id'))
     old_status = target.status
     for field, value in updates.items():
@@ -1524,7 +1568,7 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
         _validate_target_status(request, updates['status'])
     if 'interval_warning_sound' in updates:
         _validate_interval_warning_sound(updates['interval_warning_sound'])
-    mt_changed = 'measurement_type' in updates
+    mt_changed = 'measurement_type' in updates and updates['measurement_type'] != original.measurement_type
     if mt_changed:
         _validate_measurement_type(updates['measurement_type'], allow_legacy=True)
     _validate_prompting_required(
@@ -1563,8 +1607,13 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
         }
         _validate_default_sub_fields(request, resolved)
         for k, v in resolved.items():
-            setattr(target, k, v)
+            if k in updates:
+                setattr(target, k, v)
     _require_sub_items_if_needed(target.measurement_type, target.sub_items)
+    guard_target_changes(original, {field: getattr(target, field) for field in updates}, protected)
+    if target.id in protected and 'sub_items' in updates:
+        _guard_recorded_sub_items(request, target, target.sub_items)
+    target.data_definition_locked = target.id in protected
     target.save()
     if target.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES and (
         'sub_items' in updates or 'sub_item_progression' in updates or default_sub_changed
@@ -1595,6 +1644,8 @@ def delete_target(request, target_id: int):
     _require_program_write(request, 'edit')
     target = _get_target_or_404(request, target_id)
     _check_program_write(request, target.program, 'edit')
+    if protected_target_ids([target.id]):
+        raise HttpError(409, 'This target has session history. Close or archive it instead of deleting it.')
     target.delete()
     return 204, None
 
@@ -1744,6 +1795,7 @@ _BULK_UPDATE_FK_MODELS = {
 
 
 @router.post('/programs/{program_id}/targets/bulk-update', response=BulkUpdateResult)
+@transaction.atomic
 def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest):
     """Update specific fields across multiple targets without touching unspecified fields."""
     _require_program_write(request, 'edit')
@@ -1798,6 +1850,11 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
             updates['measurement_type'], None, None,
         )
 
+    selected = list(Target.objects.filter(id__in=data.target_ids, program_id=program_id))
+    protected = protected_target_ids(target.id for target in selected)
+    for target in selected:
+        guard_target_changes(target, updates, protected)
+
     template_for_prompt_index = None
     if 'prompting_template_id' in updates:
         template = _settings_qs(PromptingTemplate, request).filter(id=updates['prompting_template_id']).first()
@@ -1810,7 +1867,8 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
     if updated == 0:
         raise HttpError(400, 'No matching targets found for this program')
     if template_for_prompt_index:
-        for target in Target.objects.filter(id__in=data.target_ids, program_id=program_id):
+        changed_prompt_ids = [target.id for target in selected if target.prompting_template_id != updates['prompting_template_id']]
+        for target in Target.objects.filter(id__in=changed_prompt_ids, program_id=program_id):
             target.current_prompt_level_index = _initial_prompt_level_index(template_for_prompt_index, target)
             target.save(update_fields=['current_prompt_level_index', 'updated_at'])
     return BulkUpdateResult(updated_count=updated, target_ids=data.target_ids)
@@ -1871,6 +1929,12 @@ def update_prompting_template(request, template_id: int, data: PromptingTemplate
     if data.name:
         _check_unique_name(PromptingTemplate, request, data.name, exclude_id=template_id)
     payload = _normalize_prompting_template_settings(payload, template)
+    scoring_changed = (
+        ('levels' in payload and scoring_signature(payload['levels']) != scoring_signature(template.levels))
+        or ('outcome_measurement' in payload and payload['outcome_measurement'] != template.outcome_measurement)
+    )
+    if scoring_changed and template_has_history(template.id):
+        raise HttpError(409, 'This prompt template has session history. Duplicate it to change its scoring or levels.')
     for field, value in payload.items():
         setattr(template, field, value)
     template.save()
@@ -1887,6 +1951,8 @@ def delete_prompting_template(request, template_id: int):
         raise HttpError(404, 'Template not found')
     if template.is_locked:
         raise HttpError(423, 'Prompting template is locked')
+    if template_has_history(template.id):
+        raise HttpError(409, 'This prompt template has session history and cannot be deleted.')
     template.delete()
     return 204, None
 
