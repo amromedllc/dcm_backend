@@ -478,6 +478,7 @@ class LessonProgramSchema(Schema):
     program_id: int
     program_name: str
     display_order: int
+    is_pinned: bool = False
 
 
 class LessonSchema(Schema):
@@ -487,6 +488,8 @@ class LessonSchema(Schema):
     therapist_message: str = ''
     lesson_type: str
     is_active: bool
+    is_reusable: bool
+    is_default: bool
     programs: list[LessonProgramSchema] = []
     created_at: datetime
     updated_at: datetime
@@ -498,6 +501,8 @@ class LessonCreateRequest(Schema):
     therapist_message: str = ''
     lesson_type: Lesson.LessonType = Lesson.LessonType.OPEN
     program_ids: list[int] = []
+    pinned_program_ids: list[int] = []
+    is_default: bool = False
 
 
 class LessonUpdateRequest(Schema):
@@ -505,7 +510,9 @@ class LessonUpdateRequest(Schema):
     therapist_message: str | None = None
     lesson_type: Lesson.LessonType | None = None
     is_active: bool | None = None
+    is_default: bool | None = None
     program_ids: list[int] | None = None
+    pinned_program_ids: list[int] | None = None
 
 
 class AddProgramToLessonRequest(Schema):

@@ -39,7 +39,7 @@ from .schemas import (
     SessionMediaCommentSchema, SessionMediaCommentCreateRequest,
     SessionSupervisionNoteSchema, SessionSupervisionNoteCreateRequest,
 )
-from .services import build_program_snapshot, submit_session, approve_session, reject_session
+from .services import build_program_snapshot, resolve_session_lesson, submit_session, approve_session, reject_session
 
 router = Router(auth=partner_auth)
 
@@ -664,6 +664,7 @@ def get_appointment_programs(request, appt_id: int):
 
 
 @router.post('/appointments/{appt_id}/programs', response=AppointmentSchema)
+@transaction.atomic
 def assign_appointment_programs(request, appt_id: int, data: AssignProgramsRequest):
     """
     Supervisor assigns which programs to run in this appointment.
@@ -717,23 +718,33 @@ def assign_appointment_programs(request, appt_id: int, data: AssignProgramsReque
         )
 
     from apps.programs.models import Lesson, LessonProgram
+    from apps.programs.api import _validate_lesson_program_ids
+    if data.client_id is not None and appt.external_client_id not in client_identifier_aliases(data.client_id):
+        raise HttpError(404, 'Appointment not found for this client')
+    if not data.clear_assignment:
+        _validate_lesson_program_ids(request, appt.external_client_id, data.program_ids)
     from django.db import transaction
 
     with transaction.atomic():
+        appt = Appointment.objects.select_for_update().get(pk=appt.pk)
+        if appt.lesson_id:
+            appt.lesson = Lesson.objects.select_for_update().get(pk=appt.lesson_id)
         if data.clear_assignment:
             if appt.lesson_id:
                 lesson = appt.lesson
                 appt.lesson = None
                 appt.save(update_fields=['lesson'])
-                lesson.delete()
+                if not lesson.is_reusable and not lesson.appointments.exists():
+                    lesson.delete()
             return _appt_qs().get(id=appt.id)
 
-        if appt.lesson_id:
+        if appt.lesson_id and not appt.lesson.is_reusable and not appt.lesson.appointments.exclude(pk=appt.pk).exists():
             lesson = appt.lesson
         else:
             lesson = Lesson.objects.create(
                 external_client_id=data.client_id or appt.external_client_id,
                 name=appt.start_time.strftime('Session %b %d, %Y'),
+                lesson_type=Lesson.LessonType.APPOINTMENT_LINKED,
                 created_by=request.user,
             )
             appt.lesson_id = lesson.id
@@ -795,6 +806,7 @@ def _canonical_external_client_id(client_id: int) -> int:
 
 
 @router.post('/sessions', response={201: SessionRunSchema})
+@transaction.atomic
 def start_session(request, data: SessionStartRequest):
     """
     Creates a new SessionRun and immediately captures the program snapshot.
@@ -815,16 +827,26 @@ def start_session(request, data: SessionStartRequest):
         _require_session_start(request)
     if data.client_id not in _accessible_external_client_ids(request):
         raise HttpError(404, 'Client not found')
+    # Serialize default changes with start so one recording captures one setup version.
+    from apps.clients.models import Client
+    clients = Client.objects.select_for_update()
+    locked_client = clients.filter(id=data.client_id).first() or clients.filter(external_id=str(data.client_id)).first()
+    if locked_client is None:
+        raise HttpError(404, 'Client not found')
     external_lookup = str(data.external_appointment_id or '').strip()
     appt = (
         Appointment.objects.filter(external_id=external_lookup).select_related('lesson').first()
         if external_lookup else _find_appointment(data.appointment_id)
     ) if (data.appointment_id or external_lookup) else None
-    lesson_id = data.lesson_id or (appt.lesson_id if appt else None)
-    lesson_obj = appt.lesson if appt and appt.lesson_id else None
-    if lesson_id and lesson_obj is None:
+    if appt and (appt.external_client_id not in client_identifier_aliases(data.client_id) or (request.user.role == 'staff' and appt.staff_id != request.user.id)):
+        raise HttpError(404, 'Appointment not found for this client')
+    lesson_obj = resolve_session_lesson(
+        data.client_id, explicit_lesson_id=data.lesson_id, appointment=appt, use_default=not data.manual,
+    )
+    if lesson_obj:
         from apps.programs.models import Lesson
-        lesson_obj = Lesson.objects.filter(id=lesson_id, is_active=True).first()
+        lesson_obj = Lesson.objects.select_for_update().get(pk=lesson_obj.pk)
+    lesson_id = lesson_obj.id if lesson_obj else None
     external_appointment_id = data.appointment_id
     if external_lookup and external_lookup.isdigit():
         external_appointment_id = int(external_lookup)
@@ -833,8 +855,10 @@ def start_session(request, data: SessionStartRequest):
     snapshot = build_program_snapshot(
         client_id=data.client_id,
         lesson_id=lesson_id,
-        restrict_to_lesson=bool(data.appointment_id),
+        restrict_to_lesson=False,
     )
+    if lesson_obj and not snapshot['programs']:
+        raise HttpError(400, 'This session setup has no runnable programs. Update its programs before starting.')
     session = SessionRun.objects.create(
         external_client_id=_canonical_external_client_id(data.client_id),
         service_setting=data.service_setting or ('Telehealth' if appt and appt.telehealth_link else ''),

@@ -1955,6 +1955,7 @@ def _serialize_lesson(lesson: Lesson) -> dict:
             'program_id': lp.program_id,
             'program_name': lp.program.name,
             'display_order': lp.display_order,
+            'is_pinned': lp.is_pinned,
         }
         for lp in lesson.lesson_programs.select_related('program').all()
     ]
@@ -1965,110 +1966,130 @@ def _serialize_lesson(lesson: Lesson) -> dict:
         'therapist_message': lesson.therapist_message,
         'lesson_type': lesson.lesson_type,
         'is_active': lesson.is_active,
+        'is_reusable': lesson.is_reusable,
+        'is_default': lesson.is_default,
         'programs': programs,
         'created_at': lesson.created_at,
         'updated_at': lesson.updated_at,
     }
 
 
-"""
-Session Playlist API is paused for now.
+def _session_setup_client(request, client_id: int):
+    from apps.clients.api import _get_accessible_clients
+    clients = _get_accessible_clients(request).select_for_update()
+    client = clients.filter(id=client_id).first() or clients.filter(external_id=str(client_id)).first()
+    if client is None:
+        raise HttpError(404, 'Client not found')
+    return client
 
-These endpoints exposed reusable playlist/template management in the client
-Sessions page, but users confused playlists with actual submitted/open session
-records. Keep the underlying Lesson model because appointment program
-assignment depends on it; only the standalone playlist API is disabled.
+
+def _get_session_setup_or_404(request, lesson_id: int) -> Lesson:
+    lesson = _get_lesson_or_404(request, lesson_id)
+    if not lesson.is_reusable or not lesson.is_active:
+        raise HttpError(404, 'Session setup not found')
+    return lesson
+
+
+def _require_session_setup_write(request):
+    _require_supervisor(request)
+    require_permission(request, 'sessions_edit')
+
+
+def _validate_setup_pins(program_ids, pinned_ids):
+    if len(set(pinned_ids)) != len(pinned_ids) or not set(pinned_ids).issubset(program_ids):
+        raise HttpError(400, 'Pinned programs must belong to this session setup')
+
 
 @router.get('/lessons', response=list[LessonSchema])
 def list_lessons(request, client_id: int):
+    _require_any_permission(request, ('client_sessions', 'session_start'))
+    _assert_client_accessible(request, client_id)
     lessons = Lesson.objects.filter(
-        external_client_id=client_id,
-        external_client_id__in=_accessible_external_client_ids(request),
-        is_active=True,
-    )
-    return [_serialize_lesson(l) for l in lessons]
+        external_client_id__in=client_identifier_aliases(client_id), is_active=True, is_reusable=True,
+    ).prefetch_related('lesson_programs__program')
+    return [_serialize_lesson(lesson) for lesson in lessons]
 
 
 @router.post('/lessons', response={201: LessonSchema})
+@transaction.atomic
 def create_lesson(request, data: LessonCreateRequest):
-    _require_supervisor(request)
-    _assert_client_accessible(request, data.client_id)
+    _require_session_setup_write(request)
+    client = _session_setup_client(request, data.client_id)
     if not data.program_ids:
-        raise HttpError(400, 'Select at least one program for the playlist')
-    program_ids = _validate_lesson_program_ids(request, data.client_id, data.program_ids)
+        raise HttpError(400, 'Select at least one program for the session setup')
+    program_ids = _validate_lesson_program_ids(request, client.id, data.program_ids)
+    _validate_setup_pins(program_ids, data.pinned_program_ids)
+    defaults = Lesson.objects.filter(external_client_id__in=client_identifier_aliases(client.id), is_default=True)
+    make_default = data.is_default or not defaults.exists()
+    if make_default:
+        defaults.update(is_default=False)
     lesson = Lesson.objects.create(
-        external_client_id=data.client_id,
-        name=data.name,
-        therapist_message=data.therapist_message,
-        lesson_type=data.lesson_type,
-        created_by=request.user,
+        external_client_id=client.id, name=data.name, therapist_message=data.therapist_message,
+        lesson_type=Lesson.LessonType.OPEN, is_reusable=True, is_default=make_default, created_by=request.user,
     )
     for order, program_id in enumerate(program_ids):
-        LessonProgram.objects.create(lesson=lesson, program_id=program_id, display_order=order)
+        LessonProgram.objects.create(lesson=lesson, program_id=program_id, display_order=order, is_pinned=program_id in data.pinned_program_ids)
     return 201, _serialize_lesson(lesson)
 
 
 @router.get('/lessons/{lesson_id}', response=LessonSchema)
 def get_lesson(request, lesson_id: int):
-    return _serialize_lesson(_get_lesson_or_404(request, lesson_id))
+    _require_any_permission(request, ('client_sessions', 'session_start'))
+    return _serialize_lesson(_get_session_setup_or_404(request, lesson_id))
 
 
 @router.patch('/lessons/{lesson_id}', response=LessonSchema)
+@transaction.atomic
 def update_lesson(request, lesson_id: int, data: LessonUpdateRequest):
-    _require_supervisor(request)
-    lesson = _get_lesson_or_404(request, lesson_id)
+    _require_session_setup_write(request)
+    lesson = _get_session_setup_or_404(request, lesson_id)
+    client = _session_setup_client(request, lesson.external_client_id)
+    lesson = Lesson.objects.select_for_update().get(pk=lesson.pk)
+    if not lesson.is_active:
+        raise HttpError(404, 'Session setup not found')
     payload = data.dict(exclude_none=True)
+    payload.pop('lesson_type', None)
     program_ids = payload.pop('program_ids', None)
-    if program_ids is not None and not program_ids:
-        raise HttpError(400, 'Select at least one program for the playlist')
+    pinned_ids = payload.pop('pinned_program_ids', None)
     if program_ids is not None:
-        program_ids = _validate_lesson_program_ids(request, lesson.external_client_id, program_ids)
+        if not program_ids:
+            raise HttpError(400, 'Select at least one program for the session setup')
+        program_ids = _validate_lesson_program_ids(request, client.id, program_ids)
+    effective_ids = program_ids if program_ids is not None else list(lesson.lesson_programs.values_list('program_id', flat=True))
+    if pinned_ids is None:
+        pinned_ids = list(lesson.lesson_programs.filter(is_pinned=True, program_id__in=effective_ids).values_list('program_id', flat=True))
+    _validate_setup_pins(effective_ids, pinned_ids)
+    if payload.get('is_active') is False:
+        payload['is_default'] = False
+    if payload.get('is_default'):
+        Lesson.objects.filter(external_client_id__in=client_identifier_aliases(client.id), is_default=True).exclude(pk=lesson.pk).update(is_default=False)
     for field, value in payload.items():
         setattr(lesson, field, value)
     lesson.save()
     if program_ids is not None:
         LessonProgram.objects.filter(lesson=lesson).delete()
         for order, program_id in enumerate(program_ids):
-            LessonProgram.objects.create(lesson=lesson, program_id=program_id, display_order=order)
+            LessonProgram.objects.create(lesson=lesson, program_id=program_id, display_order=order, is_pinned=program_id in pinned_ids)
+    elif data.pinned_program_ids is not None:
+        lesson.lesson_programs.update(is_pinned=False)
+        lesson.lesson_programs.filter(program_id__in=pinned_ids).update(is_pinned=True)
     return _serialize_lesson(lesson)
 
 
 @router.delete('/lessons/{lesson_id}', response={204: None})
+@transaction.atomic
 def delete_lesson(request, lesson_id: int):
-    _require_supervisor(request)
-    lesson = _get_lesson_or_404(request, lesson_id)
+    _require_session_setup_write(request)
+    lesson = _get_session_setup_or_404(request, lesson_id)
+    _session_setup_client(request, lesson.external_client_id)
+    lesson = Lesson.objects.select_for_update().get(pk=lesson.pk)
     lesson.is_active = False
-    lesson.save(update_fields=['is_active'])
+    lesson.is_default = False
+    lesson.save(update_fields=['is_active', 'is_default'])
     return 204, None
 
 
-@router.post('/lessons/{lesson_id}/programs', response={201: LessonProgramSchema})
-def add_program_to_lesson(request, lesson_id: int, data: AddProgramToLessonRequest):
-    _require_supervisor(request)
-    lesson = _get_lesson_or_404(request, lesson_id)
-    _validate_lesson_program_ids(request, lesson.external_client_id, [data.program_id])
-    lp, _ = LessonProgram.objects.get_or_create(
-        lesson=lesson,
-        program_id=data.program_id,
-        defaults={'display_order': data.display_order},
-    )
-    return 201, {
-        'id': lp.id,
-        'program_id': lp.program_id,
-        'program_name': lp.program.name,
-        'display_order': lp.display_order,
-    }
-
-
-@router.delete('/lessons/{lesson_id}/programs/{program_id}', response={204: None})
-def remove_program_from_lesson(request, lesson_id: int, program_id: int):
-    _require_supervisor(request)
-    _get_lesson_or_404(request, lesson_id)
-    LessonProgram.objects.filter(lesson_id=lesson_id, program_id=program_id).delete()
-    return 204, None
-"""
-
-
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Org-level program library (facility-wide templates)
 # ---------------------------------------------------------------------------
