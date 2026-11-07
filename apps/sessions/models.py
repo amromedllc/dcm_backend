@@ -489,6 +489,11 @@ class SessionSupervisionNote(TenantAwareModel):
         on_delete=models.CASCADE,
         related_name='supervision_notes',
     )
+    class NoteType(models.TextChoices):
+        GUIDANCE = 'guidance', 'Supervisor guidance'
+        PROGRAM_MODIFICATION = 'program_modification', 'Program modification'
+
+    note_type = models.CharField(max_length=24, choices=NoteType.choices, default=NoteType.GUIDANCE)
     body = models.TextField()
 
     _org_scoped_fk_fields = ('session_run',)

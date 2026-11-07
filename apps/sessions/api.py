@@ -1051,6 +1051,7 @@ def list_supervision_notes(request, session_id: int):
             id=note.id,
             session_run_id=note.session_run_id,
             body=note.body,
+            note_type=note.note_type,
             author=note.created_by.full_name or note.created_by.email if note.created_by_id else None,
             created_at=note.created_at,
         )
@@ -1070,12 +1071,14 @@ def create_supervision_note(request, session_id: int, data: SessionSupervisionNo
     note = SessionSupervisionNote.objects.create(
         session_run=session,
         body=body,
+        note_type=data.note_type,
         created_by=request.user,
     )
     return 201, SessionSupervisionNoteSchema(
         id=note.id,
         session_run_id=note.session_run_id,
         body=note.body,
+        note_type=note.note_type,
         author=request.user.full_name or request.user.email,
         created_at=note.created_at,
     )

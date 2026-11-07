@@ -84,6 +84,71 @@ def resolve_program_tokens(session) -> dict[str, str]:
     return out
 
 
+def resolve_session_context_tokens(session) -> dict[str, str]:
+    """Import clinical context into stored note fields, never live-render signed text."""
+    from django.db.models import Q
+    from apps.analytics.models import ClientAnnotation, GraphAnnotation
+    from apps.clients.id_aliases import client_identifier_aliases
+    from apps.programs.models import Program
+    from apps.sessions.models import SessionSupervisionNote
+
+    out = {'program.modifications': '', 'program.graph_annotations': ''}
+    if session.external_client_id is None:
+        return out
+    aliases = client_identifier_aliases(session.external_client_id)
+    snapshot_programs = (session.program_snapshot or {}).get('programs', [])
+    # Validate snapshot IDs against the owning client as well as the scoped manager.
+    programs = {
+        program.id: program for program in Program.objects.filter(
+            id__in=[program.get('id') for program in snapshot_programs],
+            external_client_id__in=aliases,
+            organization_id=session.organization_id,
+        )
+    }
+    target_ids = {
+        target.get('id') for program in snapshot_programs if program.get('id') in programs
+        for target in program.get('targets', [])
+    }
+    modifications = SessionSupervisionNote.objects.filter(
+        session_run_id=session.id,
+        organization_id=session.organization_id,
+        note_type=SessionSupervisionNote.NoteType.PROGRAM_MODIFICATION,
+    ).order_by('created_at', 'id')
+    out['program.modifications'] = '\n'.join(
+        f'{timezone.localtime(entry.created_at).strftime("%Y-%m-%d %H:%M")}: {entry.body.strip()}'
+        for entry in modifications if entry.body.strip()
+    )
+    start = timezone.localtime(session.started_at).date()
+    end = timezone.localtime(session.ended_at or timezone.now()).date()
+    annotations = GraphAnnotation.objects.filter(
+        organization_id=session.organization_id, program_id__in=programs, date__lte=end,
+    ).filter(
+        Q(date__gte=start) | Q(annotation_type='phase_range', end_date__gte=start),
+    ).filter(Q(target_id__isnull=True) | Q(target_id__in=target_ids)).select_related('target').order_by('date', 'id')
+    lines = []
+    for annotation in annotations:
+        period = annotation.date.isoformat()
+        if annotation.annotation_type == 'phase_range' and annotation.end_date:
+            period += f' – {annotation.end_date.isoformat()}'
+        owner = programs[annotation.program_id].name
+        if annotation.target_id:
+            owner += f' / {annotation.target.name}'
+        line = f'{period} — {owner} — {annotation.get_annotation_type_display()}: {annotation.label}'
+        if annotation.notes.strip():
+            line += f' — {annotation.notes.strip()}'
+        lines.append(line)
+    for annotation in ClientAnnotation.objects.filter(
+        organization_id=session.organization_id, external_client_id__in=aliases,
+        date__gte=start, date__lte=end,
+    ).order_by('date', 'id'):
+        line = f'{annotation.date.isoformat()} — Client graph: {annotation.label}'
+        if annotation.notes.strip():
+            line += f' — {annotation.notes.strip()}'
+        lines.append(line)
+    out['program.graph_annotations'] = '\n'.join(lines)
+    return out
+
+
 def _session_notes(session) -> str:
     """Everything the therapist wrote down during a session: their message, plus any per-trial,
     behavior and ABC notes (one line each, labelled with the target)."""
@@ -230,17 +295,27 @@ def apply_session_autofill(note: LessonNote, *, overwrite: bool) -> bool:
     Returns True if the body changed."""
     template = note.template
     session = note.session_run
-    if not (template and session and template.template_type == 'notes'):
+    if not (template and session and template.template_type == 'notes' and note.is_editable):
         return False
     wanted = {f['key']: f['auto_fill'] for f in template.fields if f.get('auto_fill')}
     if not wanted:
         return False
+    from apps.clients.id_aliases import client_identifier_aliases
+    if (
+        note.organization_id != session.organization_id
+        or note.external_client_id is None
+        or session.external_client_id not in client_identifier_aliases(note.external_client_id)
+    ):
+        raise HttpError(400, 'The note and session must belong to the same client and organization')
     values = resolve_program_tokens(session)
+    context_tokens = {'program.modifications', 'program.graph_annotations'}
+    if context_tokens.intersection(wanted.values()):
+        values.update(resolve_session_context_tokens(session))
     body = dict(note.body or {})
     changed = False
     for key, token in wanted.items():
         value = values.get(token)
-        if not value:
+        if not value and not (overwrite and token in context_tokens):
             continue
         if not overwrite and body.get(key):
             continue

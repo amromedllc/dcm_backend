@@ -1,5 +1,6 @@
 import hashlib
 from datetime import date
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from ninja import Router
@@ -298,6 +299,7 @@ def preview_note_tokens(request, template_id: int, client_id: int, note_date: da
 
 
 @router.post('/notes', response={201: LessonNoteSchema})
+@transaction.atomic
 def create_note(request, data: NoteCreateRequest):
     require_permission(request, 'notes_create')
     payload = data.dict()
