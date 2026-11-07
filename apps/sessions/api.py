@@ -9,7 +9,7 @@ from ninja.files import UploadedFile
 from ninja.errors import HttpError
 
 from apps.accounts.auth import partner_auth
-from apps.accounts.permissions import require_permission
+from apps.accounts.permissions import require_any_permission, require_permission
 from apps.clients.id_aliases import client_identifier_aliases
 from apps.programs.measurements import (
     aggregate_measurement, MEASUREMENT_LABELS,
@@ -42,6 +42,18 @@ from .schemas import (
 from .services import build_program_snapshot, resolve_session_lesson, submit_session, approve_session, reject_session
 
 router = Router(auth=partner_auth)
+
+
+_SESSION_READ_CONTEXTS = (
+    'sessions_view', 'client_sessions', 'client_history', 'client_notes',
+    'notes_view', 'notes_create', 'notes_edit', 'review_queue_view',
+    'session_start', 'sessions_manual_entry', 'session_approve',
+    'sessions_edit', 'sessions_delete', 'sessions_edit_data',
+)
+
+
+def _require_session_read(request):
+    require_any_permission(request, _SESSION_READ_CONTEXTS)
 
 
 def _require_session_start(request) -> None:
@@ -193,6 +205,7 @@ def _get_session_or_404(session_id: int, request) -> SessionRun:
     since every caller of this helper — get/delete session, trials,
     behaviors, abc, submit, sync — otherwise had no ownership check at all.
     """
+    _require_session_read(request)
     qs = SessionRun.objects.select_related('staff').filter(
         external_client_id__in=_accessible_external_client_ids(request),
     ).order_by('-started_at')
@@ -539,6 +552,7 @@ def list_provider_appointments(
     """Return appointments for a provider from DCM's own synced data
     (Integrations → Pull Appointments), matched via Appointment.staff's
     external_employee_id — no live TherapyPMS call."""
+    _require_session_read(request)
     qs = _appt_qs().filter(staff__external_employee_id=external_employee_id)
     if status:
         qs = qs.filter(status=status)
@@ -549,6 +563,7 @@ def list_provider_appointments(
 def my_schedule(request, date: str | None = None):
     """Return appointments for the logged-in staff member on a given date
     (defaults to today), from DCM's own synced data."""
+    _require_session_read(request)
     from datetime import date as dt_date
 
     target_date = date or dt_date.today().isoformat()
@@ -582,6 +597,7 @@ def _get_appointment_or_404(request, appt_id: int) -> Appointment:
     any staff user could read another staff member's appointment (client,
     notes, schedule) purely by guessing/incrementing an id.
     """
+    _require_session_read(request)
     qs = _appt_qs().filter(external_client_id__in=_accessible_external_client_ids(request))
     if request.user.role == 'staff':
         qs = qs.filter(staff_id=request.user.id)
@@ -599,6 +615,7 @@ def list_appointments(
     date: str | None = None,
     status: str | None = None,
 ):
+    _require_session_read(request)
     qs = _appt_qs().filter(external_client_id__in=_accessible_external_client_ids(request))
     if client_id:
         qs = qs.filter(
@@ -982,6 +999,7 @@ def list_sessions(
     date_from: date | None = None,
     date_to: date | None = None,
 ):
+    _require_session_read(request)
     def day_bound(day: date, value: time):
         dt = datetime.combine(day, value)
         return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
@@ -1614,7 +1632,10 @@ def _serialize_media(media: SessionMedia, request) -> SessionMediaSchema:
 
 def _get_media_or_404(media_id: int, request) -> SessionMedia:
     """Same ownership rule as _get_session_or_404 — staff only reach media on their own sessions."""
-    qs = SessionMedia.objects.select_related('session_run', 'created_by', 'reviewed_by')
+    _require_session_read(request)
+    qs = SessionMedia.objects.select_related('session_run', 'created_by', 'reviewed_by').filter(
+        session_run__external_client_id__in=_accessible_external_client_ids(request),
+    )
     if request.user.role == 'staff':
         qs = qs.filter(session_run__staff_id=request.user.id)
     try:

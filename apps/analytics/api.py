@@ -113,7 +113,16 @@ def _require_supervisor(request):
 
 
 def _visible_saved_insights_qs(request):
-    return SavedInsightGraph.objects.filter(_same_practice_q(request.user, 'created_by__')).filter(
+    from apps.programs.api import _accessible_external_client_ids, _org_qs
+    client_ids = _accessible_external_client_ids(request)
+    resource_scope = (
+        models.Q(program__external_client_id__in=client_ids)
+        | models.Q(program__isnull=True, external_client_id__in=client_ids)
+        | models.Q(program_id__in=_org_qs(request).values_list('id', flat=True))
+    )
+    return SavedInsightGraph.objects.filter(
+        _same_practice_q(request.user, 'created_by__'), resource_scope,
+    ).filter(
         models.Q(created_by=request.user)
         | models.Q(visibility=SavedInsightGraph.Visibility.EVERYONE)
         | models.Q(visibility=SavedInsightGraph.Visibility.ROLES, roles__contains=[request.user.role])
@@ -587,7 +596,7 @@ def list_saved_insights(
     external_client_id: int | None = None,
 ):
     _require_analytics_read(request)
-    _assert_analytics_resource(request, program_id=program_id)
+    _assert_analytics_resource(request, program_id=program_id, client_id=external_client_id)
     qs = _visible_saved_insights_qs(request)
     if program_id is not None:
         qs = qs.filter(program_id=program_id)

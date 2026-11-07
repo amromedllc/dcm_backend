@@ -1,5 +1,6 @@
 import os
 from copy import copy
+from functools import wraps
 from types import SimpleNamespace
 
 from django.core.exceptions import ObjectDoesNotExist
@@ -99,6 +100,16 @@ def _require_program_write(request, action: str) -> None:
     """Early gate for endpoints on an existing program: either kind of programs permission. The exact one
     (client_programs_* or org_programs_*) is enforced by _check_program_write once the program is loaded."""
     _require_any_permission(request, (f'client_programs_{action}', f'org_programs_{action}'))
+
+
+def _atomic_program_edit(view):
+    """Authorize edits before opening the mutation transaction."""
+    @wraps(view)
+    def wrapped(request, *args, **kwargs):
+        _require_program_write(request, 'edit')
+        with transaction.atomic():
+            return view(request, *args, **kwargs)
+    return wrapped
 
 
 def _check_program_write(request, program: Program, action: str) -> None:
@@ -1023,9 +1034,8 @@ def get_program(request, program_id: int):
 
 
 @router.patch('/programs/{program_id}', response=ProgramSchema)
-@transaction.atomic
+@_atomic_program_edit
 def update_program(request, program_id: int, data: ProgramUpdateRequest):
-    _require_program_write(request, 'edit')
     program = _get_program_or_404(request, program_id)
     _check_program_write(request, program, 'edit')
     if program.is_locked:
@@ -1544,9 +1554,8 @@ def get_target(request, target_id: int):
 
 
 @router.patch('/targets/{target_id}', response=TargetSchema)
-@transaction.atomic
+@_atomic_program_edit
 def update_target(request, target_id: int, data: TargetUpdateRequest):
-    _require_program_write(request, 'edit')
     target = _get_target_or_404(request, target_id)
     _check_program_write(request, target.program, 'edit')
     original = copy(target)
@@ -1795,10 +1804,9 @@ _BULK_UPDATE_FK_MODELS = {
 
 
 @router.post('/programs/{program_id}/targets/bulk-update', response=BulkUpdateResult)
-@transaction.atomic
+@_atomic_program_edit
 def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest):
     """Update specific fields across multiple targets without touching unspecified fields."""
-    _require_program_write(request, 'edit')
     program = _get_program_or_404(request, program_id)
     _check_program_write(request, program, 'edit')
     updates = data.dict(exclude={'target_ids'}, exclude_none=True)
