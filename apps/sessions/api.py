@@ -822,9 +822,11 @@ def start_session(request, data: SessionStartRequest):
     manual_started = manual_ended = None
     if data.manual:
         require_permission(request, 'sessions_manual_entry')
-        manual_started, manual_ended = _validate_manual_window(data.started_at, data.ended_at)
     else:
         _require_session_start(request)
+    require_permission(request, 'sessions_create')
+    if data.manual:
+        manual_started, manual_ended = _validate_manual_window(data.started_at, data.ended_at)
     if data.client_id not in _accessible_external_client_ids(request):
         raise HttpError(404, 'Client not found')
     # Serialize default changes with start so one recording captures one setup version.
@@ -908,6 +910,7 @@ def start_group_session(request, data: GroupSessionStartRequest):
     client's chosen program_ids if given, otherwise all of their assigned
     active programs (same default as a solo walk-in session)."""
     _require_session_start(request)
+    require_permission(request, 'sessions_create')
     selections = data.clients
     client_ids = [c.client_id for c in selections]
     if len(client_ids) < 2:
@@ -961,6 +964,7 @@ def get_group_session(request, group_id: int):
 
 @router.get('/group-sessions', response=list[GroupSessionSchema])
 def list_group_sessions(request, date: str | None = None):
+    require_permission(request, 'sessions_view')
     qs = GroupSession.objects.filter(staff=request.user).prefetch_related('session_runs__staff')
     if date:
         day = datetime.strptime(date, '%Y-%m-%d').date()
@@ -1119,6 +1123,7 @@ def link_session_appointment(request, session_id: int, data: SessionLinkAppointm
 @router.delete('/sessions/{session_id}', response={204: None})
 def delete_session(request, session_id: int):
     """Discard an open session that has no recorded data yet."""
+    require_permission(request, 'sessions_delete')
     session = _require_recording_access(request, session_id)
     if session.status != SessionRun.Status.OPEN:
         raise HttpError(409, 'Only open sessions can be deleted')
@@ -1670,6 +1675,7 @@ def update_session_media(request, media_id: int, data: SessionMediaUpdateRequest
     is_uploader = media.created_by_id == request.user.id
 
     if data.review_status is not None:
+        require_permission(request, 'session_approve')
         if not is_reviewer:
             raise HttpError(403, 'Only a supervisor or admin can change review status')
         if data.review_status not in SessionMedia.ReviewStatus.values:
@@ -1679,6 +1685,10 @@ def update_session_media(request, media_id: int, data: SessionMediaUpdateRequest
         media.reviewed_at = timezone.now()
 
     if data.caption is not None:
+        if is_reviewer:
+            require_permission(request, 'session_approve')
+        else:
+            _require_recording_access(request, media.session_run_id)
         if not (is_reviewer or is_uploader):
             raise HttpError(403, 'Only the uploader, a supervisor, or an admin can edit the caption')
         media.caption = data.caption
@@ -1690,6 +1700,10 @@ def update_session_media(request, media_id: int, data: SessionMediaUpdateRequest
 @router.delete('/media/{media_id}', response={204: None})
 def delete_session_media(request, media_id: int):
     media = _get_media_or_404(media_id, request)
+    if request.user.role in ('admin', 'supervisor'):
+        require_permission(request, 'session_approve')
+    else:
+        _require_recording_access(request, media.session_run_id)
     if not (request.user.role in ('admin', 'supervisor') or media.created_by_id == request.user.id):
         raise HttpError(403, 'Only the uploader, a supervisor, or an admin can delete this')
     media.file.delete(save=False)

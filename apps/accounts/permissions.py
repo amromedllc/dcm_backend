@@ -86,6 +86,8 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'activities_voice_to_text': False,
         # Review queue
         'review_queue_view': True,
+        'supervision_view': True,
+        'supervision_manage': True,
         # Behavior Intervention Plans
         'bip_view': True,
         'bip_create': True,
@@ -205,6 +207,8 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'activities_voice_to_text': False,
         # Review queue
         'review_queue_view': True,
+        'supervision_view': True,
+        'supervision_manage': True,
         # Behavior Intervention Plans
         'bip_view': True,
         'bip_create': True,
@@ -324,6 +328,8 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'activities_voice_to_text': False,
         # Review queue
         'review_queue_view': False,
+        'supervision_view': True,
+        'supervision_manage': False,
         # Behavior Intervention Plans
         'bip_view': True,
         'bip_create': False,
