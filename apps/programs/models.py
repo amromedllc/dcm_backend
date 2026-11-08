@@ -816,10 +816,16 @@ class Lesson(TenantAwareModel):
     therapist_message = models.TextField(blank=True)
     lesson_type = models.CharField(max_length=25, choices=LessonType.choices, default=LessonType.OPEN)
     is_active = models.BooleanField(default=True)
+    is_reusable = models.BooleanField(default=False)
+    is_default = models.BooleanField(default=False)
 
     class Meta:
         app_label = 'programs'
         ordering = ['name']
+        constraints = [
+            models.UniqueConstraint(fields=['organization', 'external_client_id'], condition=models.Q(is_default=True), name='unique_default_session_setup_per_client'),
+            models.CheckConstraint(condition=models.Q(is_default=False) | models.Q(is_reusable=True, is_active=True), name='default_session_setup_active_reusable'),
+        ]
 
     @property
     def client_id(self):
@@ -866,6 +872,7 @@ class LessonProgram(OrganizationScopedMixin):
     lesson = models.ForeignKey(Lesson, on_delete=models.CASCADE, related_name='lesson_programs')
     program = models.ForeignKey(Program, on_delete=models.CASCADE, related_name='lesson_programs')
     display_order = models.PositiveIntegerField(default=0)
+    is_pinned = models.BooleanField(default=False)
 
     # lesson is the owning parent; program is cross-checked against it so a
     # lesson can never pull in another organization's program.

@@ -86,6 +86,8 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'activities_voice_to_text': False,
         # Review queue
         'review_queue_view': True,
+        'supervision_view': True,
+        'supervision_manage': True,
         # Behavior Intervention Plans
         'bip_view': True,
         'bip_create': True,
@@ -205,6 +207,8 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'activities_voice_to_text': False,
         # Review queue
         'review_queue_view': True,
+        'supervision_view': True,
+        'supervision_manage': True,
         # Behavior Intervention Plans
         'bip_view': True,
         'bip_create': True,
@@ -324,6 +328,8 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'activities_voice_to_text': False,
         # Review queue
         'review_queue_view': False,
+        'supervision_view': True,
+        'supervision_manage': False,
         # Behavior Intervention Plans
         'bip_view': True,
         'bip_create': False,
@@ -448,4 +454,12 @@ def user_has_permission(user: User, organization, permission: str) -> bool:
 def require_permission(request, permission: str) -> None:
     organization = resolve_permission_organization(request)
     if not user_has_permission(request.user, organization, permission):
+        raise HttpError(403, 'Insufficient permissions')
+
+
+def require_any_permission(request, permissions: tuple[str, ...]) -> None:
+    """Authorize a shared read used by several pages using one effective role map."""
+    organization = resolve_permission_organization(request)
+    effective = get_user_permissions(request.user, organization)
+    if not any(effective.get(permission, False) for permission in permissions):
         raise HttpError(403, 'Insufficient permissions')

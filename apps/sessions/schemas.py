@@ -415,6 +415,7 @@ class SessionMediaUpdateRequest(Schema):
 
 
 class SessionSupervisionNoteSchema(Schema):
+    note_type: Literal['guidance', 'program_modification'] = 'guidance'
     id: int
     session_run_id: int
     body: str
@@ -423,6 +424,7 @@ class SessionSupervisionNoteSchema(Schema):
 
 
 class SessionSupervisionNoteCreateRequest(Schema):
+    note_type: Literal['guidance', 'program_modification'] = 'guidance'
     body: NonEmptyStr
 
 

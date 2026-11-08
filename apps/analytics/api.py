@@ -85,13 +85,44 @@ def with_user_timezone(fn):
     return wrapper
 
 
+def _require_analytics_read(request):
+    _require_any_permission(request, (
+        'client_progress', 'client_programs', 'client_report',
+        'client_treatment_plan', 'client_overview',
+    ))
+
+
+def _assert_analytics_resource(request, *, program_id=None, target_id=None, client_id=None):
+    from apps.programs.api import _assert_client_accessible, _get_program_or_404, _get_target_or_404
+    if program_id is not None:
+        _get_program_or_404(request, program_id)
+    if target_id is not None:
+        _get_target_or_404(request, target_id)
+    if client_id is not None:
+        _assert_client_accessible(request, client_id)
+
+
+def _require_annotation_write(request):
+    _require_supervisor(request)
+    require_permission(request, 'client_programs_edit')
+
+
 def _require_supervisor(request):
     if request.user.role not in ('admin', 'supervisor'):
         raise HttpError(403, 'Supervisor or admin access required')
 
 
 def _visible_saved_insights_qs(request):
-    return SavedInsightGraph.objects.filter(_same_practice_q(request.user, 'created_by__')).filter(
+    from apps.programs.api import _accessible_external_client_ids, _org_qs
+    client_ids = _accessible_external_client_ids(request)
+    resource_scope = (
+        models.Q(program__external_client_id__in=client_ids)
+        | models.Q(program__isnull=True, external_client_id__in=client_ids)
+        | models.Q(program_id__in=_org_qs(request).values_list('id', flat=True))
+    )
+    return SavedInsightGraph.objects.filter(
+        _same_practice_q(request.user, 'created_by__'), resource_scope,
+    ).filter(
         models.Q(created_by=request.user)
         | models.Q(visibility=SavedInsightGraph.Visibility.EVERYONE)
         | models.Q(visibility=SavedInsightGraph.Visibility.ROLES, roles__contains=[request.user.role])
@@ -150,6 +181,8 @@ def program_trial_data(
     Daily trial accuracy for a program, grouped into data series by `group_by`.
     Powers the main program graph.
     """
+    _require_analytics_read(request)
+    _assert_analytics_resource(request, program_id=program_id)
     if group_by not in _VALID_GROUP_BY:
         raise HttpError(400, f'Invalid group_by: {group_by}')
     if x_axis not in _VALID_TRIAL_X_AXIS:
@@ -174,6 +207,8 @@ def target_trial_data(
     date_to: date | None = None,
 ):
     """Single-target drill-down. Powers the target detail graph."""
+    _require_analytics_read(request)
+    _assert_analytics_resource(request, target_id=target_id)
     frm, to = _resolve_dates(date_from, date_to)
     return get_trial_data_by_day([target_id], frm, to)
 
@@ -191,6 +226,8 @@ def program_behavior_data(
     date_to: date | None = None,
 ):
     """Daily behavior frequency and duration per target. Powers behavior reduction graphs."""
+    _require_analytics_read(request)
+    _assert_analytics_resource(request, program_id=program_id)
     frm, to = _resolve_dates(date_from, date_to)
     target_ids = list(
         Target.objects.filter(program_id=program_id).values_list('id', flat=True)
@@ -202,6 +239,8 @@ def program_behavior_data(
 @with_user_timezone
 def program_assessment_summary(request, program_id: int):
     """Per-area scores for an assessment program: latest score, change since the previous administration."""
+    _require_analytics_read(request)
+    _assert_analytics_resource(request, program_id=program_id)
     from apps.programs.api import _get_program_or_404
     _get_program_or_404(request, program_id)
     return get_assessment_summary(program_id)
@@ -216,6 +255,8 @@ def program_duration_occurrences(
     date_to: date | None = None,
 ):
     """Each timed occurrence per session and target — the "All Trials" duration view."""
+    _require_analytics_read(request)
+    _assert_analytics_resource(request, program_id=program_id)
     from apps.programs.api import _get_program_or_404
     _get_program_or_404(request, program_id)
     frm, to = _resolve_dates(date_from, date_to)
@@ -237,6 +278,8 @@ def client_abc_data(
     setting: str | None = None,
 ):
     """Daily ABC event counts grouped by antecedent, behavior, consequence, or setting."""
+    _require_analytics_read(request)
+    _assert_analytics_resource(request, client_id=client_id)
     if group_by not in _VALID_ABC_GROUP_BY:
         raise HttpError(400, f'Invalid group_by: {group_by}')
     frm, to = _resolve_dates(date_from, date_to)
@@ -254,12 +297,16 @@ def client_abc_data(
 
 @router.get('/analytics/clients/{client_id}/assessment-records', response=list[AssessmentRecordSchema])
 def list_assessment_records(request, client_id: int):
+    _require_analytics_read(request)
+    _assert_analytics_resource(request, client_id=client_id)
     return list(AssessmentRecord.objects.filter(external_client_id__in=client_identifier_aliases(client_id)))
 
 
 @router.post('/analytics/clients/{client_id}/assessment-records', response={201: AssessmentRecordSchema})
 def create_assessment_record(request, client_id: int, data: AssessmentRecordCreateRequest):
     _require_supervisor(request)
+    require_permission(request, 'client_programs_edit')
+    _assert_analytics_resource(request, client_id=client_id)
     record = AssessmentRecord.objects.create(
         external_client_id=client_id,
         created_by=request.user,
@@ -280,6 +327,8 @@ def client_assessment_data(
     metric: str | None = None,
 ):
     """Assessment score graph data grouped by assessment, domain, or metric."""
+    _require_analytics_read(request)
+    _assert_analytics_resource(request, client_id=client_id)
     if group_by not in _VALID_ASSESSMENT_GROUP_BY:
         raise HttpError(400, f'Invalid group_by: {group_by}')
     frm, to = _resolve_dates(date_from, date_to)
@@ -302,6 +351,8 @@ def client_assessment_data(
 @with_user_timezone
 def program_baseline(request, program_id: int, sessions: int = 3):
     """Baseline % correct per target, from each target's first N sessions of data."""
+    _require_analytics_read(request)
+    _assert_analytics_resource(request, program_id=program_id)
     from apps.programs.api import _get_program_or_404
     _get_program_or_404(request, program_id)
     return compute_program_baseline(program_id, max(1, min(sessions, 20)))
@@ -319,6 +370,8 @@ def program_summary(
     Per-target summary for the program detail page.
     Returns status, total trials, avg accuracy, and trend for every target.
     """
+    _require_analytics_read(request)
+    _assert_analytics_resource(request, program_id=program_id)
     frm, to = _resolve_dates(date_from, date_to)
     targets = get_program_summary(program_id, frm, to)
     mastery_value, mastery_metric, mastery_varies = get_program_mastery_criteria_detail(program_id)
@@ -382,12 +435,15 @@ def client_progress_overview(request, client_id: int):
 
 @router.get('/analytics/clients/{client_id}/annotations', response=list[ClientAnnotationSchema])
 def list_client_annotations(request, client_id: int):
+    _require_analytics_read(request)
+    _assert_analytics_resource(request, client_id=client_id)
     return list(ClientAnnotation.objects.filter(external_client_id__in=client_identifier_aliases(client_id)))
 
 
 @router.post('/analytics/clients/{client_id}/annotations', response={201: ClientAnnotationSchema})
 def create_client_annotation(request, client_id: int, data: ClientAnnotationCreateRequest):
-    _require_supervisor(request)
+    _require_annotation_write(request)
+    _assert_analytics_resource(request, client_id=client_id)
     annotation = ClientAnnotation.objects.create(
         external_client_id=client_id,
         created_by=request.user,
@@ -398,11 +454,12 @@ def create_client_annotation(request, client_id: int, data: ClientAnnotationCrea
 
 @router.patch('/analytics/client-annotations/{annotation_id}', response=ClientAnnotationSchema)
 def update_client_annotation(request, annotation_id: int, data: ClientAnnotationUpdateRequest):
-    _require_supervisor(request)
+    _require_annotation_write(request)
     try:
         annotation = ClientAnnotation.objects.get(id=annotation_id)
     except ClientAnnotation.DoesNotExist:
         raise HttpError(404, 'Annotation not found')
+    _assert_analytics_resource(request, client_id=annotation.external_client_id)
     for field, value in data.dict(exclude_none=True).items():
         setattr(annotation, field, value)
     annotation.save()
@@ -411,11 +468,13 @@ def update_client_annotation(request, annotation_id: int, data: ClientAnnotation
 
 @router.delete('/analytics/client-annotations/{annotation_id}', response={204: None})
 def delete_client_annotation(request, annotation_id: int):
-    _require_supervisor(request)
+    _require_annotation_write(request)
     try:
-        ClientAnnotation.objects.get(id=annotation_id).delete()
+        annotation = ClientAnnotation.objects.get(id=annotation_id)
     except ClientAnnotation.DoesNotExist:
         raise HttpError(404, 'Annotation not found')
+    _assert_analytics_resource(request, client_id=annotation.external_client_id)
+    annotation.delete()
     return 204, None
 
 
@@ -433,6 +492,8 @@ def module_summary(
     date_to: date | None = None,
 ):
     """Per-target summary scoped to a single module."""
+    _require_analytics_read(request)
+    _assert_analytics_resource(request, program_id=program_id)
     frm, to = _resolve_dates(date_from, date_to)
     try:
         mod = ProgramModule.objects.get(id=module_id, program_id=program_id)
@@ -455,7 +516,7 @@ def module_summary(
 _REPORT_VIEW_PERMISSIONS = (
     'client_report', 'reports_add_edit', 'reports_view_draft', 'reports_view_review', 'reports_view_archived',
 )
-_REPORT_EDIT_PERMISSIONS = ('client_report', 'reports_add_edit')
+_REPORT_EDIT_PERMISSIONS = ('reports_add_edit',)
 _MAX_REPORT_DRAFT_BYTES = 8 * 1024 * 1024
 
 
@@ -464,6 +525,20 @@ def _require_any_permission(request, permissions) -> None:
     organization = resolve_permission_organization(request)
     if not any(user_has_permission(request.user, organization, p) for p in permissions):
         raise HttpError(403, 'Insufficient permissions')
+
+
+def _require_report_status_read(request, draft):
+    if draft is None:
+        return
+    from apps.accounts.permissions import resolve_permission_organization, user_has_permission
+    organization = resolve_permission_organization(request)
+    if user_has_permission(request.user, organization, 'reports_add_edit'):
+        return
+    permission = {
+        'draft': 'reports_view_draft', 'in_review': 'reports_view_review',
+        'archived': 'reports_view_archived',
+    }.get(draft.status, 'client_report')
+    require_permission(request, permission)
 
 
 def _report_draft_payload(draft: ClientReportDraft | None) -> dict:
@@ -485,6 +560,7 @@ def get_client_report_draft(request, client_id: int):
     draft = ClientReportDraft.objects.select_related('updated_by').filter(
         external_client_id__in=client_identifier_aliases(client_id)
     ).first()
+    _require_report_status_read(request, draft)
     return _report_draft_payload(draft)
 
 
@@ -497,6 +573,10 @@ def save_client_report_draft(request, client_id: int, payload: ClientReportDraft
     if len(json.dumps(payload.data)) > _MAX_REPORT_DRAFT_BYTES:
         raise HttpError(413, 'Report is too large to save')
     status = str(payload.data.get('status') or 'draft')[:20]
+    if status not in {'draft', 'in_review', 'published', 'completed', 'archived'}:
+        raise HttpError(400, 'Invalid report status')
+    if status == 'archived':
+        require_permission(request, 'reports_delete')
     draft, _created = ClientReportDraft.objects.update_or_create(
         external_client_id=client_id,
         defaults={'data': payload.data, 'status': status, 'updated_by': request.user},
@@ -515,6 +595,8 @@ def list_saved_insights(
     program_id: int | None = None,
     external_client_id: int | None = None,
 ):
+    _require_analytics_read(request)
+    _assert_analytics_resource(request, program_id=program_id, client_id=external_client_id)
     qs = _visible_saved_insights_qs(request)
     if program_id is not None:
         qs = qs.filter(program_id=program_id)
@@ -525,11 +607,13 @@ def list_saved_insights(
 
 @router.post('/analytics/saved-insights', response={201: SavedInsightGraphSchema})
 def create_saved_insight(request, data: SavedInsightGraphCreateRequest):
+    _require_analytics_read(request)
     if data.visibility not in SavedInsightGraph.Visibility.values:
         raise HttpError(400, f'Invalid visibility: {data.visibility}')
     if not data.program_id and not data.external_client_id:
         raise HttpError(400, 'program_id or external_client_id is required')
 
+    _assert_analytics_resource(request, program_id=data.program_id, client_id=data.external_client_id)
     program = None
     if data.program_id:
         try:
@@ -555,6 +639,7 @@ def create_saved_insight(request, data: SavedInsightGraphCreateRequest):
 
 @router.patch('/analytics/saved-insights/{view_id}', response=SavedInsightGraphSchema)
 def update_saved_insight(request, view_id: int, data: SavedInsightGraphUpdateRequest):
+    _require_analytics_read(request)
     try:
         view = _visible_saved_insights_qs(request).get(id=view_id)
     except SavedInsightGraph.DoesNotExist:
@@ -574,6 +659,7 @@ def update_saved_insight(request, view_id: int, data: SavedInsightGraphUpdateReq
 
 @router.delete('/analytics/saved-insights/{view_id}', response={204: None})
 def delete_saved_insight(request, view_id: int):
+    _require_analytics_read(request)
     try:
         view = _visible_saved_insights_qs(request).get(id=view_id)
     except SavedInsightGraph.DoesNotExist:
@@ -590,6 +676,8 @@ def delete_saved_insight(request, view_id: int):
 
 @router.get('/analytics/programs/{program_id}/annotations', response=list[GraphAnnotationSchema])
 def list_annotations(request, program_id: int, target_id: int | None = None):
+    _require_analytics_read(request)
+    _assert_analytics_resource(request, program_id=program_id, target_id=target_id)
     qs = GraphAnnotation.objects.filter(program_id=program_id)
     if target_id is not None:
         qs = qs.filter(target_id=target_id)
@@ -598,11 +686,11 @@ def list_annotations(request, program_id: int, target_id: int | None = None):
 
 @router.post('/analytics/programs/{program_id}/annotations', response={201: GraphAnnotationSchema})
 def create_annotation(request, program_id: int, data: GraphAnnotationCreateRequest):
-    _require_supervisor(request)
-    try:
-        Program.objects.get(id=program_id)
-    except Program.DoesNotExist:
-        raise HttpError(404, 'Program not found')
+    _require_annotation_write(request)
+    from apps.programs.api import _get_program_or_404
+    _get_program_or_404(request, program_id)
+    if data.target_id is not None and not Target.objects.filter(id=data.target_id, program_id=program_id).exists():
+        raise HttpError(400, 'Target must belong to this program')
 
     if data.annotation_type == 'phase_range' and not data.end_date:
         raise HttpError(400, 'phase_range annotations require an end_date')
@@ -619,11 +707,12 @@ def create_annotation(request, program_id: int, data: GraphAnnotationCreateReque
 
 @router.patch('/analytics/annotations/{annotation_id}', response=GraphAnnotationSchema)
 def update_annotation(request, annotation_id: int, data: GraphAnnotationUpdateRequest):
-    _require_supervisor(request)
+    _require_annotation_write(request)
     try:
         annotation = GraphAnnotation.objects.get(id=annotation_id)
     except GraphAnnotation.DoesNotExist:
         raise HttpError(404, 'Annotation not found')
+    _assert_analytics_resource(request, program_id=annotation.program_id)
     for field, value in data.dict(exclude_none=True).items():
         setattr(annotation, field, value)
     annotation.save()
@@ -632,11 +721,13 @@ def update_annotation(request, annotation_id: int, data: GraphAnnotationUpdateRe
 
 @router.delete('/analytics/annotations/{annotation_id}', response={204: None})
 def delete_annotation(request, annotation_id: int):
-    _require_supervisor(request)
+    _require_annotation_write(request)
     try:
-        GraphAnnotation.objects.get(id=annotation_id).delete()
+        annotation = GraphAnnotation.objects.get(id=annotation_id)
     except GraphAnnotation.DoesNotExist:
         raise HttpError(404, 'Annotation not found')
+    _assert_analytics_resource(request, program_id=annotation.program_id)
+    annotation.delete()
     return 204, None
 
 

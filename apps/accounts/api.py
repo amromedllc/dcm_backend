@@ -122,22 +122,47 @@ def _issue_tokens(user: User, tenant_id: int) -> TokenResponse:
 
 
 def _queue_login_appointment_sync(user: User, tenant_id: int) -> None:
-    if (
-        user.external_admin_id is not None
-        and (
-            (user.role == User.Role.CAREGIVER and user.external_client_id is not None)
-            or (user.role != User.Role.CAREGIVER and user.external_employee_id is not None)
+    if user.external_admin_id is None:
+        logger.info(
+            'appointment_auto_sync login_not_eligible org=%s user=%s role=%s reason=missing_facility',
+            tenant_id, user.pk, user.role,
         )
-    ):
-        try:
-            from apps.integrations.tasks import queue_login_appointment_sync
-            queue_login_appointment_sync(tenant_id, user.external_admin_id)
-        except Exception:
-            logger.exception(
-                'Could not queue appointment sync for login user=%s facility=%s',
-                user.pk,
-                user.external_admin_id,
+        return
+    if user.role == User.Role.CAREGIVER and user.external_client_id is None:
+        logger.info(
+            'appointment_auto_sync login_not_eligible org=%s user=%s role=%s reason=missing_client_link',
+            tenant_id, user.pk, user.role,
+        )
+        return
+    if user.role != User.Role.CAREGIVER and user.external_employee_id is None:
+        logger.info(
+            'appointment_auto_sync login_not_eligible org=%s user=%s role=%s reason=missing_employee_link',
+            tenant_id, user.pk, user.role,
+        )
+        return
+
+    logger.info(
+        'appointment_auto_sync login_eligible org=%s user=%s role=%s facility=%s',
+        tenant_id, user.pk, user.role, user.external_admin_id,
+    )
+    try:
+        from apps.integrations.tasks import queue_login_appointment_sync
+        job = queue_login_appointment_sync(tenant_id, user.external_admin_id)
+        if job is None:
+            logger.info(
+                'appointment_auto_sync not_queued org=%s user=%s facility=%s reason=facility_not_ready_or_initial_sync_missing',
+                tenant_id, user.pk, user.external_admin_id,
             )
+        else:
+            logger.info(
+                'appointment_auto_sync queue_check_complete org=%s user=%s facility=%s job=%s status=%s',
+                tenant_id, user.pk, user.external_admin_id, job.pk, job.status,
+            )
+    except Exception:
+        logger.exception(
+            'appointment_auto_sync queue_error org=%s user=%s facility=%s',
+            tenant_id, user.pk, user.external_admin_id,
+        )
 
 
 @router.post('/login', response=LoginResponse, auth=None)

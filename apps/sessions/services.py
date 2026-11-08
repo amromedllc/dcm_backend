@@ -1,6 +1,7 @@
 from datetime import timedelta
 
 from django.utils import timezone
+from django.db.models import Case, When
 from ninja.errors import HttpError
 
 from apps.programs.models import Program, Lesson, ProgramDataField
@@ -49,7 +50,7 @@ def _target_due_for_session(target) -> bool:
     maintenance = (phase or {}).get('maintenance') or {}
     intervals = maintenance.get('intervals') or []
     if not intervals:
-        return True
+        return False
     if target.maintenance_episodes_completed <= 0:
         return True
 
@@ -128,6 +129,22 @@ def _visible_prompting_levels(program: Program, target) -> tuple[dict | None, in
     }, visible_idx
 
 
+def resolve_session_lesson(client_id, explicit_lesson_id=None, appointment=None, use_default=True):
+    """Resolve configuration at start, never copy an old SessionRun's snapshot."""
+    aliases = client_identifier_aliases(client_id)
+    lesson_id = explicit_lesson_id or (appointment.lesson_id if appointment else None)
+    if lesson_id:
+        lesson = Lesson.objects.filter(id=lesson_id, external_client_id__in=aliases, is_active=True).first()
+        if lesson is None or (explicit_lesson_id and not lesson.is_reusable and (appointment is None or appointment.lesson_id != lesson.id)):
+            raise HttpError(404, 'Session setup not found for this client')
+        return lesson
+    if use_default:
+        return Lesson.objects.filter(
+            external_client_id__in=aliases, is_active=True, is_reusable=True, is_default=True,
+        ).first()
+    return None
+
+
 def build_program_snapshot(
     client_id: int, lesson_id: int | None = None, restrict_to_lesson: bool = False,
     program_ids: list[int] | None = None,
@@ -159,21 +176,22 @@ def build_program_snapshot(
 
     if lesson_id:
         try:
-            lesson = Lesson.objects.get(id=lesson_id, is_active=True)
+            lesson = Lesson.objects.get(id=lesson_id, is_active=True, external_client_id__in=client_identifier_aliases(client_id))
         except Lesson.DoesNotExist:
             raise HttpError(404, 'Lesson not found or not active')
         snapshot['lesson_name'] = lesson.name
-        program_ids = lesson.lesson_programs.values_list('program_id', flat=True)
+        lesson_program_ids = list(lesson.lesson_programs.order_by('-is_pinned', 'display_order', 'id').values_list('program_id', flat=True))
         programs_qs = (
             Program.objects
-            .filter(id__in=program_ids, archived_at__isnull=True, phase__in=RUNNABLE_PROGRAM_PHASES)
+            .filter(id__in=lesson_program_ids, external_client_id__in=client_identifier_aliases(client_id), status=Program.Status.ACTIVE, archived_at__isnull=True, phase__in=RUNNABLE_PROGRAM_PHASES)
+            .order_by(Case(*[When(pk=pk, then=order) for order, pk in enumerate(lesson_program_ids)]))
             .select_related('prompting_template')
             .prefetch_related('targets__prompting_template', 'targets__child_items')
         )
     elif not restrict_to_lesson:
         programs_qs = (
             Program.objects
-            .filter(external_client_id__in=client_identifier_aliases(client_id), archived_at__isnull=True, phase__in=RUNNABLE_PROGRAM_PHASES)
+            .filter(external_client_id__in=client_identifier_aliases(client_id), status=Program.Status.ACTIVE, archived_at__isnull=True, phase__in=RUNNABLE_PROGRAM_PHASES)
             .select_related('prompting_template')
             .prefetch_related('targets__prompting_template', 'targets__child_items')
         )

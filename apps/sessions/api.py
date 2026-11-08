@@ -9,7 +9,7 @@ from ninja.files import UploadedFile
 from ninja.errors import HttpError
 
 from apps.accounts.auth import partner_auth
-from apps.accounts.permissions import require_permission
+from apps.accounts.permissions import require_any_permission, require_permission
 from apps.clients.id_aliases import client_identifier_aliases
 from apps.programs.measurements import (
     aggregate_measurement, MEASUREMENT_LABELS,
@@ -39,9 +39,21 @@ from .schemas import (
     SessionMediaCommentSchema, SessionMediaCommentCreateRequest,
     SessionSupervisionNoteSchema, SessionSupervisionNoteCreateRequest,
 )
-from .services import build_program_snapshot, submit_session, approve_session, reject_session
+from .services import build_program_snapshot, resolve_session_lesson, submit_session, approve_session, reject_session
 
 router = Router(auth=partner_auth)
+
+
+_SESSION_READ_CONTEXTS = (
+    'sessions_view', 'client_sessions', 'client_history', 'client_notes',
+    'notes_view', 'notes_create', 'notes_edit', 'review_queue_view',
+    'session_start', 'sessions_manual_entry', 'session_approve',
+    'sessions_edit', 'sessions_delete', 'sessions_edit_data',
+)
+
+
+def _require_session_read(request):
+    require_any_permission(request, _SESSION_READ_CONTEXTS)
 
 
 def _require_session_start(request) -> None:
@@ -193,6 +205,7 @@ def _get_session_or_404(session_id: int, request) -> SessionRun:
     since every caller of this helper — get/delete session, trials,
     behaviors, abc, submit, sync — otherwise had no ownership check at all.
     """
+    _require_session_read(request)
     qs = SessionRun.objects.select_related('staff').filter(
         external_client_id__in=_accessible_external_client_ids(request),
     ).order_by('-started_at')
@@ -539,6 +552,7 @@ def list_provider_appointments(
     """Return appointments for a provider from DCM's own synced data
     (Integrations → Pull Appointments), matched via Appointment.staff's
     external_employee_id — no live TherapyPMS call."""
+    _require_session_read(request)
     qs = _appt_qs().filter(staff__external_employee_id=external_employee_id)
     if status:
         qs = qs.filter(status=status)
@@ -549,6 +563,7 @@ def list_provider_appointments(
 def my_schedule(request, date: str | None = None):
     """Return appointments for the logged-in staff member on a given date
     (defaults to today), from DCM's own synced data."""
+    _require_session_read(request)
     from datetime import date as dt_date
 
     target_date = date or dt_date.today().isoformat()
@@ -582,6 +597,7 @@ def _get_appointment_or_404(request, appt_id: int) -> Appointment:
     any staff user could read another staff member's appointment (client,
     notes, schedule) purely by guessing/incrementing an id.
     """
+    _require_session_read(request)
     qs = _appt_qs().filter(external_client_id__in=_accessible_external_client_ids(request))
     if request.user.role == 'staff':
         qs = qs.filter(staff_id=request.user.id)
@@ -599,6 +615,7 @@ def list_appointments(
     date: str | None = None,
     status: str | None = None,
 ):
+    _require_session_read(request)
     qs = _appt_qs().filter(external_client_id__in=_accessible_external_client_ids(request))
     if client_id:
         qs = qs.filter(
@@ -664,6 +681,7 @@ def get_appointment_programs(request, appt_id: int):
 
 
 @router.post('/appointments/{appt_id}/programs', response=AppointmentSchema)
+@transaction.atomic
 def assign_appointment_programs(request, appt_id: int, data: AssignProgramsRequest):
     """
     Supervisor assigns which programs to run in this appointment.
@@ -717,23 +735,33 @@ def assign_appointment_programs(request, appt_id: int, data: AssignProgramsReque
         )
 
     from apps.programs.models import Lesson, LessonProgram
+    from apps.programs.api import _validate_lesson_program_ids
+    if data.client_id is not None and appt.external_client_id not in client_identifier_aliases(data.client_id):
+        raise HttpError(404, 'Appointment not found for this client')
+    if not data.clear_assignment:
+        _validate_lesson_program_ids(request, appt.external_client_id, data.program_ids)
     from django.db import transaction
 
     with transaction.atomic():
+        appt = Appointment.objects.select_for_update().get(pk=appt.pk)
+        if appt.lesson_id:
+            appt.lesson = Lesson.objects.select_for_update().get(pk=appt.lesson_id)
         if data.clear_assignment:
             if appt.lesson_id:
                 lesson = appt.lesson
                 appt.lesson = None
                 appt.save(update_fields=['lesson'])
-                lesson.delete()
+                if not lesson.is_reusable and not lesson.appointments.exists():
+                    lesson.delete()
             return _appt_qs().get(id=appt.id)
 
-        if appt.lesson_id:
+        if appt.lesson_id and not appt.lesson.is_reusable and not appt.lesson.appointments.exclude(pk=appt.pk).exists():
             lesson = appt.lesson
         else:
             lesson = Lesson.objects.create(
                 external_client_id=data.client_id or appt.external_client_id,
                 name=appt.start_time.strftime('Session %b %d, %Y'),
+                lesson_type=Lesson.LessonType.APPOINTMENT_LINKED,
                 created_by=request.user,
             )
             appt.lesson_id = lesson.id
@@ -795,6 +823,7 @@ def _canonical_external_client_id(client_id: int) -> int:
 
 
 @router.post('/sessions', response={201: SessionRunSchema})
+@transaction.atomic
 def start_session(request, data: SessionStartRequest):
     """
     Creates a new SessionRun and immediately captures the program snapshot.
@@ -810,21 +839,33 @@ def start_session(request, data: SessionStartRequest):
     manual_started = manual_ended = None
     if data.manual:
         require_permission(request, 'sessions_manual_entry')
-        manual_started, manual_ended = _validate_manual_window(data.started_at, data.ended_at)
     else:
         _require_session_start(request)
+    require_permission(request, 'sessions_create')
+    if data.manual:
+        manual_started, manual_ended = _validate_manual_window(data.started_at, data.ended_at)
     if data.client_id not in _accessible_external_client_ids(request):
+        raise HttpError(404, 'Client not found')
+    # Serialize default changes with start so one recording captures one setup version.
+    from apps.clients.models import Client
+    clients = Client.objects.select_for_update()
+    locked_client = clients.filter(id=data.client_id).first() or clients.filter(external_id=str(data.client_id)).first()
+    if locked_client is None:
         raise HttpError(404, 'Client not found')
     external_lookup = str(data.external_appointment_id or '').strip()
     appt = (
         Appointment.objects.filter(external_id=external_lookup).select_related('lesson').first()
         if external_lookup else _find_appointment(data.appointment_id)
     ) if (data.appointment_id or external_lookup) else None
-    lesson_id = data.lesson_id or (appt.lesson_id if appt else None)
-    lesson_obj = appt.lesson if appt and appt.lesson_id else None
-    if lesson_id and lesson_obj is None:
+    if appt and (appt.external_client_id not in client_identifier_aliases(data.client_id) or (request.user.role == 'staff' and appt.staff_id != request.user.id)):
+        raise HttpError(404, 'Appointment not found for this client')
+    lesson_obj = resolve_session_lesson(
+        data.client_id, explicit_lesson_id=data.lesson_id, appointment=appt, use_default=not data.manual,
+    )
+    if lesson_obj:
         from apps.programs.models import Lesson
-        lesson_obj = Lesson.objects.filter(id=lesson_id, is_active=True).first()
+        lesson_obj = Lesson.objects.select_for_update().get(pk=lesson_obj.pk)
+    lesson_id = lesson_obj.id if lesson_obj else None
     external_appointment_id = data.appointment_id
     if external_lookup and external_lookup.isdigit():
         external_appointment_id = int(external_lookup)
@@ -833,8 +874,10 @@ def start_session(request, data: SessionStartRequest):
     snapshot = build_program_snapshot(
         client_id=data.client_id,
         lesson_id=lesson_id,
-        restrict_to_lesson=bool(data.appointment_id),
+        restrict_to_lesson=False,
     )
+    if lesson_obj and not snapshot['programs']:
+        raise HttpError(400, 'This session setup has no runnable programs. Update its programs before starting.')
     session = SessionRun.objects.create(
         external_client_id=_canonical_external_client_id(data.client_id),
         service_setting=data.service_setting or ('Telehealth' if appt and appt.telehealth_link else ''),
@@ -884,6 +927,7 @@ def start_group_session(request, data: GroupSessionStartRequest):
     client's chosen program_ids if given, otherwise all of their assigned
     active programs (same default as a solo walk-in session)."""
     _require_session_start(request)
+    require_permission(request, 'sessions_create')
     selections = data.clients
     client_ids = [c.client_id for c in selections]
     if len(client_ids) < 2:
@@ -937,6 +981,7 @@ def get_group_session(request, group_id: int):
 
 @router.get('/group-sessions', response=list[GroupSessionSchema])
 def list_group_sessions(request, date: str | None = None):
+    require_permission(request, 'sessions_view')
     qs = GroupSession.objects.filter(staff=request.user).prefetch_related('session_runs__staff')
     if date:
         day = datetime.strptime(date, '%Y-%m-%d').date()
@@ -954,6 +999,7 @@ def list_sessions(
     date_from: date | None = None,
     date_to: date | None = None,
 ):
+    _require_session_read(request)
     def day_bound(day: date, value: time):
         dt = datetime.combine(day, value)
         return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
@@ -1027,6 +1073,7 @@ def list_supervision_notes(request, session_id: int):
             id=note.id,
             session_run_id=note.session_run_id,
             body=note.body,
+            note_type=note.note_type,
             author=note.created_by.full_name or note.created_by.email if note.created_by_id else None,
             created_at=note.created_at,
         )
@@ -1046,12 +1093,14 @@ def create_supervision_note(request, session_id: int, data: SessionSupervisionNo
     note = SessionSupervisionNote.objects.create(
         session_run=session,
         body=body,
+        note_type=data.note_type,
         created_by=request.user,
     )
     return 201, SessionSupervisionNoteSchema(
         id=note.id,
         session_run_id=note.session_run_id,
         body=note.body,
+        note_type=note.note_type,
         author=request.user.full_name or request.user.email,
         created_at=note.created_at,
     )
@@ -1092,6 +1141,7 @@ def link_session_appointment(request, session_id: int, data: SessionLinkAppointm
 @router.delete('/sessions/{session_id}', response={204: None})
 def delete_session(request, session_id: int):
     """Discard an open session that has no recorded data yet."""
+    require_permission(request, 'sessions_delete')
     session = _require_recording_access(request, session_id)
     if session.status != SessionRun.Status.OPEN:
         raise HttpError(409, 'Only open sessions can be deleted')
@@ -1582,7 +1632,10 @@ def _serialize_media(media: SessionMedia, request) -> SessionMediaSchema:
 
 def _get_media_or_404(media_id: int, request) -> SessionMedia:
     """Same ownership rule as _get_session_or_404 — staff only reach media on their own sessions."""
-    qs = SessionMedia.objects.select_related('session_run', 'created_by', 'reviewed_by')
+    _require_session_read(request)
+    qs = SessionMedia.objects.select_related('session_run', 'created_by', 'reviewed_by').filter(
+        session_run__external_client_id__in=_accessible_external_client_ids(request),
+    )
     if request.user.role == 'staff':
         qs = qs.filter(session_run__staff_id=request.user.id)
     try:
@@ -1643,6 +1696,7 @@ def update_session_media(request, media_id: int, data: SessionMediaUpdateRequest
     is_uploader = media.created_by_id == request.user.id
 
     if data.review_status is not None:
+        require_permission(request, 'session_approve')
         if not is_reviewer:
             raise HttpError(403, 'Only a supervisor or admin can change review status')
         if data.review_status not in SessionMedia.ReviewStatus.values:
@@ -1652,6 +1706,10 @@ def update_session_media(request, media_id: int, data: SessionMediaUpdateRequest
         media.reviewed_at = timezone.now()
 
     if data.caption is not None:
+        if is_reviewer:
+            require_permission(request, 'session_approve')
+        else:
+            _require_recording_access(request, media.session_run_id)
         if not (is_reviewer or is_uploader):
             raise HttpError(403, 'Only the uploader, a supervisor, or an admin can edit the caption')
         media.caption = data.caption
@@ -1663,6 +1721,10 @@ def update_session_media(request, media_id: int, data: SessionMediaUpdateRequest
 @router.delete('/media/{media_id}', response={204: None})
 def delete_session_media(request, media_id: int):
     media = _get_media_or_404(media_id, request)
+    if request.user.role in ('admin', 'supervisor'):
+        require_permission(request, 'session_approve')
+    else:
+        _require_recording_access(request, media.session_run_id)
     if not (request.user.role in ('admin', 'supervisor') or media.created_by_id == request.user.id):
         raise HttpError(403, 'Only the uploader, a supervisor, or an admin can delete this')
     media.file.delete(save=False)

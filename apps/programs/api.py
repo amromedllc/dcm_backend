@@ -1,4 +1,6 @@
 import os
+from copy import copy
+from functools import wraps
 from types import SimpleNamespace
 
 from django.core.exceptions import ObjectDoesNotExist
@@ -22,6 +24,10 @@ from shared.ai_client import AIError
 from shared.html_sanitize import sanitize_kb_html
 from apps.central_library.settings_service import (
     validate_setting_links, sync_legacy_links, apply_program_settings, pull_links, pull_setting,
+)
+from .data_protection import (
+    MESSAGE as DATA_PROTECTION_MESSAGE, guard_target_changes, protected_target_ids,
+    scoring_signature, template_has_history,
 )
 from .assessment_draft import generate_assessment_draft, normalize_assessment_draft
 from apps.clients.id_aliases import client_identifier_aliases
@@ -96,9 +102,21 @@ def _require_program_write(request, action: str) -> None:
     _require_any_permission(request, (f'client_programs_{action}', f'org_programs_{action}'))
 
 
+def _atomic_program_edit(view):
+    """Authorize edits before opening the mutation transaction."""
+    @wraps(view)
+    def wrapped(request, *args, **kwargs):
+        _require_program_write(request, 'edit')
+        with transaction.atomic():
+            return view(request, *args, **kwargs)
+    return wrapped
+
+
 def _check_program_write(request, program: Program, action: str) -> None:
     """Library (template) programs need org_programs_<action>; a client's programs need client_programs_<action>."""
     require_permission(request, f"{'org' if program.is_template else 'client'}_programs_{action}")
+    if action == 'edit' and program.is_locked:
+        raise HttpError(423, 'This program is locked. Unlock it before making changes.')
 
 
 def _require_any_permission(request, permissions: tuple[str, ...]) -> None:
@@ -1016,13 +1034,22 @@ def get_program(request, program_id: int):
 
 
 @router.patch('/programs/{program_id}', response=ProgramSchema)
+@_atomic_program_edit
 def update_program(request, program_id: int, data: ProgramUpdateRequest):
-    _require_program_write(request, 'edit')
     program = _get_program_or_404(request, program_id)
     _check_program_write(request, program, 'edit')
     if program.is_locked:
         raise HttpError(400, 'This program is locked. Unlock it before making changes.')
     updates = data.dict(exclude_none=True)
+    if updates.get('prompting_template_id') == program.prompting_template_id:
+        updates.pop('prompting_template_id', None)
+    targets = list(program.targets.all())
+    protected = protected_target_ids(t.id for t in targets)
+    if protected and 'category' in updates and updates['category'] != program.category:
+        raise HttpError(409, DATA_PROTECTION_MESSAGE)
+    if 'prompting_template_id' in updates:
+        for target in targets:
+            guard_target_changes(target, {'prompting_template_id': updates['prompting_template_id']}, protected)
     _validate_template_refs(request, updates.get('prompting_template_id'), updates.get('workflow_template_id'))
     if updates.get('category') == Program.Category.INSTRUCTIONS_ONLY and program.targets.exists():
         raise HttpError(400, 'Cannot switch to Instructions Only while this program still has targets — remove them first')
@@ -1130,8 +1157,8 @@ def delete_program_permanently(request, program_id: int):
     _check_program_write(request, program, 'delete')
     if program.archived_at is None:
         raise HttpError(400, 'Archive the program first — only archived programs can be permanently deleted')
-    if _last_run_by_target(program.targets.values_list('id', flat=True)):
-        raise HttpError(409, 'This program has recorded session data, so it cannot be permanently deleted. Leave it archived.')
+    if protected_target_ids(program.targets.values_list('id', flat=True)):
+        raise HttpError(409, 'This program has recorded data or saved sessions, so it cannot be permanently deleted. Leave it archived.')
     try:
         with transaction.atomic():
             program.delete()
@@ -1341,6 +1368,23 @@ def _validate_default_sub_fields(request, data: dict) -> None:
     )
 
 
+def _guard_recorded_sub_items(request, target, items):
+    existing = list(target.child_items.order_by('display_order', 'id'))
+    if not existing:
+        original = Target.objects.get(id=target.id)
+        before = original.sub_items
+        fields = ('key', 'measurement_type', 'measurement', 'prompting_template_id')
+        if [[raw.get(field) for field in fields] for raw in before] != [[raw.get(field) for field in fields] for raw in items]:
+            raise HttpError(409, DATA_PROTECTION_MESSAGE)
+        return
+    if [item.key for item in existing] != [str(raw.get('key') or f'item_{i + 1}')[:100] for i, raw in enumerate(items)]:
+        raise HttpError(409, DATA_PROTECTION_MESSAGE)
+    for child, raw in zip(existing, items):
+        config = _resolve_sub_item_config(request, target, raw)
+        if any(config[field] != getattr(child, field) for field in ('measurement_type', 'measurement', 'prompting_template_id')):
+            raise HttpError(409, DATA_PROTECTION_MESSAGE)
+
+
 def _sync_target_sub_items(request, target: Target, items: list[dict], user=None) -> None:
     existing = {item.key: item for item in target.child_items.all()}
     seen: set[str] = set()
@@ -1441,6 +1485,9 @@ def list_targets(request, program_id: int, staff_view: bool = False):
     if staff_view:
         qs = qs.visible_to_staff()
     targets = list(qs)
+    protected = protected_target_ids(t.id for t in targets)
+    for target in targets:
+        target.data_definition_locked = target.id in protected
     last_by_target = _last_run_by_target(t.id for t in targets)
     for target in targets:
         target.last_run_at = last_by_target.get(target.id)
@@ -1501,15 +1548,21 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
 @router.get('/targets/{target_id}', response=TargetSchema)
 def get_target(request, target_id: int):
     _require_program_read(request)
-    return _get_target_or_404(request, target_id)
+    target = _get_target_or_404(request, target_id)
+    target.data_definition_locked = bool(protected_target_ids([target.id]))
+    return target
 
 
 @router.patch('/targets/{target_id}', response=TargetSchema)
+@_atomic_program_edit
 def update_target(request, target_id: int, data: TargetUpdateRequest):
-    _require_program_write(request, 'edit')
     target = _get_target_or_404(request, target_id)
     _check_program_write(request, target.program, 'edit')
+    original = copy(target)
+    protected = protected_target_ids([target.id])
     updates = data.dict(exclude_none=True)
+    if updates.get('prompting_template_id') == target.prompting_template_id:
+        updates.pop('prompting_template_id', None)
     _validate_template_refs(request, updates.get('prompting_template_id'), updates.get('workflow_template_id'))
     old_status = target.status
     for field, value in updates.items():
@@ -1524,7 +1577,7 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
         _validate_target_status(request, updates['status'])
     if 'interval_warning_sound' in updates:
         _validate_interval_warning_sound(updates['interval_warning_sound'])
-    mt_changed = 'measurement_type' in updates
+    mt_changed = 'measurement_type' in updates and updates['measurement_type'] != original.measurement_type
     if mt_changed:
         _validate_measurement_type(updates['measurement_type'], allow_legacy=True)
     _validate_prompting_required(
@@ -1563,8 +1616,13 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
         }
         _validate_default_sub_fields(request, resolved)
         for k, v in resolved.items():
-            setattr(target, k, v)
+            if k in updates:
+                setattr(target, k, v)
     _require_sub_items_if_needed(target.measurement_type, target.sub_items)
+    guard_target_changes(original, {field: getattr(target, field) for field in updates}, protected)
+    if target.id in protected and 'sub_items' in updates:
+        _guard_recorded_sub_items(request, target, target.sub_items)
+    target.data_definition_locked = target.id in protected
     target.save()
     if target.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES and (
         'sub_items' in updates or 'sub_item_progression' in updates or default_sub_changed
@@ -1595,6 +1653,8 @@ def delete_target(request, target_id: int):
     _require_program_write(request, 'edit')
     target = _get_target_or_404(request, target_id)
     _check_program_write(request, target.program, 'edit')
+    if protected_target_ids([target.id]):
+        raise HttpError(409, 'This target has session history. Close or archive it instead of deleting it.')
     target.delete()
     return 204, None
 
@@ -1744,9 +1804,9 @@ _BULK_UPDATE_FK_MODELS = {
 
 
 @router.post('/programs/{program_id}/targets/bulk-update', response=BulkUpdateResult)
+@_atomic_program_edit
 def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest):
     """Update specific fields across multiple targets without touching unspecified fields."""
-    _require_program_write(request, 'edit')
     program = _get_program_or_404(request, program_id)
     _check_program_write(request, program, 'edit')
     updates = data.dict(exclude={'target_ids'}, exclude_none=True)
@@ -1798,6 +1858,11 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
             updates['measurement_type'], None, None,
         )
 
+    selected = list(Target.objects.filter(id__in=data.target_ids, program_id=program_id))
+    protected = protected_target_ids(target.id for target in selected)
+    for target in selected:
+        guard_target_changes(target, updates, protected)
+
     template_for_prompt_index = None
     if 'prompting_template_id' in updates:
         template = _settings_qs(PromptingTemplate, request).filter(id=updates['prompting_template_id']).first()
@@ -1810,7 +1875,8 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
     if updated == 0:
         raise HttpError(400, 'No matching targets found for this program')
     if template_for_prompt_index:
-        for target in Target.objects.filter(id__in=data.target_ids, program_id=program_id):
+        changed_prompt_ids = [target.id for target in selected if target.prompting_template_id != updates['prompting_template_id']]
+        for target in Target.objects.filter(id__in=changed_prompt_ids, program_id=program_id):
             target.current_prompt_level_index = _initial_prompt_level_index(template_for_prompt_index, target)
             target.save(update_fields=['current_prompt_level_index', 'updated_at'])
     return BulkUpdateResult(updated_count=updated, target_ids=data.target_ids)
@@ -1871,6 +1937,12 @@ def update_prompting_template(request, template_id: int, data: PromptingTemplate
     if data.name:
         _check_unique_name(PromptingTemplate, request, data.name, exclude_id=template_id)
     payload = _normalize_prompting_template_settings(payload, template)
+    scoring_changed = (
+        ('levels' in payload and scoring_signature(payload['levels']) != scoring_signature(template.levels))
+        or ('outcome_measurement' in payload and payload['outcome_measurement'] != template.outcome_measurement)
+    )
+    if scoring_changed and template_has_history(template.id):
+        raise HttpError(409, 'This prompt template has session history. Duplicate it to change its scoring or levels.')
     for field, value in payload.items():
         setattr(template, field, value)
     template.save()
@@ -1887,6 +1959,8 @@ def delete_prompting_template(request, template_id: int):
         raise HttpError(404, 'Template not found')
     if template.is_locked:
         raise HttpError(423, 'Prompting template is locked')
+    if template_has_history(template.id):
+        raise HttpError(409, 'This prompt template has session history and cannot be deleted.')
     template.delete()
     return 204, None
 
@@ -1955,6 +2029,7 @@ def _serialize_lesson(lesson: Lesson) -> dict:
             'program_id': lp.program_id,
             'program_name': lp.program.name,
             'display_order': lp.display_order,
+            'is_pinned': lp.is_pinned,
         }
         for lp in lesson.lesson_programs.select_related('program').all()
     ]
@@ -1965,110 +2040,130 @@ def _serialize_lesson(lesson: Lesson) -> dict:
         'therapist_message': lesson.therapist_message,
         'lesson_type': lesson.lesson_type,
         'is_active': lesson.is_active,
+        'is_reusable': lesson.is_reusable,
+        'is_default': lesson.is_default,
         'programs': programs,
         'created_at': lesson.created_at,
         'updated_at': lesson.updated_at,
     }
 
 
-"""
-Session Playlist API is paused for now.
+def _session_setup_client(request, client_id: int):
+    from apps.clients.api import _get_accessible_clients
+    clients = _get_accessible_clients(request).select_for_update()
+    client = clients.filter(id=client_id).first() or clients.filter(external_id=str(client_id)).first()
+    if client is None:
+        raise HttpError(404, 'Client not found')
+    return client
 
-These endpoints exposed reusable playlist/template management in the client
-Sessions page, but users confused playlists with actual submitted/open session
-records. Keep the underlying Lesson model because appointment program
-assignment depends on it; only the standalone playlist API is disabled.
+
+def _get_session_setup_or_404(request, lesson_id: int) -> Lesson:
+    lesson = _get_lesson_or_404(request, lesson_id)
+    if not lesson.is_reusable or not lesson.is_active:
+        raise HttpError(404, 'Session setup not found')
+    return lesson
+
+
+def _require_session_setup_write(request):
+    _require_supervisor(request)
+    require_permission(request, 'sessions_edit')
+
+
+def _validate_setup_pins(program_ids, pinned_ids):
+    if len(set(pinned_ids)) != len(pinned_ids) or not set(pinned_ids).issubset(program_ids):
+        raise HttpError(400, 'Pinned programs must belong to this session setup')
+
 
 @router.get('/lessons', response=list[LessonSchema])
 def list_lessons(request, client_id: int):
+    _require_any_permission(request, ('client_sessions', 'session_start'))
+    _assert_client_accessible(request, client_id)
     lessons = Lesson.objects.filter(
-        external_client_id=client_id,
-        external_client_id__in=_accessible_external_client_ids(request),
-        is_active=True,
-    )
-    return [_serialize_lesson(l) for l in lessons]
+        external_client_id__in=client_identifier_aliases(client_id), is_active=True, is_reusable=True,
+    ).prefetch_related('lesson_programs__program')
+    return [_serialize_lesson(lesson) for lesson in lessons]
 
 
 @router.post('/lessons', response={201: LessonSchema})
+@transaction.atomic
 def create_lesson(request, data: LessonCreateRequest):
-    _require_supervisor(request)
-    _assert_client_accessible(request, data.client_id)
+    _require_session_setup_write(request)
+    client = _session_setup_client(request, data.client_id)
     if not data.program_ids:
-        raise HttpError(400, 'Select at least one program for the playlist')
-    program_ids = _validate_lesson_program_ids(request, data.client_id, data.program_ids)
+        raise HttpError(400, 'Select at least one program for the session setup')
+    program_ids = _validate_lesson_program_ids(request, client.id, data.program_ids)
+    _validate_setup_pins(program_ids, data.pinned_program_ids)
+    defaults = Lesson.objects.filter(external_client_id__in=client_identifier_aliases(client.id), is_default=True)
+    make_default = data.is_default or not defaults.exists()
+    if make_default:
+        defaults.update(is_default=False)
     lesson = Lesson.objects.create(
-        external_client_id=data.client_id,
-        name=data.name,
-        therapist_message=data.therapist_message,
-        lesson_type=data.lesson_type,
-        created_by=request.user,
+        external_client_id=client.id, name=data.name, therapist_message=data.therapist_message,
+        lesson_type=Lesson.LessonType.OPEN, is_reusable=True, is_default=make_default, created_by=request.user,
     )
     for order, program_id in enumerate(program_ids):
-        LessonProgram.objects.create(lesson=lesson, program_id=program_id, display_order=order)
+        LessonProgram.objects.create(lesson=lesson, program_id=program_id, display_order=order, is_pinned=program_id in data.pinned_program_ids)
     return 201, _serialize_lesson(lesson)
 
 
 @router.get('/lessons/{lesson_id}', response=LessonSchema)
 def get_lesson(request, lesson_id: int):
-    return _serialize_lesson(_get_lesson_or_404(request, lesson_id))
+    _require_any_permission(request, ('client_sessions', 'session_start'))
+    return _serialize_lesson(_get_session_setup_or_404(request, lesson_id))
 
 
 @router.patch('/lessons/{lesson_id}', response=LessonSchema)
+@transaction.atomic
 def update_lesson(request, lesson_id: int, data: LessonUpdateRequest):
-    _require_supervisor(request)
-    lesson = _get_lesson_or_404(request, lesson_id)
+    _require_session_setup_write(request)
+    lesson = _get_session_setup_or_404(request, lesson_id)
+    client = _session_setup_client(request, lesson.external_client_id)
+    lesson = Lesson.objects.select_for_update().get(pk=lesson.pk)
+    if not lesson.is_active:
+        raise HttpError(404, 'Session setup not found')
     payload = data.dict(exclude_none=True)
+    payload.pop('lesson_type', None)
     program_ids = payload.pop('program_ids', None)
-    if program_ids is not None and not program_ids:
-        raise HttpError(400, 'Select at least one program for the playlist')
+    pinned_ids = payload.pop('pinned_program_ids', None)
     if program_ids is not None:
-        program_ids = _validate_lesson_program_ids(request, lesson.external_client_id, program_ids)
+        if not program_ids:
+            raise HttpError(400, 'Select at least one program for the session setup')
+        program_ids = _validate_lesson_program_ids(request, client.id, program_ids)
+    effective_ids = program_ids if program_ids is not None else list(lesson.lesson_programs.values_list('program_id', flat=True))
+    if pinned_ids is None:
+        pinned_ids = list(lesson.lesson_programs.filter(is_pinned=True, program_id__in=effective_ids).values_list('program_id', flat=True))
+    _validate_setup_pins(effective_ids, pinned_ids)
+    if payload.get('is_active') is False:
+        payload['is_default'] = False
+    if payload.get('is_default'):
+        Lesson.objects.filter(external_client_id__in=client_identifier_aliases(client.id), is_default=True).exclude(pk=lesson.pk).update(is_default=False)
     for field, value in payload.items():
         setattr(lesson, field, value)
     lesson.save()
     if program_ids is not None:
         LessonProgram.objects.filter(lesson=lesson).delete()
         for order, program_id in enumerate(program_ids):
-            LessonProgram.objects.create(lesson=lesson, program_id=program_id, display_order=order)
+            LessonProgram.objects.create(lesson=lesson, program_id=program_id, display_order=order, is_pinned=program_id in pinned_ids)
+    elif data.pinned_program_ids is not None:
+        lesson.lesson_programs.update(is_pinned=False)
+        lesson.lesson_programs.filter(program_id__in=pinned_ids).update(is_pinned=True)
     return _serialize_lesson(lesson)
 
 
 @router.delete('/lessons/{lesson_id}', response={204: None})
+@transaction.atomic
 def delete_lesson(request, lesson_id: int):
-    _require_supervisor(request)
-    lesson = _get_lesson_or_404(request, lesson_id)
+    _require_session_setup_write(request)
+    lesson = _get_session_setup_or_404(request, lesson_id)
+    _session_setup_client(request, lesson.external_client_id)
+    lesson = Lesson.objects.select_for_update().get(pk=lesson.pk)
     lesson.is_active = False
-    lesson.save(update_fields=['is_active'])
+    lesson.is_default = False
+    lesson.save(update_fields=['is_active', 'is_default'])
     return 204, None
 
 
-@router.post('/lessons/{lesson_id}/programs', response={201: LessonProgramSchema})
-def add_program_to_lesson(request, lesson_id: int, data: AddProgramToLessonRequest):
-    _require_supervisor(request)
-    lesson = _get_lesson_or_404(request, lesson_id)
-    _validate_lesson_program_ids(request, lesson.external_client_id, [data.program_id])
-    lp, _ = LessonProgram.objects.get_or_create(
-        lesson=lesson,
-        program_id=data.program_id,
-        defaults={'display_order': data.display_order},
-    )
-    return 201, {
-        'id': lp.id,
-        'program_id': lp.program_id,
-        'program_name': lp.program.name,
-        'display_order': lp.display_order,
-    }
-
-
-@router.delete('/lessons/{lesson_id}/programs/{program_id}', response={204: None})
-def remove_program_from_lesson(request, lesson_id: int, program_id: int):
-    _require_supervisor(request)
-    _get_lesson_or_404(request, lesson_id)
-    LessonProgram.objects.filter(lesson_id=lesson_id, program_id=program_id).delete()
-    return 204, None
-"""
-
-
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Org-level program library (facility-wide templates)
 # ---------------------------------------------------------------------------

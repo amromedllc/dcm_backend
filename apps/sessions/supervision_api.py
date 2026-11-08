@@ -1,4 +1,6 @@
 """Organization/practice-scoped RBT supervision ledger and monthly reports."""
+from apps.accounts.permissions import require_permission
+
 import calendar
 import csv
 import io
@@ -122,6 +124,8 @@ def _contact_output(row):
 @router.get('/people', response=list[PersonOutput])
 @require_roles('admin', 'supervisor')
 def people(request):
+    require_permission(request, 'supervision_view')
+    require_permission(request, 'supervision_manage')
     return [{'id': u.pk, 'name': u.full_name, 'role': u.role}
             for u in _people(request).filter(is_active=True, role__in=['staff', 'supervisor', 'admin']).order_by('last_name', 'first_name')]
 
@@ -130,6 +134,8 @@ def people(request):
 @require_roles('admin', 'supervisor')
 @transaction.atomic
 def create_contact(request, data: ContactInput):
+    require_permission(request, 'supervision_view')
+    require_permission(request, 'supervision_manage')
     _person(request, data.rbt_id, ['staff'])
     _person(request, data.supervisor_id, ['supervisor', 'admin'])
     if request.user.role == 'supervisor' and data.supervisor_id != request.user.pk:
@@ -150,6 +156,8 @@ def create_contact(request, data: ContactInput):
 @require_roles('admin', 'supervisor')
 @transaction.atomic
 def void_contact(request, contact_id: int, data: VoidInput):
+    require_permission(request, 'supervision_view')
+    require_permission(request, 'supervision_manage')
     row = _contacts(request).select_for_update().filter(pk=contact_id).first()
     if row is None:
         raise HttpError(404, 'Supervision contact not found')
@@ -167,6 +175,7 @@ def void_contact(request, contact_id: int, data: VoidInput):
 @router.get('/contacts', response=list[ContactOutput])
 @require_roles('admin', 'supervisor', 'staff')
 def contacts(request, month: date, rbt_id: int | None = None):
+    require_permission(request, 'supervision_view')
     end = _month(month)
     qs = _contacts(request).filter(date__range=(month, end))
     if rbt_id is not None:
@@ -178,6 +187,8 @@ def contacts(request, month: date, rbt_id: int | None = None):
 @require_roles('admin', 'supervisor')
 @transaction.atomic
 def service_hours(request, data: ServiceHoursInput):
+    require_permission(request, 'supervision_view')
+    require_permission(request, 'supervision_manage')
     _person(request, data.rbt_id, ['staff'])
     end = _month(data.month)
     if data.month > timezone.localdate().replace(day=1):
@@ -224,12 +235,14 @@ def _reports(request, month):
 @router.get('/report', response=list[MonthlyReport])
 @require_roles('admin', 'supervisor', 'staff')
 def report(request, month: date):
+    require_permission(request, 'supervision_view')
     return _reports(request, month)
 
 
 @router.get('/report.csv')
 @require_roles('admin', 'supervisor', 'staff')
 def report_csv(request, month: date):
+    require_permission(request, 'supervision_view')
     rows = _reports(request, month)
     fields = list(MonthlyReport.model_fields)
     output = io.StringIO()

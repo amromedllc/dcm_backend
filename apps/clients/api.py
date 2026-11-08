@@ -15,7 +15,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.accounts.auth import partner_auth
-from apps.accounts.permissions import require_permission
+from apps.accounts.permissions import require_any_permission, require_permission
 from apps.integrations.tpms_auth_client import (
     TpmsAuthError,
     clear_tpms_access_token,
@@ -231,6 +231,23 @@ def _build_treatment_plan_sections(client: Client, report: dict[str, Any]) -> di
     }
 
 
+_CLIENT_READ_CONTEXTS = (
+    'clients_view', 'clients_create', 'clients_edit', 'clients_delete',
+    'client_overview', 'client_sessions', 'client_notes', 'client_documents',
+    'client_programs', 'client_progress', 'client_history', 'client_report',
+    'client_treatment_plan', 'client_bip', 'client_programs_create',
+    'client_programs_edit', 'client_programs_delete',
+    'client_documents_manage', 'client_documents_archive', 'sessions_view',
+    'session_start', 'sessions_create', 'sessions_manual_entry', 'session_approve',
+    'sessions_edit_data', 'appointments_create', 'appointments_edit',
+    'notes_view', 'notes_create', 'notes_edit', 'review_queue_view', 'reports_add_edit',
+)
+
+
+def _require_client_read(request):
+    require_any_permission(request, _CLIENT_READ_CONTEXTS)
+
+
 def _get_accessible_clients(request):
     """
     Return the client queryset visible to the requesting user.
@@ -256,6 +273,7 @@ def _get_accessible_clients(request):
 
 
 def _get_client_or_404(request, client_id: int) -> Client:
+    _require_client_read(request)
     qs = _get_accessible_clients(request)
     try:
         return qs.get(id=client_id)
@@ -569,6 +587,7 @@ def list_clients(
     already used by account_profile and the notifications provider list,
     rather than hard-failing with 401.
     """
+    _require_client_read(request)
     if request.user.external_admin_id is None or not sync or not get_tpms_access_token(request.user.id):
         return _list_native_clients(request, include_inactive, search)
 

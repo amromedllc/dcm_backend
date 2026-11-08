@@ -57,7 +57,17 @@ def queue_login_appointment_sync(org_id: int, facility_admin_id: int) -> PullJob
             admin_id=facility_admin_id,
             integration_platform=Organization.IntegrationPlatform.THERAPY_PMS,
         ).first()
-        if facility is None or facility.last_appointment_sync_at is None:
+        if facility is None:
+            logger.warning(
+                'appointment_auto_sync not_queued org=%s facility=%s reason=facility_not_connected',
+                org_id, facility_admin_id,
+            )
+            return None
+        if facility.last_appointment_sync_at is None:
+            logger.info(
+                'appointment_auto_sync not_queued org=%s facility=%s reason=initial_sync_missing',
+                org_id, facility_admin_id,
+            )
             return None
 
         active_job = PullJob.objects.filter(
@@ -66,6 +76,10 @@ def queue_login_appointment_sync(org_id: int, facility_admin_id: int) -> PullJob
             params__facility_admin_id=facility_admin_id,
         ).first()
         if active_job is not None:
+            logger.info(
+                'appointment_auto_sync existing_job org=%s facility=%s job=%s status=%s',
+                org_id, facility_admin_id, active_job.pk, active_job.status,
+            )
             return active_job
 
         today = timezone.localdate()
@@ -83,10 +97,19 @@ def queue_login_appointment_sync(org_id: int, facility_admin_id: int) -> PullJob
                 'auto_sync': True,
             },
         )
+        logger.info(
+            'appointment_auto_sync job_created org=%s facility=%s job=%s from=%s to=%s updated_after=%s',
+            org_id, facility_admin_id, job.pk, from_date, today,
+            facility.last_appointment_sync_at.isoformat(),
+        )
 
         def dispatch() -> None:
             try:
                 run_pull_job.delay(job_id=job.id, org_id=org_id)
+                logger.info(
+                    'appointment_auto_sync dispatched org=%s facility=%s job=%s',
+                    org_id, facility_admin_id, job.pk,
+                )
             except Exception as exc:
                 logger.exception('Failed to dispatch login appointment sync job %s', job.id)
                 PullJob.objects.filter(pk=job.pk).update(
@@ -122,7 +145,11 @@ def run_pull_job(self, job_id: int, org_id: int) -> None:
                 return
             facility = org.tpms_admin_ids.get(admin_id=facility_admin_id)
             org = tpms_pull.FacilityConnection(org, facility)
-            logger.info('Starting pull job %s (%s) for org %s', job_id, job.job_type, org_id)
+            logger.info(
+                'Starting pull job %s (%s) for org %s facility=%s auto_sync=%s',
+                job_id, job.job_type, org_id, facility_admin_id,
+                bool(job.params.get('auto_sync')),
+            )
             _mark_running(job)
             if job.job_type == PullJob.JobType.CLIENTS:
                 result = tpms_pull.pull_clients(org)
@@ -159,10 +186,17 @@ def run_pull_job(self, job_id: int, org_id: int) -> None:
                 raise ValueError(f'Unknown pull job type: {job.job_type}')
             _mark_completed(job, result)
             logger.info(
-                'Pull job %s (%s) completed: created=%d, updated=%d, skipped=%d',
-                job_id, job.job_type, result.created, result.updated, result.skipped,
+                'Pull job %s (%s) completed for org %s facility=%s auto_sync=%s: created=%d, updated=%d, skipped=%d',
+                job_id, job.job_type, org_id, facility_admin_id,
+                bool(job.params.get('auto_sync')),
+                result.created, result.updated, result.skipped,
             )
         except Exception as exc:
-            logger.exception('Pull job %s failed', job_id)
+            logger.exception(
+                'Pull job %s failed for org %s facility=%s auto_sync=%s',
+                job_id, org_id,
+                job.params.get('facility_admin_id') if job is not None else None,
+                bool(job.params.get('auto_sync')) if job is not None else False,
+            )
             if job is not None:
                 _mark_failed(job, str(exc))
