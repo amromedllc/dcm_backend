@@ -34,13 +34,6 @@ from .auth import (
 from .permissions import get_user_permissions, require_permission, resolve_permission_organization
 
 
-def _block_during_impersonation(request) -> None:
-    """Raise 403 if the current request is an impersonation session.
-    Apply to password changes, role changes, account deletion, and any
-    security-configuration mutations."""
-    payload = getattr(request, '_jwt_payload', {})
-    if payload.get('impersonating_admin_id'):
-        raise HttpError(403, 'This action is not permitted during an impersonation session.')
 from .schemas import (
     LoginRequest,
     StepUpRequest,
@@ -456,7 +449,6 @@ def resend_my_mfa(request):
 
 @router.post('/account/mfa/disable', response={204: None}, auth=jwt_auth_any_role)
 def disable_my_mfa(request, data: MfaCodeRequest):
-    _block_during_impersonation(request)
     if request.user.mfa_required:
         raise HttpError(400, 'Your organization requires MFA, so it cannot be turned off.')
     mfa.check_code(request.user, data.code)
@@ -479,7 +471,6 @@ def get_my_pin_status(request):
 @router.post('/account/pin', response=PinStatusResponse, auth=jwt_auth_any_role)
 @audit_security('pin.set')
 def set_my_pin(request, data: SetPinRequest):
-    _block_during_impersonation(request)
     tenant = getattr(request, 'tenant', None)
     if not (tenant and getattr(tenant, 'pin_lock_allowed', False)):
         raise HttpError(400, 'PIN lock is not allowed by your organization.')
@@ -517,7 +508,6 @@ def toggle_my_pin_lock(request, data: TogglePinLockRequest):
 @router.delete('/account/pin', response={204: None}, auth=jwt_auth_any_role)
 @audit_security('pin.remove')
 def remove_my_pin(request, data: PinProtectionRequest = Body(None)):
-    _block_during_impersonation(request)
     data = data or PinProtectionRequest()
     update_pin_protection(request.user.pk, remove=True,
                           current_pin=data.current_pin, password=data.password, request=request)
@@ -616,7 +606,6 @@ def _verify_actor_password(user: User, password: str) -> bool:
 @router.post('/users/{user_id}/mfa/remove', response={204: None}, auth=jwt_auth)
 @audit_security('auth.mfa_remove')
 def remove_user_mfa(request, user_id: int, data: MfaRemoveRequest):
-    _block_during_impersonation(request)
     require_permission(request, 'admin_users_edit')
     step_up.require_step_up(request)
     try:
@@ -1509,7 +1498,6 @@ def create_user(request, data: UserCreateRequest):
 @router.patch('/users/{user_id}', response=UserSchema, auth=jwt_auth)
 @audit_security('auth.account_update')
 def update_user(request, user_id: int, data: UserUpdateRequest):
-    _block_during_impersonation(request)
     require_permission(request, 'admin_users_edit')
     if any(getattr(data, field) is not None for field in ('role', 'is_active', 'mfa_required')):
         step_up.require_step_up(request)
@@ -1575,7 +1563,6 @@ def save_role_permissions(request, body: dict = Body(...)):
     Body: {role: {perm_key: bool}}. Persists one RolePermission row per role
     under the Organization resolved from the logged-in user's JWT/tenant.
     """
-    _block_during_impersonation(request)
     require_permission(request, 'admin_privileges')
     step_up.require_step_up(request)
     from .models import RolePermission
