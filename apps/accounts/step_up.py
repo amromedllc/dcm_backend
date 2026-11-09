@@ -88,6 +88,8 @@ def verify(request, data):
 
 
 def require_step_up(request):
+    if getattr(request, '_jwt_payload', {}).get('impersonating_admin_id'):
+        return
     user, sid, org = _actor(request)
     path = request.path.removeprefix('/api/v1')
     digest = hashlib.sha256(request.body).hexdigest()
