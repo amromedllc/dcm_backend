@@ -680,14 +680,25 @@ def _serialize_superadmin_user(user: User, facility_names: dict[int, str] | None
 
 
 @router.get('/superadmin/users', response=list[SuperadminUserSchema])
-def list_superadmin_users(request, organization_id: int | None = None):
+def list_superadmin_users(request, organization_id: int | None = None, external_admin_id: int | None = None, role: str | None = None):
     _require_superadmin(request)
-    qs = (
-        User.objects.filter(role__in=_SUPERADMIN_ASSIGNABLE_ROLES)
-        .select_related('organization')
-        .order_by('-created_at')
-    )
-    if organization_id is not None:
+    from apps.accounts.models import User as _User
+    valid_roles = {c[0] for c in _User.Role.choices}
+    if role and role in valid_roles:
+        qs = (
+            User.objects.filter(role=role)
+            .select_related('organization')
+            .order_by('-created_at')
+        )
+    else:
+        qs = (
+            User.objects.filter(role__in=_SUPERADMIN_ASSIGNABLE_ROLES)
+            .select_related('organization')
+            .order_by('-created_at')
+        )
+    if external_admin_id is not None:
+        qs = qs.filter(external_admin_id=external_admin_id)
+    elif organization_id is not None:
         qs = qs.filter(organization_id=organization_id)
     users = list(qs)
     facility_names = _facility_name_map({u.external_admin_id for u in users if u.external_admin_id is not None})
