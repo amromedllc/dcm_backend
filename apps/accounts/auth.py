@@ -81,6 +81,8 @@ def create_access_token(
     session_started_at: float | None = None,
     session_id: str | None = None,
     idle_started_at: float | None = None,
+    impersonating_admin_id: int | None = None,
+    impersonation_log_id: int | None = None,
 ) -> str:
     now = timezone.now()
     start = now.timestamp() if session_started_at is None else session_start_from_payload({'session_started_at': session_started_at})
@@ -106,6 +108,10 @@ def create_access_token(
         'idle_started_at': now.timestamp() if idle_started_at is None else idle_started_at,
         'exp': min((now + timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)).timestamp(), deadline),
     }
+    if impersonating_admin_id is not None:
+        payload['impersonating_admin_id'] = impersonating_admin_id
+    if impersonation_log_id is not None:
+        payload['impersonation_log_id'] = impersonation_log_id
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
@@ -116,6 +122,8 @@ def create_refresh_token(
     session_started_at: float | None = None,
     session_id: str | None = None,
     idle_started_at: float | None = None,
+    impersonating_admin_id: int | None = None,
+    impersonation_log_id: int | None = None,
 ) -> str:
     now = timezone.now()
     start = now.timestamp() if session_started_at is None else session_start_from_payload({'session_started_at': session_started_at})
@@ -135,6 +143,10 @@ def create_refresh_token(
         'idle_started_at': now.timestamp() if idle_started_at is None else idle_started_at,
         'exp': min((now + lifetime).timestamp(), deadline),
     }
+    if impersonating_admin_id is not None:
+        payload['impersonating_admin_id'] = impersonating_admin_id
+    if impersonation_log_id is not None:
+        payload['impersonation_log_id'] = impersonation_log_id
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 

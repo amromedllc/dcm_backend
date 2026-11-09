@@ -181,3 +181,23 @@ class SuperadminUserSchema(Schema):
     external_admin_id: int | None
     tpms_facility_name: str | None
     created_at: datetime
+
+
+class ImpersonateRequest(Schema):
+    reason: str = ''
+
+
+class ImpersonationLogSchema(Schema):
+    id: int
+    admin_id: int
+    admin_name: str
+    admin_email: str
+    target_user_id: int
+    target_user_name: str
+    target_user_email: str
+    started_at: datetime
+    ended_at: datetime | None = None
+    ip_address: str | None = None
+    session_id: str
+    status: str
+    reason: str

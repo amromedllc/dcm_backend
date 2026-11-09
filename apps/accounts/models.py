@@ -388,6 +388,48 @@ class PasswordResetLink(models.Model):
         return f'PasswordResetLink for {self.user_id} ({self.token_prefix}...)'
 
 
+class ImpersonationLog(models.Model):
+    """
+    Audit record for every superadmin impersonation session.
+    One row is created when impersonation starts; ended_at/status are updated
+    when it ends. session_id ties the log to the impersonation JWT's 'sid' claim
+    so expiry can be detected even if stop-impersonation is never called.
+    """
+    class Status(models.TextChoices):
+        ACTIVE = 'active', 'Active'
+        ENDED = 'ended', 'Ended'
+        EXPIRED = 'expired', 'Expired'
+
+    admin = models.ForeignKey(
+        'accounts.User',
+        on_delete=models.PROTECT,
+        related_name='impersonation_sessions_initiated',
+    )
+    target_user = models.ForeignKey(
+        'accounts.User',
+        on_delete=models.PROTECT,
+        related_name='impersonation_sessions_received',
+    )
+    started_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    session_id = models.CharField(max_length=64, db_index=True)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+        db_index=True,
+    )
+    reason = models.TextField(blank=True, default='')
+
+    class Meta:
+        app_label = 'accounts'
+        ordering = ['-started_at']
+
+    def __str__(self) -> str:
+        return f'Impersonation by {self.admin_id} of {self.target_user_id} ({self.status})'
+
+
 class RolePermission(models.Model):
     """
     Facility-scoped permission matrix for a role.
