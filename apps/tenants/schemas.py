@@ -161,11 +161,16 @@ class SuperadminUserCreate(Schema):
     last_name: str
     password: str
     role: str = 'admin'
-    # An Administrator (or supervisor/staff) is scoped to one organization's
-    # TPMS practice, not the organization alone — required whenever the
-    # target org has any practices mapped (OrganizationTpmsAdminId); ignored
-    # for a native (non-TPMS) org. See create_superadmin_user.
     external_admin_id: int | None = None
+
+
+class SuperadminUserUpdate(Schema):
+    first_name: str | None = None
+    last_name: str | None = None
+    email: str | None = None
+    role: str | None = None
+    is_active: bool | None = None
+    password: str | None = None
 
 
 class SuperadminUserSchema(Schema):

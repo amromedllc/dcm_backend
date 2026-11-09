@@ -28,6 +28,7 @@ from .schemas import (
     SuperadminAPIKeySchema,
     SuperadminUserCreate,
     SuperadminUserSchema,
+    SuperadminUserUpdate,
     TpmsAdminIdCreate,
     TpmsAdminEmailSettingSchema,
     TpmsAdminEmailSettingUpdate,
@@ -766,6 +767,41 @@ def deactivate_superadmin_user(request, user_id: int):
     if not updated:
         raise HttpError(404, 'User not found')
     return 204, None
+
+
+@router.patch('/superadmin/users/{user_id}', response=SuperadminUserSchema)
+def update_superadmin_user(request, user_id: int, data: SuperadminUserUpdate):
+    _require_superadmin(request)
+    try:
+        user = User.objects.select_related('organization').get(
+            id=user_id, role__in=_SUPERADMIN_ASSIGNABLE_ROLES
+        )
+    except User.DoesNotExist:
+        raise HttpError(404, 'User not found')
+    if data.email is not None:
+        email = data.email.strip().lower()
+        if User.objects.filter(email__iexact=email).exclude(pk=user_id).exists():
+            raise HttpError(400, 'A user with this email already exists.')
+        user.email = email
+    if data.first_name is not None:
+        user.first_name = data.first_name.strip()
+    if data.last_name is not None:
+        user.last_name = data.last_name.strip()
+    if data.role is not None:
+        if data.role not in _SUPERADMIN_ASSIGNABLE_ROLES:
+            raise HttpError(400, 'Invalid role.')
+        user.role = data.role
+    if data.is_active is not None:
+        user.is_active = data.is_active
+    if data.password is not None:
+        if len(data.password) < 8:
+            raise HttpError(400, 'Password must be at least 8 characters.')
+        user.set_password(data.password)
+    user.save()
+    facility_names = _facility_name_map(
+        {user.external_admin_id} if user.external_admin_id is not None else set()
+    )
+    return _serialize_superadmin_user(user, facility_names)
 
 
 # ---------------------------------------------------------------------------
