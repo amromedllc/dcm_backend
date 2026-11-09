@@ -116,6 +116,10 @@ class CurrentUserSchema(UserSchema):
     pin_lock_enabled: bool = False
     has_pin: bool = False
     pin_length: int | None = None
+    impersonating_admin_id: int | None = None
+    impersonation_log_id: int | None = None
+    impersonating_admin_name: str | None = None
+    impersonation_started_at: datetime | None = None
 
 
 class SetPinRequest(Schema):

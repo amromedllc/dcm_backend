@@ -31,6 +31,8 @@ from .schemas import (
     TpmsAdminIdCreate,
     TpmsAdminEmailSettingSchema,
     TpmsAdminEmailSettingUpdate,
+    ImpersonateRequest,
+    ImpersonationLogSchema,
 )
 
 router = Router()
@@ -753,3 +755,260 @@ def deactivate_superadmin_user(request, user_id: int):
     if not updated:
         raise HttpError(404, 'User not found')
     return 204, None
+
+
+# ---------------------------------------------------------------------------
+# Superadmin: User Impersonation
+#
+# Only platform superadmins may impersonate. Impersonation issues a new
+# JWT pair with the target user's identity but with the original admin's ID
+# preserved in the payload. The original admin's session is stored in Redis
+# so it can be restored without re-authentication. Superadmins cannot
+# impersonate other superadmins. Impersonation is fully audit-logged.
+# ---------------------------------------------------------------------------
+
+_IMPERSONATION_SESSION_TTL = 4 * 3600  # 4 hours max
+
+
+def _impersonation_redis_key(session_id: str) -> str:
+    return f'dcm:impersonation:admin_session:{session_id}'
+
+
+def _store_admin_session(session_id: str, admin_id: int, admin_access: str, admin_refresh: str, tenant_id: int) -> None:
+    import json
+    from apps.accounts.auth import _redis
+    _redis().setex(
+        _impersonation_redis_key(session_id),
+        _IMPERSONATION_SESSION_TTL,
+        json.dumps({
+            'admin_id': admin_id,
+            'access_token': admin_access,
+            'refresh_token': admin_refresh,
+            'tenant_id': tenant_id,
+        }),
+    )
+
+
+def _retrieve_admin_session(session_id: str) -> dict | None:
+    import json
+    from apps.accounts.auth import _redis
+    raw = _redis().get(_impersonation_redis_key(session_id))
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+def _delete_admin_session(session_id: str) -> None:
+    from apps.accounts.auth import _redis
+    _redis().delete(_impersonation_redis_key(session_id))
+
+
+def _client_ip(request) -> str | None:
+    import ipaddress
+    meta = getattr(request, 'META', {})
+    raw = meta.get('HTTP_X_FORWARDED_FOR', meta.get('REMOTE_ADDR', ''))
+    candidate = raw.split(',')[0].strip()
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        return None
+
+
+@router.post('/superadmin/impersonate/stop', response=dict)
+def stop_impersonation_route(request):
+    return _stop_impersonation(request)
+
+
+@router.post('/superadmin/impersonate/{target_user_id}', response=dict)
+def start_impersonation(request, target_user_id: int, data: ImpersonateRequest):
+    """
+    Begin impersonating a non-superadmin user. Issues a new JWT pair scoped
+    to the target user with the original admin's ID embedded. The admin's
+    current tokens are stored in Redis for restoration.
+    """
+    import secrets as _secrets
+    from apps.accounts.auth import (
+        create_access_token, create_refresh_token, decode_token,
+        session_start_from_payload,
+    )
+    from apps.accounts.models import ImpersonationLog
+
+    _require_superadmin(request)
+
+    # Prevent nested impersonation
+    payload = getattr(request, '_jwt_payload', {})
+    if payload.get('impersonating_admin_id'):
+        raise HttpError(400, 'Cannot impersonate while already impersonating another user.')
+
+    try:
+        target = User.objects.get(id=target_user_id)
+    except User.DoesNotExist:
+        raise HttpError(404, 'User not found')
+
+    if target.is_superuser:
+        raise HttpError(403, 'Cannot impersonate another superadmin.')
+    if not target.is_active:
+        raise HttpError(400, 'Cannot impersonate an inactive user.')
+    if target.role == User.Role.CAREGIVER:
+        raise HttpError(400, 'Cannot impersonate caregiver accounts.')
+
+    tenant = getattr(request, 'tenant', None)
+    if tenant is None:
+        raise HttpError(400, 'No organization context')
+
+    admin = request.user
+    impersonation_session_id = _secrets.token_hex(16)
+
+    # Preserve the admin's current tokens in Redis
+    admin_access = request.headers.get('Authorization', '').removeprefix('Bearer ').strip()
+    admin_refresh_payload = payload  # we only need the session metadata
+    admin_session_started_at = payload.get('session_started_at', payload.get('iat'))
+    admin_session_id = payload.get('sid', '')
+
+    # Store admin session for restoration
+    _store_admin_session(
+        impersonation_session_id,
+        admin_id=admin.id,
+        admin_access=admin_access,
+        admin_refresh='http-only-session',  # gateway will supply the real refresh cookie
+        tenant_id=tenant.pk,
+    )
+
+    # Create audit log entry
+    log = ImpersonationLog.objects.create(
+        admin=admin,
+        target_user=target,
+        ip_address=_client_ip(request),
+        session_id=impersonation_session_id,
+        reason=data.reason or '',
+    )
+
+    # Issue impersonation tokens — target user's identity, admin's ID embedded
+    now = timezone.now()
+    session_start = now.timestamp()
+    access = create_access_token(
+        target, tenant.pk,
+        session_started_at=session_start,
+        session_id=impersonation_session_id,
+        idle_started_at=session_start,
+        impersonating_admin_id=admin.id,
+        impersonation_log_id=log.id,
+    )
+    refresh = create_refresh_token(
+        target, tenant.pk,
+        session_started_at=session_start,
+        session_id=impersonation_session_id,
+        idle_started_at=session_start,
+        impersonating_admin_id=admin.id,
+        impersonation_log_id=log.id,
+    )
+
+    return {
+        'access_token': access,
+        'refresh_token': refresh,
+        'impersonation_log_id': log.id,
+        'target_user': {
+            'id': target.id,
+            'full_name': target.full_name,
+            'email': target.email,
+            'role': target.role,
+        },
+    }
+
+
+def _stop_impersonation(request):
+    """
+    End the current impersonation session and restore the original admin's
+    tokens. The admin does not need to re-authenticate.
+    """
+    from apps.accounts.auth import (
+        create_access_token, create_refresh_token, blocklist_token,
+    )
+    from apps.accounts.models import ImpersonationLog
+
+    payload = getattr(request, '_jwt_payload', {})
+    impersonating_admin_id = payload.get('impersonating_admin_id')
+    if not impersonating_admin_id:
+        raise HttpError(400, 'No active impersonation session.')
+
+    impersonation_session_id = payload.get('sid', '')
+    impersonation_log_id = payload.get('impersonation_log_id')
+
+    # Revoke the impersonation token immediately
+    blocklist_token(payload)
+
+    # Retrieve and delete the stored admin session
+    admin_session = _retrieve_admin_session(impersonation_session_id)
+    _delete_admin_session(impersonation_session_id)
+
+    # Update audit log
+    if impersonation_log_id:
+        ImpersonationLog.objects.filter(
+            id=impersonation_log_id,
+            status=ImpersonationLog.Status.ACTIVE,
+        ).update(ended_at=timezone.now(), status=ImpersonationLog.Status.ENDED)
+
+    if not admin_session:
+        raise HttpError(401, 'Original admin session has expired. Please sign in again.')
+
+    try:
+        admin = User.objects.get(id=admin_session['admin_id'], is_active=True, is_superuser=True)
+    except User.DoesNotExist:
+        raise HttpError(401, 'Original admin account is no longer active.')
+
+    tenant_id = admin_session['tenant_id']
+    now = timezone.now()
+    session_start = now.timestamp()
+    session_id = admin_session.get('session_id') or payload.get('sid', '')
+
+    # Issue fresh admin tokens (new session — no impersonation claims)
+    access = create_access_token(
+        admin, tenant_id,
+        session_started_at=session_start,
+        session_id=session_id,
+        idle_started_at=session_start,
+    )
+    refresh = create_refresh_token(
+        admin, tenant_id,
+        session_started_at=session_start,
+        session_id=session_id,
+        idle_started_at=session_start,
+    )
+
+    return {
+        'access_token': access,
+        'refresh_token': refresh,
+    }
+
+
+@router.get('/superadmin/impersonation-logs', response=list[ImpersonationLogSchema])
+def list_impersonation_logs(request, limit: int = 50):
+    """Return recent impersonation audit logs. Superadmin only."""
+    from apps.accounts.models import ImpersonationLog
+    _require_superadmin(request)
+    logs = (
+        ImpersonationLog.objects
+        .select_related('admin', 'target_user')
+        .order_by('-started_at')[:max(1, min(limit, 200))]
+    )
+    return [
+        ImpersonationLogSchema(
+            id=log.id,
+            admin_id=log.admin_id,
+            admin_name=log.admin.full_name,
+            admin_email=log.admin.email,
+            target_user_id=log.target_user_id,
+            target_user_name=log.target_user.full_name,
+            target_user_email=log.target_user.email,
+            started_at=log.started_at,
+            ended_at=log.ended_at,
+            ip_address=log.ip_address,
+            session_id=log.session_id,
+            status=log.status,
+            reason=log.reason,
+        )
+        for log in logs
+    ]

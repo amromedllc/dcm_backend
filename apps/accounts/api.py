@@ -32,6 +32,15 @@ from .auth import (
     jwt_auth, jwt_auth_any_role, token_tenant_mismatch,
 )
 from .permissions import get_user_permissions, require_permission, resolve_permission_organization
+
+
+def _block_during_impersonation(request) -> None:
+    """Raise 403 if the current request is an impersonation session.
+    Apply to password changes, role changes, account deletion, and any
+    security-configuration mutations."""
+    payload = getattr(request, '_jwt_payload', {})
+    if payload.get('impersonating_admin_id'):
+        raise HttpError(403, 'This action is not permitted during an impersonation session.')
 from .schemas import (
     LoginRequest,
     StepUpRequest,
@@ -447,6 +456,7 @@ def resend_my_mfa(request):
 
 @router.post('/account/mfa/disable', response={204: None}, auth=jwt_auth_any_role)
 def disable_my_mfa(request, data: MfaCodeRequest):
+    _block_during_impersonation(request)
     if request.user.mfa_required:
         raise HttpError(400, 'Your organization requires MFA, so it cannot be turned off.')
     mfa.check_code(request.user, data.code)
@@ -469,6 +479,7 @@ def get_my_pin_status(request):
 @router.post('/account/pin', response=PinStatusResponse, auth=jwt_auth_any_role)
 @audit_security('pin.set')
 def set_my_pin(request, data: SetPinRequest):
+    _block_during_impersonation(request)
     tenant = getattr(request, 'tenant', None)
     if not (tenant and getattr(tenant, 'pin_lock_allowed', False)):
         raise HttpError(400, 'PIN lock is not allowed by your organization.')
@@ -506,6 +517,7 @@ def toggle_my_pin_lock(request, data: TogglePinLockRequest):
 @router.delete('/account/pin', response={204: None}, auth=jwt_auth_any_role)
 @audit_security('pin.remove')
 def remove_my_pin(request, data: PinProtectionRequest = Body(None)):
+    _block_during_impersonation(request)
     data = data or PinProtectionRequest()
     update_pin_protection(request.user.pk, remove=True,
                           current_pin=data.current_pin, password=data.password, request=request)
@@ -570,8 +582,20 @@ def unlock_with_pin(request, data: PinUnlockRequest):
     session_id = secrets.token_hex(16)
     idle_started_at = timezone.now().timestamp()
     response = PinUnlockResponse(
-        access_token=create_access_token(user, tenant_id, session_started_at=session_started_at, session_id=session_id, idle_started_at=idle_started_at),
-        refresh_token=create_refresh_token(user, tenant_id, session_started_at=session_started_at, session_id=session_id, idle_started_at=idle_started_at),
+        access_token=create_access_token(
+            user, tenant_id, session_started_at=session_started_at,
+            session_id=payload.get('sid') if payload.get('impersonating_admin_id') else session_id,
+            idle_started_at=idle_started_at,
+            impersonating_admin_id=payload.get('impersonating_admin_id'),
+            impersonation_log_id=payload.get('impersonation_log_id'),
+        ),
+        refresh_token=create_refresh_token(
+            user, tenant_id, session_started_at=session_started_at,
+            session_id=payload.get('sid') if payload.get('impersonating_admin_id') else session_id,
+            idle_started_at=idle_started_at,
+            impersonating_admin_id=payload.get('impersonating_admin_id'),
+            impersonation_log_id=payload.get('impersonation_log_id'),
+        ),
     )
     try:
         consumed = consume_refresh_token(payload)
@@ -592,6 +616,7 @@ def _verify_actor_password(user: User, password: str) -> bool:
 @router.post('/users/{user_id}/mfa/remove', response={204: None}, auth=jwt_auth)
 @audit_security('auth.mfa_remove')
 def remove_user_mfa(request, user_id: int, data: MfaRemoveRequest):
+    _block_during_impersonation(request)
     require_permission(request, 'admin_users_edit')
     step_up.require_step_up(request)
     try:
@@ -793,7 +818,9 @@ def refresh_token(request, data: RefreshRequest):
         # depth; token_tenant_mismatch above already blocks that case).
         return AccessTokenResponse(access_token=create_access_token(
             user, payload['org_id'], session_started_at=session_start_from_payload(payload),
-            session_id=payload.get('sid'), idle_started_at=payload.get('idle_started_at')))
+            session_id=payload.get('sid'), idle_started_at=payload.get('idle_started_at'),
+            impersonating_admin_id=payload.get('impersonating_admin_id'),
+            impersonation_log_id=payload.get('impersonation_log_id')))
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, User.DoesNotExist, KeyError):
         raise HttpError(401, 'Invalid or expired token')
 
@@ -811,6 +838,7 @@ def _user_avatar_url(request, user: User) -> str | None:
 def me(request):
     user = request.user
     tenant = getattr(request, 'tenant', None)
+    payload = getattr(request, '_jwt_payload', {})
     user.automatic_logout_minutes = (
         tenant.automatic_logout_minutes
         if tenant is not None and tenant.automatic_logout_enabled
@@ -820,6 +848,29 @@ def me(request):
     user.pin_lock_enabled = bool(getattr(user, 'pin_lock_enabled', False))
     user.pin_length = getattr(user, 'pin_length', None)
     user.avatar_url = _user_avatar_url(request, user)
+    impersonating_admin_id = payload.get('impersonating_admin_id') or None
+    impersonation_log_id = payload.get('impersonation_log_id') or None
+    user.impersonating_admin_id = impersonating_admin_id
+    user.impersonation_log_id = impersonation_log_id
+    user.impersonating_admin_name = None
+    user.impersonation_started_at = None
+    if impersonating_admin_id and impersonation_log_id:
+        from .models import ImpersonationLog
+        log = (
+            ImpersonationLog.objects
+            .select_related('admin')
+            .filter(
+                id=impersonation_log_id,
+                session_id=payload.get('sid'),
+                admin_id=impersonating_admin_id,
+                target_user_id=user.id,
+                status=ImpersonationLog.Status.ACTIVE,
+            )
+            .first()
+        )
+        if log:
+            user.impersonating_admin_name = log.admin.full_name
+            user.impersonation_started_at = log.started_at
     if user.is_caregiver:
         # Caregiver access is identity-scoped, not permission-key-scoped —
         # no RolePermission lookup, just the linked client's display info.
@@ -1458,6 +1509,7 @@ def create_user(request, data: UserCreateRequest):
 @router.patch('/users/{user_id}', response=UserSchema, auth=jwt_auth)
 @audit_security('auth.account_update')
 def update_user(request, user_id: int, data: UserUpdateRequest):
+    _block_during_impersonation(request)
     require_permission(request, 'admin_users_edit')
     if any(getattr(data, field) is not None for field in ('role', 'is_active', 'mfa_required')):
         step_up.require_step_up(request)
@@ -1520,10 +1572,10 @@ def get_role_permissions(request):
 @audit_security('auth.permissions_change')
 def save_role_permissions(request, body: dict = Body(...)):
     """Save the permission matrix for the login facility.
-
     Body: {role: {perm_key: bool}}. Persists one RolePermission row per role
     under the Organization resolved from the logged-in user's JWT/tenant.
     """
+    _block_during_impersonation(request)
     require_permission(request, 'admin_privileges')
     step_up.require_step_up(request)
     from .models import RolePermission
