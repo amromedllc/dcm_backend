@@ -20,6 +20,7 @@ from .schemas import (
     ReviewQueueItem,
     NoteAssignmentSchema, NoteAssignmentCreateRequest,
 )
+from shared import ai_client
 from shared.ai_client import AIError
 from .template_draft import generate_template_draft
 from .services import submit_note, approve_note, reject_note, resolve_template_tokens, apply_session_autofill
@@ -150,6 +151,7 @@ def draft_note_template_with_ai(request, data: NoteTemplateDraftRequest):
     except Program.DoesNotExist:
         raise HttpError(404, 'Program not found')
     try:
+        ai_client.ensure_enabled_for_user(request.user)
         return generate_template_draft(program, data.instruction)
     except AIError as exc:
         raise HttpError(exc.status, str(exc)) from exc

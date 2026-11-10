@@ -409,9 +409,10 @@ def _mfa_status(user: User) -> MfaStatusSchema:
 
 @router.get('/features', auth=jwt_auth_any_role)
 def get_features(request):
-    """Which optional features are switched on for this deployment (used to show or hide them in the web app)."""
+    """Which optional features are switched on for this deployment and this user's TPMS
+    facility (used to show or hide them in the web app)."""
     from shared import ai_client
-    return {'ai_enabled': ai_client.is_enabled()}
+    return {'ai_enabled': ai_client.is_enabled(request.user)}
 
 
 @router.get('/account/step-up', response=dict, auth=jwt_auth_any_role)

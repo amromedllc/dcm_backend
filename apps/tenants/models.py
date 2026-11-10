@@ -27,8 +27,6 @@ class Organization(TenantMixin):
         default=AutomaticLogoutMinutes.FIFTEEN_MINUTES,
     )
     pin_lock_allowed = models.BooleanField(default=False)
-    # Blank until the org actually connects (see tenants.api.connect_therapy_pms) —
-    # picking a platform in the UI doesn't set this by itself.
     integration_platform = models.CharField(
         max_length=30, choices=IntegrationPlatform.choices, blank=True, default='',
     )
@@ -76,6 +74,7 @@ class OrganizationTpmsAdminId(models.Model):
     admin_id = models.IntegerField(unique=True, db_index=True)
     facility_name = models.CharField(max_length=200, blank=True)
     email_notifications_enabled = models.BooleanField(default=False)
+    ai_enabled = models.BooleanField(default=False)
     integration_platform = models.CharField(max_length=30, blank=True, default='')
     integration_email = models.EmailField(blank=True, default='')
     integration_password_encrypted = models.TextField(blank=True, default='')

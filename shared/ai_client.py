@@ -27,9 +27,42 @@ def is_configured() -> bool:
     return bool(getattr(settings, 'AI_API_KEY', ''))
 
 
-def is_enabled() -> bool:
-    """AI features are on only when the AI_ENABLED switch is true and a key is configured."""
+def is_deployment_enabled() -> bool:
+    """The deployment-wide switch: AI_ENABLED is true and a key is configured."""
     return bool(getattr(settings, 'AI_ENABLED', False)) and is_configured()
+
+
+def is_enabled_for_user(user) -> bool:
+    """Whether a platform superadmin has switched AI on for the user's TPMS facility
+    (OrganizationTpmsAdminId.ai_enabled, Superadmin → Practice Email). Mirrors the
+    practice email gate: a user with no facility (native, non-TPMS login) is not
+    gated at this level, so the deployment switch alone decides."""
+    admin_id = getattr(user, 'external_admin_id', None)
+    if admin_id is None:
+        return True
+    from apps.tenants.models import OrganizationTpmsAdminId  # local import: shared/ must not import apps at load time
+    return OrganizationTpmsAdminId.objects.filter(
+        organization_id=getattr(user, 'organization_id', None),
+        admin_id=admin_id,
+        ai_enabled=True,
+    ).exists()
+
+
+def is_enabled(user=None) -> bool:
+    """AI features are on only when the deployment switch is on AND, when a user is
+    given, that user's facility has AI enabled by a superadmin."""
+    if not is_deployment_enabled():
+        return False
+    if user is None:
+        return True
+    return is_enabled_for_user(user)
+
+
+def ensure_enabled_for_user(user) -> None:
+    """Raise AIError(403) when the user's facility has AI switched off. Every AI
+    endpoint calls this before building a prompt."""
+    if not is_enabled_for_user(user):
+        raise AIError('AI features are turned off for your facility.', status=403)
 
 
 def extract_json(text: str) -> dict:
