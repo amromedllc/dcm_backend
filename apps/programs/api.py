@@ -20,6 +20,7 @@ from apps.central_library.models import (
     CentralProgram, CentralProgramFolder, CentralTarget,
     ChangelogEntry, KnowledgeBaseMedia, KnowledgeBaseModule, KnowledgeBaseTopic,
 )
+from shared import ai_client
 from shared.ai_client import AIError
 from shared.html_sanitize import sanitize_kb_html
 from apps.central_library.settings_service import (
@@ -2352,6 +2353,7 @@ def draft_assessment_with_ai(request, data: AssessmentDraftRequest):
     the draft goes back to the person to review and edit first."""
     require_permission(request, 'org_programs_create')
     try:
+        ai_client.ensure_enabled_for_user(request.user)
         return generate_assessment_draft(data.description)
     except AIError as exc:
         raise HttpError(exc.status, str(exc)) from exc
@@ -3758,6 +3760,7 @@ def draft_program_with_ai(request, data: ProgramDraftRequest):
     areas = list(_settings_qs(TreatmentArea, request).filter(is_active=True).values_list('name', flat=True))
     tags = list(_settings_qs(ProgramTag, request).filter(is_active=True).values_list('name', flat=True))
     try:
+        ai_client.ensure_enabled_for_user(request.user)
         return generate_program_draft(data.description, areas, tags)
     except AIError as exc:
         raise HttpError(exc.status, str(exc)) from exc

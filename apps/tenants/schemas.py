@@ -73,6 +73,7 @@ class TpmsAdminEmailSettingSchema(Schema):
     admin_id: int
     facility_name: str = ''
     email_notifications_enabled: bool
+    ai_enabled: bool = False
 
 
 class TpmsAdminIdSeed(Schema):
@@ -114,12 +115,14 @@ class TpmsAdminIdCreate(Schema):
     admin_id: int
     facility_name: str = ''
     email_notifications_enabled: bool = False
+    ai_enabled: bool = False
 
 
 class TpmsAdminEmailSettingUpdate(Schema):
     admin_id: int | None = None
     facility_name: str | None = None
     email_notifications_enabled: bool | None = None
+    ai_enabled: bool | None = None
 
 
 class SuperadminAPIKeyCreate(Schema):
