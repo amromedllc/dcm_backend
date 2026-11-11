@@ -5,6 +5,7 @@ from pydantic import Field, field_validator
 
 from shared.schema_types import NameStr200, NonEmptyStr, SlugStr
 from .models import Program, Target, PromptingTemplate, ProgramDataField, Lesson, SubTargetMeasurementType
+from .services import validate_auto_open_config
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +35,7 @@ def _require_phase_keys(phases: list[dict] | None) -> list[dict] | None:
     for p in phases:
         if not isinstance(p, dict) or not str(p.get('phase') or '').strip():
             raise ValueError('each phase must be an object with a non-empty "phase" key')
+        validate_auto_open_config(p)
     return phases
 
 

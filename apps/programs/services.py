@@ -475,14 +475,32 @@ def _maybe_create_phase_line(target: Target, old_status: str, next_status: str, 
         pass
 
 
+
+def validate_auto_open_config(phase: dict) -> None:
+    for key in ('auto_open_waiting', 'auto_open_all'):
+        if key in phase and type(phase[key]) is not bool:
+            raise ValueError(f'{key} must be a boolean')
+    if 'auto_open_status' in phase and phase['auto_open_status'] not in ('probe', 'acquisition'):
+        raise ValueError('auto_open_status must be probe or acquisition')
+    if 'auto_open_direction' in phase and phase['auto_open_direction'] not in ('first', 'last', 'all'):
+        raise ValueError('auto_open_direction must be first, last, or all')
+    if 'auto_open_max_targets' in phase:
+        count = phase['auto_open_max_targets']
+        if type(count) is not int or count < 1:
+            raise ValueError('auto_open_max_targets must be a positive integer')
+
 def _maybe_auto_open_waiting_targets(target: Target, session_run_id: int) -> None:
+    if target.status != 'mastered':
+        return
     wf = target.workflow_template or target.program.workflow_template
     if not wf:
         return
     phase_config = next((p for p in wf.phases if p.get('phase') == 'mastered'), None)
     if not phase_config or not phase_config.get('auto_open_waiting'):
         return
-    if target.status not in {'mastered', 'closed', 'maintenance'}:
+    try:
+        validate_auto_open_config(phase_config)
+    except ValueError:
         return
 
     open_status = phase_config.get('auto_open_status') or 'acquisition'
@@ -494,7 +512,7 @@ def _maybe_auto_open_waiting_targets(target: Target, session_run_id: int) -> Non
 
     currently_open = target.program.targets.exclude(id=target.id).filter(status=open_status).count()
     slots = max(0, max_open - currently_open)
-    if phase_config.get('auto_open_all'):
+    if phase_config.get('auto_open_all') or direction == 'all':
         slots = target.program.targets.filter(status='waiting').count()
     if slots <= 0:
         return
