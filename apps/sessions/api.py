@@ -309,11 +309,11 @@ def _build_trial_summary(session_run: SessionRun) -> list[TrialSummaryItem]:
     if behavior_targets:
         rows = list(
             BehaviorEvent.objects
-            .filter(session_run=session_run, target_id__in=behavior_targets, observation_ended_at__isnull=True)
-            .values('target_id', 'target_name', 'frequency_count', 'duration_seconds')
+            .filter(session_run=session_run, target_id__in=behavior_targets)
+            .values('target_id', 'target_name', 'frequency_count', 'duration_seconds', 'occurred_at', 'observation_ended_at')
         )
         result += _behavior_summary_items(
-            rows, behavior_targets, _session_window_seconds(session_run),
+            rows, behavior_targets, _session_window_seconds(session_run), session_run,
         )
     return result
 
@@ -353,8 +353,8 @@ def _trial_summaries_for_sessions(sessions: list[SessionRun]) -> dict[int, list[
     if all_behavior_target_ids:
         for row in (
             BehaviorEvent.objects
-            .filter(session_run_id__in=session_ids, target_id__in=all_behavior_target_ids, observation_ended_at__isnull=True)
-            .values('session_run_id', 'target_id', 'target_name', 'frequency_count', 'duration_seconds')
+            .filter(session_run_id__in=session_ids, target_id__in=all_behavior_target_ids)
+            .values('session_run_id', 'target_id', 'target_name', 'frequency_count', 'duration_seconds', 'occurred_at', 'observation_ended_at')
         ):
             behavior_rows_by_session.setdefault(row['session_run_id'], []).append(row)
 
@@ -379,6 +379,7 @@ def _trial_summaries_for_sessions(sessions: list[SessionRun]) -> dict[int, list[
                 behavior_rows_by_session.get(session.id, []),
                 behavior_targets,
                 _session_window_seconds(session),
+                session,
             )
         result[session.id] = items
     return result
@@ -430,11 +431,14 @@ def _session_window_seconds(session_run: SessionRun) -> float | None:
 
 def _behavior_summary_items(
     rows: list[dict], target_measurement: dict[int, str], window_seconds: float | None,
+    session=None,
 ) -> list[TrialSummaryItem]:
     """rows: BehaviorEvent .values('target_id','target_name','frequency_count','duration_seconds')
     already scoped to one session and to target_measurement's keys."""
     grouped: dict[int, dict] = {}
     for r in rows:
+        if r.get('observation_ended_at') is not None and target_measurement.get(r['target_id']) not in RATE_MEASUREMENTS:
+            continue
         g = grouped.setdefault(r['target_id'], {'name': r['target_name'], 'count': 0, 'durations': []})
         g['count'] += r['frequency_count']
         if r['duration_seconds'] is not None:
@@ -448,9 +452,12 @@ def _behavior_summary_items(
         if measurement in DURATION_MEASUREMENTS:
             value = aggregate_measurement(measurement, durations=g['durations'])
         elif measurement in RATE_MEASUREMENTS:
+            from apps.programs.measurements import session_rate_statistics
+            count, seconds = session_rate_statistics(session, target_id, [r for r in rows if r['target_id'] == target_id]) if session else (g['count'], window_seconds)
             value = aggregate_measurement(
-                measurement, event_count=g['count'], seconds_elapsed=window_seconds,
+                measurement, event_count=count, seconds_elapsed=seconds,
             )
+            g['count'] = count
         else:
             value = float(g['count'])
         items.append(TrialSummaryItem(
@@ -874,6 +881,7 @@ def start_session(request, data: SessionStartRequest):
     snapshot = build_program_snapshot(
         client_id=data.client_id,
         lesson_id=lesson_id,
+        rate_observation_mode=data.rate_observation_mode,
         restrict_to_lesson=False,
     )
     if lesson_obj and not snapshot['programs']:
@@ -951,6 +959,7 @@ def start_group_session(request, data: GroupSessionStartRequest):
             snapshot = build_program_snapshot(
                 client_id=selection.client_id,
                 lesson_id=None,
+                rate_observation_mode=data.rate_observation_mode,
                 restrict_to_lesson=False,
                 program_ids=selection.program_ids or None,
             )
@@ -1218,8 +1227,10 @@ def _validate_scatterplot_observation(session: SessionRun, data: BehaviorEventCr
         return
     target = next((target for program in session.program_snapshot.get('programs', [])
                    for target in program.get('targets', []) if target.get('id') == data.target_id), None)
-    if not target or target.get('measurement_type') != 'scatterplot':
-        raise HttpError(400, 'Observed periods require a scatterplot target in this session snapshot')
+    if not target or target.get('measurement_type') not in {'scatterplot', 'rate'}:
+        raise HttpError(400, 'Observed periods require a scatterplot or rate target in this session snapshot')
+    if target.get('measurement_type') == 'rate' and target.get('measurement', 'rate_per_minute') not in RATE_MEASUREMENTS:
+        raise HttpError(400, 'Rate observation periods require Rate / minute or Rate / hour measurement')
     end = data.observation_ended_at
     limit = session.ended_at or getattr(session, 'submitted_at', None) or getattr(session, 'reviewed_at', None) or timezone.now()
     if data.occurred_at < session.started_at or end > limit or end > timezone.now():
@@ -1239,7 +1250,7 @@ def _get_or_create_behavior(session_id: int, data: BehaviorEventCreateRequest) -
         # Never silently acknowledge a different observed interval on a reused ID.
         if not created and (data.observation_ended_at is not None or event.observation_ended_at is not None):
             if any(getattr(event, key) != value for key, value in payload.items()):
-                raise HttpError(409, 'Conflicting scatterplot observation for this client_event_id')
+                raise HttpError(409, 'Conflicting observation for this client_event_id')
         return event, created
     return BehaviorEvent.objects.create(session_run_id=session_id, **payload), True
 

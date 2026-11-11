@@ -65,7 +65,8 @@ class BehaviorServiceTests(TestCase):
         with patch.object(services.BehaviorEvent, 'objects') as em, patch.object(services.Target, 'objects') as tm, \
              patch.object(services.SessionRun, 'objects') as sm, \
              patch.object(services, '_module_name_map', return_value={}), \
-             patch.object(services, '_submodule_name_map', return_value={}), services.dj_timezone.override(timezone.utc):
+             patch.object(services, '_submodule_name_map', return_value={}), \
+             patch.object(services, '_target_rate_data', return_value=[]), services.dj_timezone.override(timezone.utc):
             em.filter.return_value.filter.return_value.values.return_value = events
             tm.filter.return_value.only.return_value = [target]
             sm.filter.return_value.only.return_value = sessions
