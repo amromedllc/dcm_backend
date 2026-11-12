@@ -118,10 +118,19 @@ connect endpoint; TherapyPMS's login response identifies the facility, and the
 response returns its connection settings (HTTP 200). The facility must already be
 mapped to this organization. Settings resolve the current user's TherapyPMS
 practice ID, a matching connection email, or the organization's sole facility.
-The page remembers an automatically detected facility for the current user in the
-browser session and passes its `facility_admin_id` to disconnect, pull, and history
-requests. An optional ID on connect is checked against the login response for
+The page prioritizes the logged-in user’s mapped facility over a saved browser
+selection. Users without a mapped facility can retain the automatically detected
+facility in the browser session. It passes `facility_admin_id` to disconnect, pull,
+and history requests. An optional ID on connect is checked against the login response for
 older callers; it never overrides the returned TherapyPMS facility ID.
+
+After any successful user login (including MFA completion), the user’s connected facility
+automatically queues an appointment pull even without a previous manual pull or
+an employee or client ID on the account. This applies to admin, supervisor, staff,
+caregiver, and reporting roles. Normal login authorization remains required. The range covers one year of history and the next 90 days; later
+pulls include the facility checkpoint to fetch edits. An active facility job is
+reused. A running Celery worker is required. Connecting a facility during an
+existing session enables this on the next login; manual pulls remain available.
 
 Credentials are encrypted on `OrganizationTpmsAdminId`, and cached tokens include
 both organization and facility IDs. Each queued pull records `facility_admin_id`

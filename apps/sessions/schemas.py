@@ -106,7 +106,7 @@ class TrialSummaryItem(Schema):
     correct_count: int
     pct_correct: float
     measurement: str = ''
-    measurement_value: float = 0.0
+    measurement_value: float | None = 0.0
     measurement_label: str = ''
 
 
@@ -155,6 +155,7 @@ class GroupSessionClientSelection(Schema):
 
 
 class GroupSessionStartRequest(Schema):
+    rate_observation_mode: Literal['session', 'target_windows'] = 'session'
     service_setting: Literal['Home', 'Office', 'School', 'Community', 'Other', 'Telehealth', ''] = ''
     clients: list[GroupSessionClientSelection]
     title: str = ''
@@ -163,6 +164,7 @@ class GroupSessionStartRequest(Schema):
 
 
 class SessionStartRequest(Schema):
+    rate_observation_mode: Literal['session', 'target_windows'] = 'session'
     service_setting: Literal['Home', 'Office', 'School', 'Community', 'Other', 'Telehealth', ''] = ''
     client_id: int
     appointment_id: int | None = None
@@ -269,7 +271,7 @@ class BehaviorEventCreateRequest(Schema):
     frequency_count: int = Field(default=1, ge=0)
     severity: BehaviorEvent.Severity | Literal[''] = ''
     notes: str = ''
-    client_event_id: str | None = None
+    client_event_id: str | None = Field(default=None, min_length=1, max_length=64)
 
     @model_validator(mode='after')
     def validate_observation(self):

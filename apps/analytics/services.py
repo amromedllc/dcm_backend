@@ -1,5 +1,5 @@
 from collections import Counter, defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from typing import TypedDict
 
 from django.utils import timezone as dj_timezone
@@ -535,6 +535,81 @@ def get_behavior_data_by_day(
             'measurement_label': MEASUREMENT_LABELS.get(measurement, 'Frequency'),
             'measurement_unit': MEASUREMENT_UNIT.get(measurement, 'count'),
         })
+    # Explicit rate periods use their own denominator, including observed
+    # zero-occurrence days. Legacy snapshots keep their original session basis.
+    rate_ids = [tid for tid, meta in target_meta.items() if meta['measurement'] in RATE_MEASUREMENTS]
+    if rate_ids:
+        explicit = _target_rate_data(rate_ids, target_meta, date_from, date_to, mod_names, sub_names)
+        replaced = {(point['date'], point['target_id']) for point in explicit}
+        result = [point for point in result if (point['date'], point['target_id']) not in replaced]
+        result.extend(explicit)
+    return sorted(result, key=lambda point: (point['date'], point['target_id']))
+
+
+def _target_rate_data(target_ids, metadata, date_from, date_to, mod_names, sub_names):
+    from apps.programs.measurements import rate_statistics, uses_target_windows
+
+    zone = dj_timezone.get_current_timezone()
+    lower = datetime.combine(date_from, time.min, tzinfo=zone)
+    upper = datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=zone)
+    # Include periods crossing the selected date range and all occurrences in
+    # their sessions, then clip numerators and coverage to each chart bucket.
+    from django.db.models import Q
+    rows = list(BehaviorEvent.objects.filter(target_id__in=target_ids).filter(
+        Q(occurred_at__gte=lower, occurred_at__lt=upper)
+        | Q(observation_ended_at__gt=lower, occurred_at__lt=upper),
+    ).values('target_id', 'target_name', 'session_run_id', 'occurred_at',
+             'observation_ended_at', 'frequency_count'))
+    sessions = {session.id: session for session in SessionRun.objects.filter(
+        id__in={row['session_run_id'] for row in rows},
+    ).only('id', 'program_snapshot', 'started_at', 'ended_at', 'submitted_at', 'reviewed_at')}
+    grouped = defaultdict(list)
+    for row in rows:
+        grouped[(row['target_id'], row['session_run_id'])].append(row)
+    daily = {}
+    for (tid, session_id), events in grouped.items():
+        session = sessions.get(session_id)
+        if not session:
+            continue
+        explicit = uses_target_windows(session.program_snapshot, tid) or any(e['observation_ended_at'] for e in events)
+        legacy = None if explicit else (session.started_at, session.ended_at or session.submitted_at or session.reviewed_at)
+        day = date_from
+        while day <= date_to:
+            start = datetime.combine(day, time.min, tzinfo=zone)
+            end = datetime.combine(day + timedelta(days=1), time.min, tzinfo=zone)
+            count, seconds = rate_statistics(events, lower=start, upper=end, legacy_window=legacy)
+            # Unknown coverage remains visible for occurrence days, never zero.
+            has_events = any(e['observation_ended_at'] is None and start <= e['occurred_at'] < end for e in events)
+            if seconds is not None or has_events:
+                key = (day, tid)
+                entry = daily.setdefault(key, {'count': 0, 'seconds': 0, 'unknown': False, 'windows': [], 'name': events[0]['target_name']})
+                entry['count'] += count
+                entry['seconds'] += seconds or 0
+                entry['unknown'] |= seconds is None
+                week = day - timedelta(days=day.weekday())
+                month = day.replace(day=1)
+                next_month = (month.replace(day=28) + timedelta(days=4)).replace(day=1)
+                def bucket(first, after):
+                    return rate_statistics(events,
+                        lower=max(lower, datetime.combine(first, time.min, tzinfo=zone)),
+                        upper=min(upper, datetime.combine(after, time.min, tzinfo=zone)), legacy_window=legacy)[1]
+                entry['windows'].append({'session_id': session_id, 'daily': seconds,
+                    'weekly': bucket(week, week + timedelta(days=7)),
+                    'monthly': bucket(month, next_month), 'session': bucket(date_from, date_to + timedelta(days=1))})
+            day += timedelta(days=1)
+    result = []
+    for (day, tid), data in daily.items():
+        meta = metadata[tid]
+        measurement = meta['measurement']
+        seconds = None if data['unknown'] else data['seconds']
+        result.append({'date': day, 'target_id': tid, 'target_name': data['name'],
+            'module_id': meta['module_id'], 'module_name': mod_names.get(meta['module_id']),
+            'submodule_id': meta['submodule_id'], 'submodule_name': sub_names.get(meta['submodule_id']),
+            'frequency': data['count'], 'total_duration_seconds': 0, 'duration_count': 0,
+            'min_duration_seconds': 0, 'max_duration_seconds': 0, 'avg_duration_seconds': 0,
+            'measurement': measurement, 'measurement_value': chart_rate(data['count'], seconds, measurement == 'rate_per_hour'),
+            'observation_seconds': seconds, 'observation_windows': data['windows'],
+            'measurement_label': MEASUREMENT_LABELS.get(measurement, ''), 'measurement_unit': MEASUREMENT_UNIT.get(measurement, '')})
     return result
 
 

@@ -148,6 +148,7 @@ def resolve_session_lesson(client_id, explicit_lesson_id=None, appointment=None,
 def build_program_snapshot(
     client_id: int, lesson_id: int | None = None, restrict_to_lesson: bool = False,
     program_ids: list[int] | None = None,
+    rate_observation_mode: str = 'session',
 ) -> dict:
     """
     Captures the full program/target configuration as an immutable JSONB snapshot.
@@ -221,6 +222,7 @@ def build_program_snapshot(
                 'status': target.status,
                 'measurement_type': target.measurement_type,
                 'measurement': target.measurement,
+                'rate_observation_mode': rate_observation_mode if target.measurement_type == 'rate' and target.measurement in {'rate_per_minute', 'rate_per_hour'} else None,
                 'timer_type': target.timer_type,
                 'sub_items': _snapshot_sub_items(target),
                 'sub_item_progression': target.sub_item_progression,

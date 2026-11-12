@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from django.db.models import Min, Max, Sum
+from django.db.models import Sum
 
 from apps.programs.models import Target, TargetPromptLevelChange, TargetStatusChange, TargetSubItem, TargetSubItemStatusChange
 from apps.programs.measurements import (
@@ -118,16 +118,22 @@ def evaluate_session_mastery(session_run) -> list[Target]:
         .distinct()
     )
     behavior_target_ids = (
-        BehaviorEvent.objects.filter(observation_ended_at__isnull=True)
+        BehaviorEvent.objects
         .filter(session_run=session_run)
         .values_list('target_id', flat=True)
         .distinct()
     )
-    target_ids = set(trial_target_ids) | set(behavior_target_ids)
+    trial_target_ids = set(trial_target_ids)
+    occurrence_target_ids = set(BehaviorEvent.objects.filter(
+        session_run=session_run, observation_ended_at__isnull=True,
+    ).values_list('target_id', flat=True))
+    target_ids = trial_target_ids | set(behavior_target_ids)
 
     advanced: list[Target] = []
     for target in Target.objects.filter(id__in=target_ids).select_related('workflow_template', 'program__workflow_template'):
         if target.mastery_mode != 'automatic':
+            continue
+        if target.measurement_type != 'rate' and target.id not in occurrence_target_ids | trial_target_ids:
             continue
         if _advance_if_criteria_met(target, session_run.id):
             advanced.append(target)
@@ -263,21 +269,7 @@ def _limit_trials_if_configured(trials_qs, criteria: dict):
     return trials_qs.filter(trial_number__in=trial_numbers)
 
 
-def _observation_seconds(session, events) -> float | None:
-    """Length of the window a rate is measured over: the session's own
-    start→end if known, else the span between the first and last recorded
-    event. None when neither is usable."""
-    start = session.started_at
-    end = session.ended_at or session.submitted_at or session.reviewed_at
-    if not start or not end or end <= start:
-        bounds = events.aggregate(start=Min('occurred_at'), end=Max('occurred_at'))
-        start, end = bounds['start'], bounds['end']
-    if not start or not end or end <= start:
-        return None
-    return (end - start).total_seconds()
-
-
-def _behavior_metric_value(target: Target, session, criteria: dict) -> tuple[int, float]:
+def _behavior_metric_value(target: Target, session, criteria: dict) -> tuple[int, float | None]:
     """Returns (sample_count, value) for behavior-style workflow objectives.
 
     `minimum_trials` maps to minimum behavior events for behavior targets, keeping
@@ -289,6 +281,15 @@ def _behavior_metric_value(target: Target, session, criteria: dict) -> tuple[int
     total_events = events.aggregate(total=Sum('frequency_count'))['total'] or 0
     objective_key = str(criteria.get('objective_key') or '').lower()
 
+    if 'rate_' in objective_key or (not objective_key and (target.measurement in RATE_MEASUREMENTS or target.measurement_type == 'rate')):
+        from .measurements import session_rate_statistics
+        rows = list(BehaviorEvent.objects.filter(session_run=session, target_id=target.id).values(
+            'occurred_at', 'observation_ended_at', 'frequency_count',
+        ))
+        count, seconds = session_rate_statistics(session, target.id, rows)
+        measurement = ('rate_per_minute' if 'per_minute' in objective_key else 'rate_per_hour') if objective_key else (target.measurement or 'rate_per_minute')
+        return count, aggregate_measurement(measurement, event_count=count, seconds_elapsed=seconds)
+
     # No explicit workflow objective_key — the target's own `measurement`
     # fully decides which metric to roll up to (min/max/avg/total duration,
     # rate per hour/minute, or raw frequency).
@@ -297,10 +298,6 @@ def _behavior_metric_value(target: Target, session, criteria: dict) -> tuple[int
         if m in DURATION_MEASUREMENTS:
             durations = [d for d in events.values_list('duration_seconds', flat=True) if d is not None]
             return len(durations), aggregate_measurement(m, durations=durations)
-        if m in RATE_MEASUREMENTS:
-            return total_events, aggregate_measurement(
-                m, event_count=total_events, seconds_elapsed=_observation_seconds(session, events),
-            )
         return total_events, float(total_events)  # frequency / percent_correct
 
     if target.measurement_type == Target.MeasurementType.DURATION or 'duration' in objective_key:
@@ -314,20 +311,6 @@ def _behavior_metric_value(target: Target, session, criteria: dict) -> tuple[int
         if 'avg_duration' in objective_key:
             return len(durations), float(sum(durations) / len(durations))
         return len(durations), float(sum(durations))
-
-    if target.measurement_type == Target.MeasurementType.RATE or 'rate_' in objective_key:
-        start = session.started_at
-        end = session.ended_at or session.submitted_at or session.reviewed_at
-        if not start or not end or end <= start:
-            bounds = events.aggregate(start=Min('occurred_at'), end=Max('occurred_at'))
-            start = bounds['start']
-            end = bounds['end']
-        if not start or not end or end <= start:
-            return total_events, float(total_events)
-        hours = max((end - start).total_seconds() / 3600, 1 / 60)
-        if 'per_minute' in objective_key:
-            return total_events, float(total_events / (hours * 60))
-        return total_events, float(total_events / hours)
 
     return total_events, float(total_events)
 
@@ -360,7 +343,7 @@ def _session_criteria_result(target: Target, session, phase_config: dict, criter
         'increase_avg_duration', 'reduce_avg_duration',
     }:
         total, value = _behavior_metric_value(target, session, criteria)
-        if total < min_trials:
+        if value is None or total < min_trials:
             return None
         return value <= threshold if threshold_direction == 'max' else value >= threshold
 
@@ -400,6 +383,8 @@ def _recent_sessions_for_target(target: Target, limit: int, criteria: dict | Non
         if _uses_behavior_events(target, criteria)
         else {'trial_events__target_id': target.id}
     )
+    if target.measurement_type == 'rate':
+        event_filter.pop('behavior_events__observation_ended_at__isnull', None)
     return list(
         SessionRun.objects
         .filter(
@@ -475,14 +460,32 @@ def _maybe_create_phase_line(target: Target, old_status: str, next_status: str, 
         pass
 
 
+
+def validate_auto_open_config(phase: dict) -> None:
+    for key in ('auto_open_waiting', 'auto_open_all'):
+        if key in phase and type(phase[key]) is not bool:
+            raise ValueError(f'{key} must be a boolean')
+    if 'auto_open_status' in phase and phase['auto_open_status'] not in ('probe', 'acquisition'):
+        raise ValueError('auto_open_status must be probe or acquisition')
+    if 'auto_open_direction' in phase and phase['auto_open_direction'] not in ('first', 'last', 'all'):
+        raise ValueError('auto_open_direction must be first, last, or all')
+    if 'auto_open_max_targets' in phase:
+        count = phase['auto_open_max_targets']
+        if type(count) is not int or count < 1:
+            raise ValueError('auto_open_max_targets must be a positive integer')
+
 def _maybe_auto_open_waiting_targets(target: Target, session_run_id: int) -> None:
+    if target.status != 'mastered':
+        return
     wf = target.workflow_template or target.program.workflow_template
     if not wf:
         return
     phase_config = next((p for p in wf.phases if p.get('phase') == 'mastered'), None)
     if not phase_config or not phase_config.get('auto_open_waiting'):
         return
-    if target.status not in {'mastered', 'closed', 'maintenance'}:
+    try:
+        validate_auto_open_config(phase_config)
+    except ValueError:
         return
 
     open_status = phase_config.get('auto_open_status') or 'acquisition'
@@ -494,7 +497,7 @@ def _maybe_auto_open_waiting_targets(target: Target, session_run_id: int) -> Non
 
     currently_open = target.program.targets.exclude(id=target.id).filter(status=open_status).count()
     slots = max(0, max_open - currently_open)
-    if phase_config.get('auto_open_all'):
+    if phase_config.get('auto_open_all') or direction == 'all':
         slots = target.program.targets.filter(status='waiting').count()
     if slots <= 0:
         return

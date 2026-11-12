@@ -50,7 +50,7 @@ def _mark_failed(job: PullJob, error: str) -> None:
 
 
 def queue_login_appointment_sync(org_id: int, facility_admin_id: int) -> PullJob | None:
-    """Queue one facility-wide incremental sync after its initial manual pull."""
+    """Queue a deduplicated facility sync on login, including its initial pull."""
     with transaction.atomic():
         facility = OrganizationTpmsAdminId.objects.select_for_update().filter(
             organization_id=org_id,
@@ -63,13 +63,6 @@ def queue_login_appointment_sync(org_id: int, facility_admin_id: int) -> PullJob
                 org_id, facility_admin_id,
             )
             return None
-        if facility.last_appointment_sync_at is None:
-            logger.info(
-                'appointment_auto_sync not_queued org=%s facility=%s reason=initial_sync_missing',
-                org_id, facility_admin_id,
-            )
-            return None
-
         active_job = PullJob.objects.filter(
             job_type=PullJob.JobType.APPOINTMENTS,
             status__in=(PullJob.Status.PENDING, PullJob.Status.RUNNING),
@@ -92,15 +85,18 @@ def queue_login_appointment_sync(org_id: int, facility_admin_id: int) -> PullJob
             params={
                 'facility_admin_id': facility_admin_id,
                 'from_date': from_date.isoformat(),
-                'to_date': today.isoformat(),
-                'updated_after': facility.last_appointment_sync_at.isoformat(),
+                'to_date': (today + timedelta(days=90)).isoformat(),
+                'updated_after': (
+                    facility.last_appointment_sync_at.isoformat()
+                    if facility.last_appointment_sync_at else None
+                ),
                 'auto_sync': True,
             },
         )
         logger.info(
             'appointment_auto_sync job_created org=%s facility=%s job=%s from=%s to=%s updated_after=%s',
-            org_id, facility_admin_id, job.pk, from_date, today,
-            facility.last_appointment_sync_at.isoformat(),
+            org_id, facility_admin_id, job.pk, from_date, job.params['to_date'],
+            job.params['updated_after'],
         )
 
         def dispatch() -> None:
