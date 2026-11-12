@@ -130,19 +130,6 @@ def _queue_login_appointment_sync(user: User, tenant_id: int) -> None:
             tenant_id, user.pk, user.role,
         )
         return
-    if user.role == User.Role.CAREGIVER and user.external_client_id is None:
-        logger.info(
-            'appointment_auto_sync login_not_eligible org=%s user=%s role=%s reason=missing_client_link',
-            tenant_id, user.pk, user.role,
-        )
-        return
-    if user.role != User.Role.CAREGIVER and user.external_employee_id is None:
-        logger.info(
-            'appointment_auto_sync login_not_eligible org=%s user=%s role=%s reason=missing_employee_link',
-            tenant_id, user.pk, user.role,
-        )
-        return
-
     logger.info(
         'appointment_auto_sync login_eligible org=%s user=%s role=%s facility=%s',
         tenant_id, user.pk, user.role, user.external_admin_id,
@@ -152,7 +139,7 @@ def _queue_login_appointment_sync(user: User, tenant_id: int) -> None:
         job = queue_login_appointment_sync(tenant_id, user.external_admin_id)
         if job is None:
             logger.info(
-                'appointment_auto_sync not_queued org=%s user=%s facility=%s reason=facility_not_ready_or_initial_sync_missing',
+                'appointment_auto_sync not_queued org=%s user=%s facility=%s reason=facility_not_connected',
                 tenant_id, user.pk, user.external_admin_id,
             )
         else:

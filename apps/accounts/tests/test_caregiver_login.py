@@ -6,6 +6,7 @@ closes — a TPMS client-portal (account_type='Client') login previously got
 its patient id misread as an employee id and silently bound to the
 practice with role='staff'.
 """
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.db import IntegrityError
@@ -130,10 +131,10 @@ class LoginDispatchTests(TestCase):
         except ValueError:
             expected_from_date = today.replace(year=today.year - 1, day=28)
         self.assertEqual(job.params['from_date'], expected_from_date.isoformat())
-        self.assertEqual(job.params['to_date'], today.isoformat())
+        self.assertEqual(job.params['to_date'], (today + timedelta(days=90)).isoformat())
         self.assertEqual(tokens.role, User.Role.CAREGIVER)
 
-    def test_client_login_does_not_auto_sync_before_initial_manual_pull(self):
+    def test_client_login_queues_first_sync_without_initial_manual_pull(self):
         facility = OrganizationTpmsAdminId.objects.get(organization=self.org, admin_id=501)
         facility.integration_platform = Organization.IntegrationPlatform.THERAPY_PMS
         facility.save(update_fields=['integration_platform'])
@@ -141,6 +142,7 @@ class LoginDispatchTests(TestCase):
             schema_context(self.org.schema_name),
             tenant_context(self.org.pk),
             patch('apps.integrations.tasks.run_pull_job.delay') as dispatch,
+            self.captureOnCommitCallbacks(execute=True),
         ):
             Client.objects.create(
                 first_name='Antony', last_name='R', external_id='13086',
@@ -148,8 +150,10 @@ class LoginDispatchTests(TestCase):
             )
             self._login(CLIENT_PORTAL_LOGIN_PAYLOAD)
 
-        dispatch.assert_not_called()
-        self.assertFalse(PullJob.objects.filter(job_type=PullJob.JobType.APPOINTMENTS).exists())
+        job = PullJob.objects.get(job_type=PullJob.JobType.APPOINTMENTS)
+        dispatch.assert_called_once_with(job_id=job.id, org_id=self.org.pk)
+        self.assertEqual(job.params['facility_admin_id'], 501)
+        self.assertIsNone(job.params['updated_after'])
 
     def test_provider_login_queues_incremental_sync_after_initial_manual_sync(self):
         facility = OrganizationTpmsAdminId.objects.get(organization=self.org, admin_id=501)
