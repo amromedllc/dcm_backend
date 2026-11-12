@@ -188,6 +188,15 @@ def delete_note_template(request, template_id: int):
         raise HttpError(404, 'Template not found')
     return 204, None
 
+@router.get('/templates/custom', response=list[NoteTemplateSchema])
+def list_custom_templates(request):
+    """New-form-builder custom templates created by superadmin. Old-form-builder
+    templates are a separate source (TherapyPMS, via
+    /integrations/old-form-builder/assigned-notes) — they carry their own ready
+    URL and are not NoteTemplate rows, so they are not mixed in here."""
+    _require_template_read(request)
+    return list(NoteTemplate.objects.filter(is_active=True, template_type='custom'))
+
 
 # ---------------------------------------------------------------------------
 # Layout settings — optional PDF export header/footer, one per template type

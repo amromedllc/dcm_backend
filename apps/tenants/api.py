@@ -17,6 +17,8 @@ from .schemas import (
     OrganizationAuthenticationSettingsUpdate,
     OrganizationIntegrationSettingsSchema,
     OrganizationIntegrationSettingsUpdate,
+    SuperadminFacilityIntegrationSchema,
+    FacilityFormBuilderUpdate,
     OrganizationPracticeEmailSettingsSchema,
     PullJobSchema,
     TherapyPmsConnectRequest,
@@ -165,6 +167,84 @@ def _serialize_practice_email_settings() -> list[dict]:
 def list_superadmin_practice_email_settings(request):
     _require_superadmin(request)
     return _serialize_practice_email_settings()
+
+
+def _serialize_facility_integration(facility: OrganizationTpmsAdminId) -> dict:
+    # Explicit allowlist: encrypted credentials and cached tokens never leave the server.
+    return {
+        'id': facility.pk,
+        'organization_id': facility.organization_id,
+        'organization_name': facility.organization.name,
+        'organization_active': facility.organization.is_active,
+        'form_builder_mode': facility.form_builder_mode,
+        'admin_id': facility.admin_id,
+        'facility_name': facility.facility_name,
+        'connected': facility.integration_platform == Organization.IntegrationPlatform.THERAPY_PMS,
+        'integration_email': facility.integration_email,
+        'last_appointment_sync_at': facility.last_appointment_sync_at,
+    }
+
+
+def _superadmin_integration_facility(request, mapping_id: int) -> OrganizationTpmsAdminId:
+    _require_superadmin(request)
+    # Organizations and facility mappings are shared tables. Resolve the selected
+    # mapping explicitly, rather than using the superadmin's current tenant.
+    try:
+        return OrganizationTpmsAdminId.objects.select_related('organization').get(pk=mapping_id)
+    except OrganizationTpmsAdminId.DoesNotExist:
+        raise HttpError(404, 'Facility not found')
+
+
+@router.get('/superadmin/facility-integrations', response=list[SuperadminFacilityIntegrationSchema])
+def list_superadmin_facility_integrations(request):
+    _require_superadmin(request)
+    facilities = OrganizationTpmsAdminId.objects.select_related('organization').order_by(
+        'organization__name', 'facility_name', 'admin_id',
+    )
+    return [_serialize_facility_integration(facility) for facility in facilities]
+
+
+@router.patch('/superadmin/facility-integrations/{mapping_id}/form-builder', response=SuperadminFacilityIntegrationSchema)
+def update_superadmin_facility_form_builder(request, mapping_id: int, data: FacilityFormBuilderUpdate):
+    facility = _superadmin_integration_facility(request, mapping_id)
+    from shared.audit import log_event
+
+    previous = facility.form_builder_mode
+    facility.form_builder_mode = data.form_builder_mode
+    facility.save(update_fields=['form_builder_mode', 'updated_at'])
+    log_event('superadmin_facility_form_builder_updated', request.user.pk, 'facility', facility.pk,
+              {'organization_id': facility.organization_id, 'admin_id': facility.admin_id,
+               'previous_mode': previous, 'form_builder_mode': data.form_builder_mode})
+    return _serialize_facility_integration(facility)
+
+
+@router.post('/superadmin/facility-integrations/{mapping_id}/connect', response=SuperadminFacilityIntegrationSchema)
+def connect_superadmin_facility_integration(request, mapping_id: int, data: TherapyPmsConnectRequest):
+    facility = _superadmin_integration_facility(request, mapping_id)
+    if not data.email.strip() or not data.password:
+        raise HttpError(400, 'Email and password are required.')
+    from apps.integrations.tpms_pull import connect_facility_from_login
+    from shared.audit import log_event
+
+    # The login response must match this exact mapped facility before anything is saved.
+    connection = connect_facility_from_login(
+        facility.organization, data.email.strip(), data.password, facility.admin_id,
+    )
+    log_event('superadmin_facility_integration_connected', request.user.pk,
+              'facility', facility.pk, {'organization_id': facility.organization_id, 'admin_id': facility.admin_id})
+    return _serialize_facility_integration(connection.facility)
+
+
+@router.post('/superadmin/facility-integrations/{mapping_id}/disconnect', response={204: None})
+def disconnect_superadmin_facility_integration(request, mapping_id: int):
+    facility = _superadmin_integration_facility(request, mapping_id)
+    from apps.integrations.tpms_pull import FacilityConnection, clear_therapy_pms_connection
+    from shared.audit import log_event
+
+    clear_therapy_pms_connection(FacilityConnection(facility.organization, facility))
+    log_event('superadmin_facility_integration_disconnected', request.user.pk,
+              'facility', facility.pk, {'organization_id': facility.organization_id, 'admin_id': facility.admin_id})
+    return 204, None
 
 
 @router.post('/superadmin/organizations', response={201: OrganizationPracticeEmailSettingsSchema})

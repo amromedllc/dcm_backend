@@ -126,6 +126,14 @@ class LessonNote(TenantAwareModel):
     docuseal_slug = models.CharField(max_length=64, blank=True)
     docuseal_completed_at = models.DateTimeField(null=True, blank=True)
 
+    # Old Form Builder (TherapyPMS) notes have no completion webhook or
+    # status API of their own — TPMS only ever hands back a ready-to-open
+    # url, never tells us when the staff member finished filling it in. Set
+    # when the staff member opens that url, so the panel can show the note
+    # as done instead of staying stuck on a "waiting" state it can never
+    # resolve.
+    old_form_opened_at = models.DateTimeField(null=True, blank=True)
+
     # session_run is a cross-app FK (-> dcm_sessions.SessionRun) and nullable,
     # so organization comes from the ambient context, not derived from it.
     _org_scoped_fk_fields = ('session_run', 'template')

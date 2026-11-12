@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Literal
 
 from ninja import Schema
 
@@ -27,6 +28,23 @@ class OrganizationIntegrationSettingsSchema(Schema):
     facility_admin_id: int | None = None
     integration_email: str = ''
     facilities: list[FacilityIntegrationSchema] = []
+
+
+class FacilityFormBuilderUpdate(Schema):
+    form_builder_mode: Literal['new', 'old', 'both']
+
+
+class SuperadminFacilityIntegrationSchema(Schema):
+    id: int
+    organization_id: int
+    organization_name: str
+    organization_active: bool
+    form_builder_mode: Literal['new', 'old', 'both'] = 'new'
+    admin_id: int
+    facility_name: str
+    connected: bool
+    integration_email: str
+    last_appointment_sync_at: datetime | None = None
 
 
 class OrganizationIntegrationSettingsUpdate(Schema):
