@@ -66,6 +66,14 @@ class OrganizationTpmsAdminId(models.Model):
     stays unambiguous — a given TPMS practice can never resolve to two
     different DCM organizations.
     """
+    class FormBuilderMode(models.TextChoices):
+        NEW = 'new', 'New Form Builder only'
+        OLD = 'old', 'Old Form Builder only'
+        BOTH = 'both', 'Both form builders'
+
+    form_builder_mode = models.CharField(
+        max_length=4, choices=FormBuilderMode.choices, default=FormBuilderMode.NEW,
+    )
     organization = models.ForeignKey(
         Organization,
         on_delete=models.CASCADE,

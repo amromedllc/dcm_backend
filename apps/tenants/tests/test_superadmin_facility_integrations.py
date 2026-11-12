@@ -20,7 +20,7 @@ class SuperadminFacilityIntegrationTests(SimpleTestCase):
                                    tpms_admin_ids=mock.Mock())
         self.facility = SimpleNamespace(
             pk=31, id=31, organization=self.org, organization_id=9, admin_id=702,
-            facility_name='South', integration_platform='', integration_email='',
+            facility_name='South', form_builder_mode='new', integration_platform='', integration_email='',
             integration_password_encrypted='', integration_admin_id=None,
             last_appointment_sync_at=None, save=mock.Mock(),
         )
@@ -51,7 +51,7 @@ class SuperadminFacilityIntegrationTests(SimpleTestCase):
         self.assertEqual(parsed['admin_id'], 702)
         self.assertEqual(set(parsed), {
             'id', 'organization_id', 'organization_name', 'organization_active',
-            'admin_id', 'facility_name', 'connected', 'integration_email', 'last_appointment_sync_at',
+            'admin_id', 'facility_name', 'connected', 'integration_email', 'last_appointment_sync_at', 'form_builder_mode',
         })
         self.assertNotIn('synthetic-ciphertext', str(result))
 

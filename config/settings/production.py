@@ -153,6 +153,8 @@ if AUTH_SESSION_MAX_HOURS <= 0:
 # TherapyPMS HTTP API (auth — encrypt → login; no direct DB password checks)
 TPMS_API_BASE_URL = env('TPMS_API_BASE_URL', default='https://app.therapypms.com')
 TPMS_API_TIMEOUT_SECONDS = env.int('TPMS_API_TIMEOUT_SECONDS', default=20)
+# Shared with TPMS's Progressly assigned-session-note endpoint. Server-only.
+TPMS_PROGRESSLY_SHARED_SECRET = env('TPMS_PROGRESSLY_SHARED_SECRET', default='')
 
 # Shared secret for verifying inbound SSO hand-off JWTs from TherapyPMS (see
 # apps.accounts.api.sso_login). Deliberately distinct from JWT_SECRET_KEY,

@@ -18,6 +18,7 @@ from .schemas import (
     OrganizationIntegrationSettingsSchema,
     OrganizationIntegrationSettingsUpdate,
     SuperadminFacilityIntegrationSchema,
+    FacilityFormBuilderUpdate,
     OrganizationPracticeEmailSettingsSchema,
     PullJobSchema,
     TherapyPmsConnectRequest,
@@ -175,6 +176,7 @@ def _serialize_facility_integration(facility: OrganizationTpmsAdminId) -> dict:
         'organization_id': facility.organization_id,
         'organization_name': facility.organization.name,
         'organization_active': facility.organization.is_active,
+        'form_builder_mode': facility.form_builder_mode,
         'admin_id': facility.admin_id,
         'facility_name': facility.facility_name,
         'connected': facility.integration_platform == Organization.IntegrationPlatform.THERAPY_PMS,
@@ -200,6 +202,20 @@ def list_superadmin_facility_integrations(request):
         'organization__name', 'facility_name', 'admin_id',
     )
     return [_serialize_facility_integration(facility) for facility in facilities]
+
+
+@router.patch('/superadmin/facility-integrations/{mapping_id}/form-builder', response=SuperadminFacilityIntegrationSchema)
+def update_superadmin_facility_form_builder(request, mapping_id: int, data: FacilityFormBuilderUpdate):
+    facility = _superadmin_integration_facility(request, mapping_id)
+    from shared.audit import log_event
+
+    previous = facility.form_builder_mode
+    facility.form_builder_mode = data.form_builder_mode
+    facility.save(update_fields=['form_builder_mode', 'updated_at'])
+    log_event('superadmin_facility_form_builder_updated', request.user.pk, 'facility', facility.pk,
+              {'organization_id': facility.organization_id, 'admin_id': facility.admin_id,
+               'previous_mode': previous, 'form_builder_mode': data.form_builder_mode})
+    return _serialize_facility_integration(facility)
 
 
 @router.post('/superadmin/facility-integrations/{mapping_id}/connect', response=SuperadminFacilityIntegrationSchema)
