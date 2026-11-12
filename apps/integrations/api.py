@@ -13,6 +13,7 @@ from .docuseal import (
     build_template_url,
     build_upload_url,
     create_session_note_submission,
+    fetch_submitter_completed_at,
     list_session_note_templates,
     list_uploaded_session_note_templates,
     verify_webhook_signature,
@@ -146,6 +147,7 @@ class SessionNoteStatusSchema(Schema):
     url: str | None = None
     completed: bool = False
     completed_at: str | None = None
+    old_form_completed: bool = False
 
 
 class SessionNoteStartRequest(Schema):
@@ -179,6 +181,7 @@ def _serialize_note_status(session_run_id: int, note) -> dict:
         'url': build_submission_url(note.docuseal_slug) if note and note.docuseal_slug else None,
         'completed': bool(note and note.docuseal_completed_at),
         'completed_at': note.docuseal_completed_at.isoformat() if note and note.docuseal_completed_at else None,
+        'old_form_completed': bool(note and note.old_form_opened_at),
     }
 
 
@@ -190,6 +193,11 @@ def get_session_note_status(request, session_run_id: int):
     if not any(user_has_permission(request.user, organization, p) for p in ('client_notes', 'notes_view', 'notes_create')):
         raise HttpError(403, 'Insufficient permissions')
     note = LessonNote.objects.filter(session_run_id=session_run_id).first()
+    if note and note.docuseal_submitter_id and not note.docuseal_completed_at:
+        completed_at = fetch_submitter_completed_at(request.user, note.docuseal_submitter_id)
+        if completed_at:
+            note.docuseal_completed_at = completed_at
+            note.save(update_fields=['docuseal_completed_at'])
     return _serialize_note_status(session_run_id, note)
 
 
@@ -211,6 +219,23 @@ def start_session_note(request, session_run_id: int, data: SessionNoteStartReque
     note.docuseal_completed_at = None
     note.save(update_fields=['docuseal_template_id', 'docuseal_submitter_id', 'docuseal_slug', 'docuseal_completed_at'])
 
+    return _serialize_note_status(session_run_id, note)
+
+
+@router.post('/old-form-builder/session-notes/{session_run_id}/opened', response=SessionNoteStatusSchema)
+def mark_old_form_note_opened(request, session_run_id: int):
+    """TherapyPMS gives us no completion signal for Old Form Builder notes —
+    the frontend calls this once the staff member opens the note's url, so
+    the panel can show it as done instead of staying on a "waiting" state
+    that can never resolve on its own."""
+    require_permission(request, 'notes_create')
+    from .form_builders import require_form_builder
+    require_form_builder(request, 'old')
+
+    _, note = _get_or_create_note(session_run_id)
+    if not note.old_form_opened_at:
+        note.old_form_opened_at = timezone.now()
+        note.save(update_fields=['old_form_opened_at'])
     return _serialize_note_status(session_run_id, note)
 
 
