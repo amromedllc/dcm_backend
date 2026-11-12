@@ -29,6 +29,18 @@ class OrganizationIntegrationSettingsSchema(Schema):
     facilities: list[FacilityIntegrationSchema] = []
 
 
+class SuperadminFacilityIntegrationSchema(Schema):
+    id: int
+    organization_id: int
+    organization_name: str
+    organization_active: bool
+    admin_id: int
+    facility_name: str
+    connected: bool
+    integration_email: str
+    last_appointment_sync_at: datetime | None = None
+
+
 class OrganizationIntegrationSettingsUpdate(Schema):
     integration_platform: str | None = None
 
