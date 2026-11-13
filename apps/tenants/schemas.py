@@ -80,6 +80,7 @@ class PullJobSchema(Schema):
     created_count: int
     updated_count: int
     skipped_count: int
+    cancelled_count: int
     error_message: str
     created_at: datetime
     started_at: datetime | None = None

@@ -33,12 +33,13 @@ def _mark_completed(job: PullJob, result: tpms_pull.PullResult) -> None:
     job.created_count = result.created
     job.updated_count = result.updated
     job.skipped_count = result.skipped
+    job.cancelled_count = result.cancelled
     job.error_message = '\n'.join(result.errors[:20])
     job.progress_current = job.progress_total
     job.finished_at = timezone.now()
     job.save(update_fields=[
         'status', 'created_count', 'updated_count', 'skipped_count',
-        'error_message', 'progress_current', 'finished_at',
+        'cancelled_count', 'error_message', 'progress_current', 'finished_at',
     ])
 
 
