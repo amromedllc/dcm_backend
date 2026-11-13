@@ -79,6 +79,7 @@ class PullResult:
     created: int = 0
     updated: int = 0
     skipped: int = 0
+    cancelled: int = 0
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -86,6 +87,7 @@ class PullResult:
             'created': self.created,
             'updated': self.updated,
             'skipped': self.skipped,
+            'cancelled': self.cancelled,
             'errors': self.errors[:20],
         }
 
@@ -831,6 +833,7 @@ def pull_appointments(
         total.created += chunk.created
         total.updated += chunk.updated
         total.skipped += chunk.skipped
+        total.cancelled += chunk.cancelled
         total.errors.extend(chunk.errors)
         if on_progress:
             on_progress(i, len(windows))
@@ -922,6 +925,24 @@ def _pull_appointments_window(
             # for a complete graph; we do not skip solely for missing Client.
             pass
         mapped.append(fields)
+
+    # `rows` always includes the plain from_date/to_date fetch (see `_fetch`
+    # default updates_only=False) even when updated_after also merges in a
+    # narrower updates-only fetch, so this is the full still-exists set for
+    # the window — anything previously synced but absent here was deleted
+    # or cancelled upstream and TPMS simply stopped returning it.
+    fetched_ext_ids = {m['external_id'] for m in mapped}
+    stale_qs = Appointment.objects.filter(
+        source=Appointment.Source.SYNCED,
+        status=Appointment.Status.SCHEDULED,
+        start_time__date__gte=from_date,
+        start_time__date__lte=to_date,
+    ).exclude(external_id__in=fetched_ext_ids)
+    if patient_ids:
+        stale_qs = stale_qs.filter(external_client_id__in=patient_ids)
+    if staff_ids:
+        stale_qs = stale_qs.filter(staff_id__in=staff_ids)
+    result.cancelled += stale_qs.update(status=Appointment.Status.CANCELLED)
 
     if not mapped:
         return result
