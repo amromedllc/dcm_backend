@@ -90,6 +90,73 @@ def fetch_assigned_session_notes(user, session_id: int = 0):
     return _parse_notes(payload)
 
 
+def fetch_created_session_notes(user, session_id: int) -> list[str]:
+    """Fetch the urls of notes TherapyPMS has actually recorded as created/
+    submitted for this session (sn-created-list) — unlike sn-assigned-list,
+    this reflects what the staff member has actually finished, so it's the
+    real completion signal for Old Form Builder notes.
+
+    Never retry a request with the same single-use token. Never return or log
+    the request token, shared secret, or unfiltered upstream errors to the
+    browser.
+    """
+    if type(session_id) is not int or session_id <= 0:
+        raise AssignedNotesError('Invalid session reference for Old Form Builder.', 400)
+    token = _sign_token(
+        getattr(user, 'external_employee_id', None),
+        getattr(settings, 'TPMS_PROGRESSLY_SHARED_SECRET', ''),
+    )
+    url = settings.TPMS_API_BASE_URL.rstrip('/') + '/api/v1/ios/progressly/sn-created-list'
+    try:
+        response = requests.post(
+            url,
+            headers={'Accept': 'application/json'},
+            json={'token': token, 'session_id': session_id},
+            timeout=settings.TPMS_API_TIMEOUT_SECONDS,
+            allow_redirects=False,
+        )
+    except requests.Timeout:
+        logger.warning('old_form_builder created_list_request_failed reason=timeout')
+        raise AssignedNotesError('TherapyPMS took too long to respond. Please refresh and try again.') from None
+    except requests.RequestException:
+        logger.warning('old_form_builder created_list_request_failed reason=connection')
+        raise AssignedNotesError('Old Form Builder could not be reached. Please try again.') from None
+    if not 200 <= response.status_code < 300:
+        try:
+            error_payload = response.json()
+        except ValueError:
+            error_payload = None
+        reason = _known_error_reason(error_payload)
+        logger.warning('old_form_builder created_list_upstream_request_failed status=%d reason=%s',
+                       response.status_code, reason or 'unrecognized')
+        raise AssignedNotesError(_upstream_error_message(response.status_code, reason))
+    try:
+        payload = response.json()
+    except ValueError:
+        raise AssignedNotesError('Old Form Builder returned an invalid response.') from None
+    return _parse_created_urls(payload)
+
+
+def _parse_created_urls(payload) -> list[str]:
+    if not isinstance(payload, dict) or payload.get('status') != 'success' or not isinstance(payload.get('notes'), list):
+        raise AssignedNotesError('Old Form Builder returned an invalid created forms list.')
+    urls = []
+    for note in payload['notes']:
+        raw = note.get('url') if isinstance(note, dict) else note if isinstance(note, str) else None
+        if not isinstance(raw, str) or not raw.strip():
+            raise AssignedNotesError('Old Form Builder returned an invalid created form.')
+        candidate = raw.strip()
+        try:
+            URLValidator(schemes=['https'])(candidate)
+            parsed = urlsplit(candidate)
+            if parsed.username is not None or parsed.password is not None:
+                raise ValueError
+        except (ValidationError, ValueError):
+            raise AssignedNotesError('Old Form Builder returned an invalid form link.') from None
+        urls.append(candidate)
+    return urls
+
+
 def _known_error_reason(payload) -> str | None:
     if not isinstance(payload, dict):
         return None

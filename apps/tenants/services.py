@@ -34,3 +34,15 @@ def copy_default_target_statuses_to_org(organization_id: int) -> None:
                     'display_order': template.display_order,
                 },
             )
+
+        TargetStatus.objects.get_or_create(
+            key='probe',
+            defaults={
+                'label': 'Probe',
+                'icon': 'clipboard-list',
+                'color': '#d97706',
+                'is_staff_visible': True,
+                'is_default': False,
+                'display_order': 1,
+            },
+        )
