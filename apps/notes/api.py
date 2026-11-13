@@ -250,7 +250,12 @@ def list_notes(
     date_to: date | None = None,
 ):
     _require_notes_read(request)
-    qs = LessonNote.objects.all()
+    # Exclude bare tracking rows _get_or_create_note creates the first time a
+    # staff member starts a DocuSeal/Old-Form-Builder session note — they have
+    # no template, no DocuSeal template, and no authored body, so they aren't
+    # a real note and shouldn't show up as a generic "Note / Draft" entry
+    # alongside ones the staff member actually wrote.
+    qs = LessonNote.objects.exclude(template_id__isnull=True, docuseal_template_id__isnull=True, body={})
 
     if request.user.role == 'staff':
         qs = qs.filter(staff_id=request.user.id)

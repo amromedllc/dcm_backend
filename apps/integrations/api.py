@@ -73,6 +73,35 @@ def get_old_assigned_notes(request, response: HttpResponse, session_run_id: int 
         raise HttpError(exc.status, str(exc)) from None
 
 
+@router.get('/old-form-builder/created-notes', response=list[str])
+def get_old_created_notes(request, response: HttpResponse, session_run_id: int):
+    """Urls of notes TherapyPMS has actually recorded as created/submitted for
+    this session — the real completion signal for Old Form Builder notes,
+    unlike assigned-notes which only reflects what's still outstanding."""
+    require_permission(request, 'templates_view')
+    from .form_builders import require_form_builder
+    from .assigned_notes_client import AssignedNotesError, fetch_created_session_notes
+    from apps.sessions.models import SessionRun
+
+    require_form_builder(request, 'old')
+    response['Cache-Control'] = 'private, no-store'
+
+    try:
+        session_run = SessionRun.objects.get(id=session_run_id)
+    except SessionRun.DoesNotExist:
+        raise HttpError(404, 'Session not found')
+    if request.user.role == 'staff' and session_run.staff_id != request.user.id:
+        raise HttpError(403, 'Access denied')
+    tpms_session_id = session_run.external_appointment_id or 0
+    if tpms_session_id <= 0:
+        return []
+
+    try:
+        return fetch_created_session_notes(request.user, tpms_session_id)
+    except AssignedNotesError as exc:
+        raise HttpError(exc.status, str(exc)) from None
+
+
 class SsoUrlResponse(Schema):
     url: str
 
@@ -148,6 +177,8 @@ class SessionNoteStatusSchema(Schema):
     completed: bool = False
     completed_at: str | None = None
     old_form_completed: bool = False
+    old_form_name: str | None = None
+    old_form_url: str | None = None
 
 
 class SessionNoteStartRequest(Schema):
@@ -182,6 +213,8 @@ def _serialize_note_status(session_run_id: int, note) -> dict:
         'completed': bool(note and note.docuseal_completed_at),
         'completed_at': note.docuseal_completed_at.isoformat() if note and note.docuseal_completed_at else None,
         'old_form_completed': bool(note and note.old_form_opened_at),
+        'old_form_name': note.old_form_name if note and note.old_form_name else None,
+        'old_form_url': note.old_form_url if note and note.old_form_url else None,
     }
 
 
@@ -222,20 +255,36 @@ def start_session_note(request, session_run_id: int, data: SessionNoteStartReque
     return _serialize_note_status(session_run_id, note)
 
 
+class OldFormOpenedRequest(Schema):
+    name: str | None = None
+    url: str | None = None
+
+
 @router.post('/old-form-builder/session-notes/{session_run_id}/opened', response=SessionNoteStatusSchema)
-def mark_old_form_note_opened(request, session_run_id: int):
+def mark_old_form_note_opened(request, session_run_id: int, data: OldFormOpenedRequest):
     """TherapyPMS gives us no completion signal for Old Form Builder notes —
     the frontend calls this once the staff member opens the note's url, so
     the panel can show it as done instead of staying on a "waiting" state
-    that can never resolve on its own."""
+    that can never resolve on its own. The name/url are stored here (not just
+    read live from TPMS's assigned-list) so the session can still show and
+    re-open what was filled even after TPMS stops listing it as assigned."""
     require_permission(request, 'notes_create')
     from .form_builders import require_form_builder
     require_form_builder(request, 'old')
 
     _, note = _get_or_create_note(session_run_id)
+    update_fields = []
     if not note.old_form_opened_at:
         note.old_form_opened_at = timezone.now()
-        note.save(update_fields=['old_form_opened_at'])
+        update_fields.append('old_form_opened_at')
+    if data.name and note.old_form_name != data.name:
+        note.old_form_name = data.name
+        update_fields.append('old_form_name')
+    if data.url and note.old_form_url != data.url:
+        note.old_form_url = data.url
+        update_fields.append('old_form_url')
+    if update_fields:
+        note.save(update_fields=update_fields)
     return _serialize_note_status(session_run_id, note)
 
 

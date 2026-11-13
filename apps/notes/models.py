@@ -133,6 +133,8 @@ class LessonNote(TenantAwareModel):
     # as done instead of staying stuck on a "waiting" state it can never
     # resolve.
     old_form_opened_at = models.DateTimeField(null=True, blank=True)
+    old_form_name = models.CharField(max_length=255, blank=True)
+    old_form_url = models.TextField(blank=True)
 
     # session_run is a cross-app FK (-> dcm_sessions.SessionRun) and nullable,
     # so organization comes from the ambient context, not derived from it.
