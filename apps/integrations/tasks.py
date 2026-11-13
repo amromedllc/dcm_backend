@@ -119,6 +119,81 @@ def queue_login_appointment_sync(org_id: int, facility_admin_id: int) -> PullJob
         return job
 
 
+LOGIN_ROSTER_SYNC_THROTTLE = timedelta(hours=24)
+
+
+def _queue_login_roster_sync(
+    org_id: int,
+    facility_admin_id: int,
+    *,
+    job_type: str,
+    last_synced_at_field: str,
+) -> PullJob | None:
+    """Queues a clients/providers pull on login, throttled to once per
+    facility per LOGIN_ROSTER_SYNC_THROTTLE — unlike appointments (which
+    change hour to hour and use updated_after for a cheap incremental
+    pull), a roster pull re-fetches the whole facility list every time, so
+    doing it on every login would be wasted TPMS load for data that rarely
+    changes."""
+    with transaction.atomic():
+        facility = OrganizationTpmsAdminId.objects.select_for_update().filter(
+            organization_id=org_id,
+            admin_id=facility_admin_id,
+            integration_platform=Organization.IntegrationPlatform.THERAPY_PMS,
+        ).first()
+        if facility is None:
+            return None
+        last_synced_at = getattr(facility, last_synced_at_field)
+        if last_synced_at is not None and timezone.now() - last_synced_at < LOGIN_ROSTER_SYNC_THROTTLE:
+            return None
+        active_job = PullJob.objects.filter(
+            job_type=job_type,
+            status__in=(PullJob.Status.PENDING, PullJob.Status.RUNNING),
+            params__facility_admin_id=facility_admin_id,
+        ).first()
+        if active_job is not None:
+            return active_job
+
+        job = PullJob.objects.create(
+            job_type=job_type,
+            params={'facility_admin_id': facility_admin_id, 'auto_sync': True},
+        )
+        logger.info(
+            'roster_auto_sync job_created org=%s facility=%s job=%s type=%s',
+            org_id, facility_admin_id, job.pk, job_type,
+        )
+
+        def dispatch() -> None:
+            try:
+                run_pull_job.delay(job_id=job.id, org_id=org_id)
+            except Exception as exc:
+                logger.exception('Failed to dispatch login %s sync job %s', job_type, job.id)
+                PullJob.objects.filter(pk=job.pk).update(
+                    status=PullJob.Status.FAILED,
+                    error_message=f'Failed to dispatch background task: {exc}',
+                    finished_at=timezone.now(),
+                )
+
+        transaction.on_commit(dispatch)
+        return job
+
+
+def queue_login_client_sync(org_id: int, facility_admin_id: int) -> PullJob | None:
+    return _queue_login_roster_sync(
+        org_id, facility_admin_id,
+        job_type=PullJob.JobType.CLIENTS,
+        last_synced_at_field='last_client_sync_at',
+    )
+
+
+def queue_login_provider_sync(org_id: int, facility_admin_id: int) -> PullJob | None:
+    return _queue_login_roster_sync(
+        org_id, facility_admin_id,
+        job_type=PullJob.JobType.PROVIDERS,
+        last_synced_at_field='last_provider_sync_at',
+    )
+
+
 @shared_task(bind=True)
 def run_pull_job(self, job_id: int, org_id: int) -> None:
     """Runs a queued PullJob. Explicitly sets tenant connection and tenant_context
@@ -149,9 +224,17 @@ def run_pull_job(self, job_id: int, org_id: int) -> None:
             )
             _mark_running(job)
             if job.job_type == PullJob.JobType.CLIENTS:
+                sync_started_at = timezone.now()
                 result = tpms_pull.pull_clients(org)
+                if facility.last_client_sync_at is None or facility.last_client_sync_at < sync_started_at:
+                    facility.last_client_sync_at = sync_started_at
+                    facility.save(update_fields=['last_client_sync_at'])
             elif job.job_type == PullJob.JobType.PROVIDERS:
+                sync_started_at = timezone.now()
                 result = tpms_pull.pull_providers(org)
+                if facility.last_provider_sync_at is None or facility.last_provider_sync_at < sync_started_at:
+                    facility.last_provider_sync_at = sync_started_at
+                    facility.save(update_fields=['last_provider_sync_at'])
             elif job.job_type == PullJob.JobType.APPOINTMENTS:
                 from_date = date.fromisoformat(job.params['from_date'])
                 to_date = date.fromisoformat(job.params['to_date'])
