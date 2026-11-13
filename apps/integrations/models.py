@@ -96,6 +96,7 @@ class PullJob(TenantAwareModel):
     created_count = models.IntegerField(default=0)
     updated_count = models.IntegerField(default=0)
     skipped_count = models.IntegerField(default=0)
+    cancelled_count = models.IntegerField(default=0)
     error_message = models.TextField(blank=True)
 
     started_at = models.DateTimeField(null=True, blank=True)
