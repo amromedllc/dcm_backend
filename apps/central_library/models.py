@@ -352,6 +352,7 @@ class ChangelogEntry(models.Model):
     """A release note shown on the in-app "What's New" page. Platform-wide
     (public schema), superuser-authored, like Knowledge Base content.
     `body` is sanitised rich-text HTML (see shared.html_sanitize)."""
+    source_id = models.CharField(max_length=80, unique=True, null=True, blank=True)
     version = models.CharField(max_length=40, blank=True)
     title = models.CharField(max_length=200)
     release_date = models.DateField(db_index=True)
