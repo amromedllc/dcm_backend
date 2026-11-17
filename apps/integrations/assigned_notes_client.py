@@ -26,6 +26,31 @@ class AssignedNotesError(Exception):
         self.status = status
 
 
+def _resolve_employee_id(user) -> int | None:
+    """Return the TPMS employee id to sign into the Old Form Builder token.
+
+    Staff/supervisor logins already carry their own external_employee_id. An
+    admin-only login has none (TPMS admins aren't employees), so the Old Form
+    Builder API — which only accepts an employee id — has nothing to use. In
+    that case, fall back to any other employee at the same TPMS facility
+    (external_admin_id) within this user's own organization, so admins can
+    still open Old Form Builder without a cross-tenant lookup.
+    """
+    employee_id = getattr(user, 'external_employee_id', None)
+    if type(employee_id) is int and employee_id > 0:
+        return employee_id
+    admin_id = getattr(user, 'external_admin_id', None)
+    organization_id = getattr(user, 'organization_id', None)
+    if not admin_id or not organization_id:
+        return None
+    from apps.accounts.models import User
+    return User.objects.filter(
+        organization_id=organization_id,
+        external_admin_id=admin_id,
+        external_employee_id__isnull=False,
+    ).exclude(external_employee_id__lte=0).order_by('id').values_list('external_employee_id', flat=True).first()
+
+
 def _sign_token(employee_id: int, shared_secret: str) -> str:
     if type(employee_id) is not int or employee_id <= 0:
         raise AssignedNotesError('An employee-linked TherapyPMS account is required for Old Form Builder.', 403)
@@ -56,7 +81,7 @@ def fetch_assigned_session_notes(user, session_id: int = 0):
     if type(session_id) is not int or session_id < 0:
         raise AssignedNotesError('Invalid session reference for Old Form Builder.', 400)
     token = _sign_token(
-        getattr(user, 'external_employee_id', None),
+        _resolve_employee_id(user),
         getattr(settings, 'TPMS_PROGRESSLY_SHARED_SECRET', ''),
     )
     url = settings.TPMS_API_BASE_URL.rstrip('/') + '/api/v1/ios/progressly/sn-assigned-list'
@@ -103,7 +128,7 @@ def fetch_created_session_notes(user, session_id: int) -> list[str]:
     if type(session_id) is not int or session_id <= 0:
         raise AssignedNotesError('Invalid session reference for Old Form Builder.', 400)
     token = _sign_token(
-        getattr(user, 'external_employee_id', None),
+        _resolve_employee_id(user),
         getattr(settings, 'TPMS_PROGRESSLY_SHARED_SECRET', ''),
     )
     url = settings.TPMS_API_BASE_URL.rstrip('/') + '/api/v1/ios/progressly/sn-created-list'
