@@ -34,6 +34,14 @@ increment MAJOR. All notes shipped together share a version.
 Imports fill missing versions and replace matching legacy date and initial v1 sequence versions, while
 preserving manually assigned semantic versions, content, publication and IDs.
 
+## superadmin-separate-feature-management | 2026-11-17 | Separate feature management
+Version: v2.43.0
+Status: Draft
+
+**Improvements**
+- Superadmins can manage AI access per TPMS facility on the dedicated Features page, with organization, facility and admin ID search.
+- Practice Email now focuses on email notifications and organization/facility management. Existing AI settings are preserved.
+
 ## changelog-release-versions | 2026-11-17 | Versions for release notes
 Version: v2.43.0
 Status: Draft
