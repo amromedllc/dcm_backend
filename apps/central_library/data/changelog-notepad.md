@@ -25,6 +25,19 @@ superadmin page. Never include patient data, secrets or unverified claims.
 Entries below retain their original release dates and are ordered newest day first.
 Multiple changes on one day remain separate drafts for individual review.
 
+## in-app-release-reminders | 2026-11-17 | In-app release reminders
+Status: Draft
+
+**New Features**
+- Published releases with a version show an in-app reminder with the release title,
+  a preview and a link to What's New. Drafts and hidden developer notes are excluded.
+- Dismissing or previewing a release remembers that version for the signed-in user
+  in the current browser; a new version can show another reminder.
+- Open pages check for new releases every minute while active. Publishing from
+  the Changelog screen asks for a version when one has not been entered.
+- Reminder availability follows release-note publication; it does not install or
+  deploy application updates. Requires frontend deployment; no live change made.
+
 ## changelog-feature-drafts | 2026-11-17 | Import release-note drafts
 Status: Hidden
 Type: Developer Fix
