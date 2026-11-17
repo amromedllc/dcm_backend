@@ -56,6 +56,7 @@ def parse_notepad(text: str) -> list[dict]:
         i += 1
 
         status = 'Draft'
+        version = ''
         while i < len(lines) and not lines[i].strip():
             i += 1
         if i < len(lines):
@@ -83,6 +84,20 @@ def parse_notepad(text: str) -> list[dict]:
             if stripped == '---':
                 i += 1
                 break
+
+            if stripped.startswith('Version:'):
+                value = stripped.partition(':')[2].strip()
+                if version or not value or len(value) > 40:
+                    raise ValueError('Use one non-empty Version: of at most 40 characters per entry')
+                version = value
+                i += 1
+                continue
+
+            status_match = STATUS_RE.match(stripped)
+            if status_match:
+                status = status_match.group(1).capitalize()
+                i += 1
+                continue
 
             section = SECTION_RE.match(stripped)
             if section:
@@ -115,7 +130,7 @@ def parse_notepad(text: str) -> list[dict]:
             'release_date': release_date,
             'body': sanitize_kb_html(''.join(body_parts)),
             'is_published': status.lower() == 'published',
-            'version': '',
+            'version': version,
         })
 
     return entries
