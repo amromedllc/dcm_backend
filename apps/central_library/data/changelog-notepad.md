@@ -39,8 +39,8 @@ Version: v2.43.0
 Status: Draft
 
 **Improvements**
-- Superadmins can manage AI access per TPMS facility on the dedicated Features page, with organization, facility and admin ID search.
-- Practice Email now focuses on email notifications and organization/facility management. Existing AI settings are preserved.
+- Superadmins can manage AI access and email notifications per TPMS facility on the dedicated Features page, with organization, facility and admin ID search.
+- The former Practice Email page is now labeled Organizations & Facilities and focuses on organization/facility management. Existing AI and email settings are preserved.
 
 ## changelog-release-versions | 2026-11-17 | Versions for release notes
 Version: v2.43.0
