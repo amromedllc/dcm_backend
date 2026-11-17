@@ -1,0 +1,106 @@
+"""Import bundled release notes as drafts, preserving reviewed and published copy."""
+import re
+from datetime import date
+from html.parser import HTMLParser
+from pathlib import Path
+
+from apps.central_library.management.commands.import_changelog_notepad import parse_notepad as parse_release_notes
+
+NOTEPAD_PATH = Path(__file__).with_name('data') / 'changelog-notepad.md'
+
+
+def parse_notepad(text):
+    entries = []
+    source_ids = set()
+    for block in re.split(r'^## ', text, flags=re.M)[1:]:
+        heading, _, body = block.partition('\n')
+        parts = heading.split(' | ')
+        if len(parts) != 3:
+            raise ValueError('Expected heading: ## source-id | YYYY-MM-DD | Title')
+        source_id, release_date, title = parts
+        if not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', source_id) or len(source_id) > 80:
+            raise ValueError('Source IDs must be lowercase slugs of at most 80 characters')
+        if source_id in source_ids or not title.strip() or len(title.strip()) > 200:
+            raise ValueError('Source IDs must be unique and titles must contain 1–200 characters')
+        date.fromisoformat(release_date)
+        source_ids.add(source_id)
+        parsed = parse_release_notes(f'## {release_date} — {title}\n{body}')
+        if len(parsed) != 1 or not parsed[0]['body']:
+            raise ValueError('Each release note needs a section and bullet text')
+        entries.append({**parsed[0], 'source_id': source_id, 'is_published': False})
+    if not entries:
+        raise ValueError('No changelog entries found')
+    return entries
+
+
+class _BodyText(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ('p', 'div', 'li', 'br', 'h1', 'h2', 'h3', 'h4', 'ul', 'ol'):
+            self.parts.append(' ')
+
+    def handle_endtag(self, tag):
+        self.handle_starttag(tag, [])
+
+
+def _normalized_text(value):
+    return ' '.join(value.split()).casefold()
+
+
+def _body_key(body):
+    parser = _BodyText()
+    parser.feed(body)
+    return _normalized_text(''.join(parser.parts))
+
+
+def import_notepad(user=None):
+    from django.db import transaction
+    from django_tenants.utils import get_public_schema_name, schema_context
+    from apps.central_library.models import ChangelogEntry
+
+    entries = parse_notepad(NOTEPAD_PATH.read_text(encoding='utf-8'))
+    created = 0
+    with schema_context(get_public_schema_name()), transaction.atomic():
+        existing = list(ChangelogEntry.objects.values('id', 'source_id', 'title', 'release_date', 'body'))
+        source_ids = {row['source_id'] for row in existing if row['source_id']}
+        by_title = {}
+        by_body = {}
+        for row in existing:
+            title_key = _normalized_text(row['title'])
+            body_key = _body_key(row['body'])
+            if title_key:
+                by_title.setdefault(title_key, row)
+            if body_key:
+                by_body.setdefault(body_key, row)
+        for entry in entries:
+            source_id = entry['source_id']
+            if source_id in source_ids:
+                continue
+            title_key = _normalized_text(entry['title'])
+            body_key = _body_key(entry['body'])
+            match = by_title.get(title_key) or (by_body.get(body_key) if body_key else None)
+            if match is not None:
+                # Link legacy/manual notes without changing reviewed content or publication.
+                if not match['source_id']:
+                    ChangelogEntry.objects.filter(
+                        pk=match['id'], source_id=match['source_id'],
+                    ).update(source_id=source_id)
+                    match['source_id'] = source_id
+                source_ids.add(source_id)
+                continue
+            defaults = {key: value for key, value in entry.items() if key != 'source_id'}
+            _, added = ChangelogEntry.objects.get_or_create(
+                source_id=source_id, defaults={**defaults, 'created_by': user},
+            )
+            source_ids.add(source_id)
+            by_title[title_key] = entry
+            if body_key:
+                by_body[body_key] = entry
+            created += int(added)
+    return {'created': created, 'skipped': len(entries) - created}

@@ -153,6 +153,16 @@ def _queue_login_appointment_sync(user: User, tenant_id: int) -> None:
             tenant_id, user.pk, user.external_admin_id,
         )
 
+    try:
+        from apps.integrations.tasks import queue_login_client_sync, queue_login_provider_sync
+        queue_login_client_sync(tenant_id, user.external_admin_id)
+        queue_login_provider_sync(tenant_id, user.external_admin_id)
+    except Exception:
+        logger.exception(
+            'roster_auto_sync queue_error org=%s user=%s facility=%s',
+            tenant_id, user.pk, user.external_admin_id,
+        )
+
 
 @router.post('/login', response=LoginResponse, auth=None)
 @audit_security('auth.login')

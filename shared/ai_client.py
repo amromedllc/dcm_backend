@@ -34,12 +34,12 @@ def is_deployment_enabled() -> bool:
 
 def is_enabled_for_user(user) -> bool:
     """Whether a platform superadmin has switched AI on for the user's TPMS facility
-    (OrganizationTpmsAdminId.ai_enabled, Superadmin → Practice Email). Mirrors the
-    practice email gate: a user with no facility (native, non-TPMS login) is not
-    gated at this level, so the deployment switch alone decides."""
+    (OrganizationTpmsAdminId.ai_enabled, Superadmin → Practice Email).
+    Users without a linked facility are denied; deployment settings alone do not
+    grant access to AI."""
     admin_id = getattr(user, 'external_admin_id', None)
     if admin_id is None:
-        return True
+        return False
     from apps.tenants.models import OrganizationTpmsAdminId  # local import: shared/ must not import apps at load time
     return OrganizationTpmsAdminId.objects.filter(
         organization_id=getattr(user, 'organization_id', None),

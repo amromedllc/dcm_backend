@@ -801,6 +801,16 @@ def superadmin_list_changelog_entries(request):
         return [_serialize_changelog_entry(entry) for entry in ChangelogEntry.objects.all()]
 
 
+@router.post('/superadmin/changelog/import-feature-drafts', response=dict)
+def superadmin_import_changelog_feature_drafts(request):
+    _require_superadmin(request)
+    from apps.central_library.changelog_notepad import import_notepad
+    try:
+        return import_notepad(user=request.user)
+    except (OSError, ValueError):
+        raise HttpError(400, 'The bundled changelog notepad could not be imported')
+
+
 @router.post('/superadmin/changelog', response={201: ChangelogEntrySchema})
 def superadmin_create_changelog_entry(request, data: ChangelogEntryRequest):
     _require_superadmin(request)
