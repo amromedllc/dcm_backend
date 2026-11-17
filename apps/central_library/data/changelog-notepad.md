@@ -14,14 +14,33 @@ edit it in the superadmin page. A deleted entry can be imported again.
 
 Format: ## unique-source-id | YYYY-MM-DD | Title, then Status: Draft and
 **New Features**, **Improvements**, or **Fixed Issues** sections with - bullets.
-Use user-facing copy only; exclude patient data, secrets and unverified claims.
+Use Status: Hidden and Type: Developer Fix for internal-only entries; the
+importer skips them completely. For developer notes inside a user-facing entry,
+wrap the internal text in <!-- developer-fix --> and <!-- /developer-fix -->
+on separate lines. Those blocks stay in this file and are excluded from imports.
+This does not hide or alter notes already in the database; hide those using the
+superadmin page. Never include patient data, secrets or unverified claims.
 
 
 Entries below retain their original release dates and are ordered newest day first.
 Multiple changes on one day remain separate drafts for individual review.
 
-## changelog-feature-drafts | 2026-11-17 | Import release-note drafts
+## in-app-release-reminders | 2026-11-17 | In-app release reminders
 Status: Draft
+
+**New Features**
+- Published releases with a version show an in-app reminder with the release title,
+  a preview and a link to What's New. Drafts and hidden developer notes are excluded.
+- Dismissing or previewing a release remembers that version for the signed-in user
+  in the current browser; a new version can show another reminder.
+- Open pages check for new releases every minute while active. Publishing from
+  the Changelog screen asks for a version when one has not been entered.
+- Reminder availability follows release-note publication; it does not install or
+  deploy application updates. Requires frontend deployment; no live change made.
+
+## changelog-feature-drafts | 2026-11-17 | Import release-note drafts
+Status: Hidden
+Type: Developer Fix
 
 **New Features**
 - Superadmins can import bundled release-note drafts on the Changelog page,
@@ -156,7 +175,10 @@ Status: Draft
 - New organizations receive Probe even when its platform template is missing.
 - Existing Probe labels, colors, active/staff visibility choices and clinical
   references are preserved. Other practice-owned custom statuses remain private.
+<!-- developer-fix -->
+**Developer Fix**
 - Requires backend migration/deployment; no shared or production database was changed.
+<!-- /developer-fix -->
 
 ## 2026-11-13-responsive-web-layout-improvements | 2026-11-13 | Responsive web layout improvements
 Status: Draft
@@ -263,11 +285,13 @@ Status: Draft
   reconnect automatically, and fall back to periodic refresh when unavailable.
 - Report drafts and frozen report data are preserved during live updates.
 
-**Known limitations (Setup)**
+<!-- developer-fix -->
+**Developer Fix**
 - Live delivery requires Redis and streaming support through the server/proxy.
   The backend Docker configuration now uses threaded Gunicorn workers.
 - Implementation is awaiting testing; no tests or type-check were run for this
   change, as requested. This entry has not been published in-app.
+<!-- /developer-fix -->
 
 ## 2026-11-11-persisted-target-observation-periods-for-rate-recording | 2026-11-11 | Persisted target observation periods for rate recording
 Status: Draft
@@ -321,10 +345,12 @@ Status: Draft
 - Note-template fields have two new auto-fill sources: Program modifications and Graph annotations. Graph annotations include notes, phase lines, overlapping phase ranges, and client graph markers relevant to the session dates and programs/targets.
 - Imported content is stored as note text. Later annotation edits do not change existing notes automatically. Refill from session explicitly refreshes configured fields on editable notes; existing text is preserved on initial creation.
 
-**Known limitations (Setup)**
+<!-- developer-fix -->
+**Developer Fix**
 - Add a Text area field to a Notes template, choose either new source in its auto-fill selector, and use that template for a note linked to the session.
 - Create program modification entries while supervising a live session. Create graph annotations on the client's analytics page.
 - Requires sessions migration `0024_sessionsupervisionnote_note_type`; migration has not been applied as part of this change.
+<!-- /developer-fix -->
 
 ## 2026-11-06-protect-recorded-target-definitions | 2026-11-06 | Protect recorded target definitions
 Status: Draft
@@ -373,7 +399,10 @@ Status: Draft
 - Closed, held, and inactive programs stay out of new recordings. Mastered targets without a maintenance schedule are omitted; scheduled maintenance appears when due.
 - Completed, cancelled, no-show, and already-started appointments no longer prompt users to assign programs. Existing recording snapshots and their trial data remain unchanged.
 
+<!-- developer-fix -->
+**Developer Fix**
 Requires the reusable-session-setup migration before use. Existing appointment program lists are preserved and are not automatically converted into reusable setups. This entry remains a draft and has not been published to What's New.
+<!-- /developer-fix -->
 
 ## 2026-11-05-graph-values-follow-target-measurements | 2026-11-05 | Graph values follow target measurements
 Status: Draft
@@ -420,7 +449,10 @@ Status: Draft
 - Messages are stored with sender and time, with older history available and retry protection against duplicate sends. Conversations are auditable; messages have no edit or delete action.
 - New-message email and push alerts respect notification preferences and practice policies. Alerts contain no message text or client names. Caregivers can manage message alerts and enable browser notifications from the Messages page.
 
+<!-- developer-fix -->
+**Developer Fix**
 Prepared locally. A tenant migration and configured notification services are required before release. No shared database migration or live delivery performed.
+<!-- /developer-fix -->
 
 ## 2026-11-05-account-appearance-preferences | 2026-11-05 | Account appearance preferences
 Status: Draft
@@ -529,7 +561,10 @@ Status: Draft
 - Added client status observations for normal edits and both TPMS sync paths. The baseline starts at migration time; earlier unavailable history is shown as chart gaps.
 - Used existing headers, cards, controls, tables and light/dark chart styling, with textual chart counts available.
 
+<!-- developer-fix -->
+**Developer Fix**
 Prepared locally. All 58 targeted tests (26 reporting tests and 32 email-reminder regression tests), web TypeScript and migration drift checks passed. Validation and metric definitions are documented in `docs/organization-analytics.md`. Tenant migration, disposable PostgreSQL and interactive browser acceptance remain pending. No deployment or publication performed.
+<!-- /developer-fix -->
 
 ## 2026-11-04-h4-appointment-email-reminders | 2026-11-04 | H4: Appointment email reminders
 Status: Draft
@@ -541,7 +576,10 @@ Status: Draft
 - Added delivery tracking, retries and reschedule/cancellation checks while preserving push reminders, recipient preferences and practice email permissions.
 - Reminder emails contain appointment time and a secure sign-in link without clinical details. Caregiver delivery requires an active linked portal account and organization enablement.
 
+<!-- developer-fix -->
+**Developer Fix**
 Prepared locally. All 32 synthetic reminder tests, web TypeScript, the isolated Django system check and migration drift checks passed; details are in `docs/appointment-email-reminders.md`. Tenant migration, disposable PostgreSQL concurrency, real SMTP and browser acceptance remain pending. No real email, deployment or publication performed.
+<!-- /developer-fix -->
 
 ## 2026-11-03-organization-free-trials-and-premium-billing | 2026-11-03 | Organization free trials and premium billing
 Status: Draft
@@ -554,7 +592,10 @@ Status: Draft
 - Added Settings → Billing with trial countdown, extension requests/history, secure Stripe-hosted card setup, plan review, checkout, payment history and billing activity.
 - Added server-enforced expiry, signed payment webhooks, duplicate/retry protection and paid-term renewal/cancellation handling. Premium access follows confirmed payment.
 
+<!-- developer-fix -->
+**Developer Fix**
 Prepared locally for backend and web only. Synthetic service/API/HTTP and browser-gateway checks are documented in `docs/subscription-billing.md`. Shared PostgreSQL migrations, browser acceptance and Stripe test-mode acceptance remain pending. No deployment, real payments or changelog publication performed.
+<!-- /developer-fix -->
 
 ## 2026-11-03-m2-client-document-storage | 2026-11-03 | M2: Client document storage
 Status: Draft
@@ -589,7 +630,10 @@ Status: Draft
 - Observed periods retain their timestamps and stable IDs through offline storage and retries; conflicting reused IDs are rejected and retained for recovery.
 - Added observed-period identification to raw behavior exports and non-destructive storage migrations.
 
+<!-- developer-fix -->
+**Developer Fix**
 Prepared locally. Backend, web offline simulation, rendering, Flutter recovery and targeted analysis checks passed. Backend migration and browser/device acceptance remain pending; not ready for publication.
+<!-- /developer-fix -->
 
 ## 2026-11-02-h6-scatterplot-data-collection | 2026-11-02 | H6: Scatterplot data collection
 Status: Draft
@@ -602,7 +646,10 @@ Status: Draft
 - Heat maps count recorded occurrences only. Empty buckets do not establish that behavior was absent or that observation occurred.
 - Preserved existing recording/offline protections and historical session snapshots; older events recorded under a different target type are excluded from the scatterplot.
 
+<!-- developer-fix -->
+**Developer Fix**
 Prepared locally. Regression, synthetic database/rendering, web TypeScript, and targeted Flutter analysis checks passed. PostgreSQL tenant migration, browser/device acceptance, and offline simulation suites remain pending. The heat map is available on web only. A broader backend run also reproduced three existing permanent-delete test fixture failures on the unchanged baseline. Not ready for publication.
+<!-- /developer-fix -->
 
 ## 2026-11-02-rbt-supervision-tracking | 2026-11-02 | RBT supervision tracking
 Status: Draft
@@ -624,7 +671,10 @@ Status: Draft
 
 - Fixed the shared button's Radix Slot handling that caused the supervision export action to crash the page.
 
+<!-- developer-fix -->
+**Developer Fix**
 Prepared locally. Backend regression tests, disposable persistence checks, and TypeScript checks passed. Database migration, PostgreSQL tenancy validation, and browser acceptance remain pending. Flutter support is not included. Not ready for publication.
+<!-- /developer-fix -->
 
 ## 2026-10-30-clinical-resource-access-checks | 2026-10-30 | Clinical resource access checks
 Status: Draft
@@ -978,7 +1028,8 @@ Status: Draft
 - Staff members (including those linked through TherapyPMS) now only see clients they've actually been assigned to in Manage Users / Client Directory — in the central client switcher, Central Library, Clients list, and elsewhere. Previously, TPMS-linked staff could see every client in the practice regardless of their assignments.
 
 ## 2026-09-29-single-sign-on-sso-launch-from-external-systems | 2026-09-29 | Single Sign-On (SSO) launch from external systems
-Status: Draft
+Status: Hidden
+Type: Developer Fix
 
 **New Features**
 - Another system can now sign a user straight into Progressly with no Progressly login page. Set a shared secret in Progressly's server configuration (`SSO_SHARED_SECRET`), hand the same secret to the other system out of band, and have it redirect to `/sso/login?token=...` with a short-lived signed token naming the user's email. Matches by email against an existing Progressly account — it never creates one. Intentionally skips Progressly's own MFA, since the other system is trusted to have already verified the person. Configured entirely through server environment variables, not the app itself.
@@ -1254,7 +1305,8 @@ Status: Draft
 - Draft with AI works in the same place, and its suggested targets are now added to the library program too.
 
 ## 2026-09-23-ai-on-off-switch | 2026-09-23 | AI on/off switch
-Status: Draft
+Status: Hidden
+Type: Developer Fix
 
 **New Features**
 - A single setting, **AI_ENABLED**, in the server's settings file turns every AI feature on or off. When it is **false** (the default), the **Draft with AI** buttons disappear from the Program Library and the New Program dialogs, and the server refuses AI requests. When it is **true** and an AI key is set, they show as before.

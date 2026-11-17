@@ -9,6 +9,25 @@ from apps.central_library.management.commands.import_changelog_notepad import pa
 NOTEPAD_PATH = Path(__file__).with_name('data') / 'changelog-notepad.md'
 
 
+def _without_developer_fixes(body):
+    public_lines = []
+    hidden = False
+    for line in body.splitlines():
+        if line.strip() == '<!-- developer-fix -->':
+            if hidden:
+                raise ValueError('Developer-fix blocks cannot be nested')
+            hidden = True
+        elif line.strip() == '<!-- /developer-fix -->':
+            if not hidden:
+                raise ValueError('Unexpected developer-fix closing marker')
+            hidden = False
+        elif not hidden:
+            public_lines.append(line)
+    if hidden:
+        raise ValueError('Developer-fix block needs a closing marker')
+    return '\n'.join(public_lines)
+
+
 def parse_notepad(text):
     entries = []
     source_ids = set()
@@ -24,11 +43,17 @@ def parse_notepad(text):
             raise ValueError('Source IDs must be unique and titles must contain 1–200 characters')
         date.fromisoformat(release_date)
         source_ids.add(source_id)
+        body = _without_developer_fixes(body)
+        statuses = re.findall(r'^Status:\s*(.*?)\s*$', body, flags=re.M)
+        if len(statuses) > 1 or (statuses and statuses[0].casefold() not in ('draft', 'published', 'hidden')):
+            raise ValueError('Use one Status: Draft, Published, or Hidden per entry')
+        if statuses and statuses[0].casefold() == 'hidden':
+            continue
         parsed = parse_release_notes(f'## {release_date} — {title}\n{body}')
         if len(parsed) != 1 or not parsed[0]['body']:
             raise ValueError('Each release note needs a section and bullet text')
         entries.append({**parsed[0], 'source_id': source_id, 'is_published': False})
-    if not entries:
+    if not source_ids:
         raise ValueError('No changelog entries found')
     return entries
 
