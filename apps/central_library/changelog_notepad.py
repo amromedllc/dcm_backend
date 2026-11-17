@@ -91,9 +91,29 @@ def import_notepad(user=None):
 
     entries = parse_notepad(NOTEPAD_PATH.read_text(encoding='utf-8'))
     created = 0
+    updated = 0
     with schema_context(get_public_schema_name()), transaction.atomic():
-        existing = list(ChangelogEntry.objects.values('id', 'source_id', 'title', 'release_date', 'body'))
+        existing = list(ChangelogEntry.objects.values('id', 'source_id', 'title', 'release_date', 'body', 'version'))
         source_ids = {row['source_id'] for row in existing if row['source_id']}
+        by_source = {row['source_id']: row for row in existing if row['source_id']}
+
+        def fill_version(row, entry):
+            previous_date_version = 'v' + entry['release_date'].strftime('%Y.%m.%d')
+            # Only the 34 historical groups were assigned the initial v1 sequence.
+            historical_version = re.fullmatch(r'v2\.(\d+)\.0', entry['version'])
+            previous_sequence_version = None
+            if historical_version and 10 <= int(historical_version[1]) <= 43:
+                previous_sequence_version = f'v1.{int(historical_version[1]) - 10}.0'
+            replace_legacy_version = (
+                row['version'] in (previous_date_version, previous_sequence_version)
+                and re.fullmatch(r'v\d+\.\d+\.\d+', entry['version'])
+                and entry['version'] != previous_date_version
+            )
+            if not entry['version'] or (row['version'].strip() and not replace_legacy_version):
+                return 0
+            count = ChangelogEntry.objects.filter(pk=row['id'], version=row['version']).update(version=entry['version'])
+            row['version'] = entry['version']
+            return count
         by_title = {}
         by_body = {}
         for row in existing:
@@ -106,11 +126,14 @@ def import_notepad(user=None):
         for entry in entries:
             source_id = entry['source_id']
             if source_id in source_ids:
+                if source_id in by_source:
+                    updated += fill_version(by_source[source_id], entry)
                 continue
             title_key = _normalized_text(entry['title'])
             body_key = _body_key(entry['body'])
             match = by_title.get(title_key) or (by_body.get(body_key) if body_key else None)
             if match is not None:
+                updated += fill_version(match, entry)
                 # Link legacy/manual notes without changing reviewed content or publication.
                 if not match['source_id']:
                     ChangelogEntry.objects.filter(
@@ -120,12 +143,14 @@ def import_notepad(user=None):
                 source_ids.add(source_id)
                 continue
             defaults = {key: value for key, value in entry.items() if key != 'source_id'}
-            _, added = ChangelogEntry.objects.get_or_create(
+            saved, added = ChangelogEntry.objects.get_or_create(
                 source_id=source_id, defaults={**defaults, 'created_by': user},
             )
             source_ids.add(source_id)
-            by_title[title_key] = entry
+            row = {**entry, 'id': saved.pk}
+            by_source[source_id] = row
+            by_title[title_key] = row
             if body_key:
-                by_body[body_key] = entry
+                by_body[body_key] = row
             created += int(added)
-    return {'created': created, 'skipped': len(entries) - created}
+    return {'created': created, 'updated': updated, 'skipped': len(entries) - created - updated}

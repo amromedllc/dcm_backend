@@ -12,7 +12,8 @@ Imports never publish and never overwrite existing source IDs, even after the
 superadmin edits a title or date. Keep IDs stable. To revise an existing entry,
 edit it in the superadmin page. A deleted entry can be imported again.
 
-Format: ## unique-source-id | YYYY-MM-DD | Title, then Status: Draft and
+Format: ## unique-source-id | YYYY-MM-DD | Title, then Version: v2.10.0,
+Status: Draft and
 **New Features**, **Improvements**, or **Fixed Issues** sections with - bullets.
 Use Status: Hidden and Type: Developer Fix for internal-only entries; the
 importer skips them completely. For developer notes inside a user-facing entry,
@@ -24,8 +25,55 @@ superadmin page. Never include patient data, secrets or unverified claims.
 
 Entries below retain their original release dates and are ordered newest day first.
 Multiple changes on one day remain separate drafts for individual review.
+Versions use vMAJOR.MINOR.PATCH. Historical notes start at v2.10.0 on the
+earliest recorded date, with one minor increment per later recorded date. This
+is an assigned changelog sequence, not recovered deployment history. Keep these
+assignments stable; do not renumber old releases when adding historical notes.
+Future feature releases increment MINOR; fixes increment PATCH; breaking releases
+increment MAJOR. All notes shipped together share a version.
+Imports fill missing versions and replace matching legacy date and initial v1 sequence versions, while
+preserving manually assigned semantic versions, content, publication and IDs.
+
+## changelog-release-versions | 2026-11-17 | Versions for release notes
+Version: v2.43.0
+Status: Draft
+
+**Improvements**
+- Release notes include a semantic version, shared by updates shipped together. Historical notes are numbered chronologically by release date.
+- Import feature drafts fills missing versions and replaces the previous date-based and initial v1 sequence versions on matching notes, preserving manually assigned semantic versions, reviewed text and publication status.
+- Import results show how many versions were filled.
+
+
+## frontend-build-recording-contract | 2026-11-17 | Frontend build and recording contract
+Version: v2.43.0
+Status: Hidden
+Type: Developer Fix
+
+**Fixed Issues**
+- The offline recording hook declares its active-observation count explicitly,
+  preserving the submission guard while observations are unfinished.
+- Frontend deployment verifies the pushed revision and stops on checkout,
+  type-check or build failure before restarting PM2. Server edits are preserved.
+
+## clearer-release-previews | 2026-11-17 | Clearer release previews
+Version: v2.43.0
+Status: Draft
+
+**Improvements**
+- Release previews now show a version badge, readable release date and grouped
+  update cards for features, improvements and fixes, with a clearer mobile layout.
+
+## compact-release-notification | 2026-11-17 | Compact release notification
+Version: v2.43.0
+Status: Draft
+
+**Improvements**
+- Release reminders now appear as compact floating notification cards, matching
+  existing app notifications. Preview and dismiss remain available without
+  taking up space across the page header.
 
 ## in-app-release-reminders | 2026-11-17 | In-app release reminders
+Version: v2.43.0
 Status: Draft
 
 **New Features**
@@ -39,6 +87,7 @@ Status: Draft
   deploy application updates. Requires frontend deployment; no live change made.
 
 ## changelog-feature-drafts | 2026-11-17 | Import release-note drafts
+Version: v2.43.0
 Status: Hidden
 Type: Developer Fix
 
@@ -52,6 +101,7 @@ Type: Developer Fix
 - Requires deployment and a backend migration; no live content was changed.
 
 ## facility-ai-access | 2026-11-16 | Enforce facility AI access
+Version: v2.42.0
 Status: Draft
 
 **Fixed Issues**
@@ -63,6 +113,7 @@ Status: Draft
   immediately, including for already-open drafting panels.
 
 ## trial-cards-scan | 2026-11-14 | Easier-to-scan trial cards
+Version: v2.41.0
 Status: Draft
 
 **Improvements**
@@ -72,6 +123,7 @@ Status: Draft
   target no longer looks like a response has already been selected.
 
 ## 2026-11-13-html-reference-recording-controls | 2026-11-13 | HTML reference recording controls
+Version: v2.40.0
 Status: Draft
 
 **Improvements**
@@ -82,6 +134,7 @@ Status: Draft
 - Session titles and header controls wrap on smaller screens.
 
 ## 2026-11-13-recording-dialog-reference-layout | 2026-11-13 | Recording dialog reference layout
+Version: v2.40.0
 Status: Draft
 
 **Improvements**
@@ -91,6 +144,7 @@ Status: Draft
   the footer actions. Recording controls retain their configured clinical labels.
 
 ## 2026-11-13-clearer-recording-notes-and-actions | 2026-11-13 | Clearer recording notes and actions
+Version: v2.40.0
 Status: Draft
 
 **Improvements**
@@ -99,6 +153,7 @@ Status: Draft
 - Note template controls wrap on small screens and have an accessible label.
 
 ## 2026-11-13-compact-session-recording-footer | 2026-11-13 | Compact session recording footer
+Version: v2.40.0
 Status: Draft
 
 **Improvements**
@@ -106,6 +161,7 @@ Status: Draft
   leaving more room for recording instead of using full-width button rows.
 
 ## 2026-11-13-session-notes-stay-visible-while-recording | 2026-11-13 | Session notes stay visible while recording
+Version: v2.40.0
 Status: Draft
 
 **Improvements**
@@ -116,6 +172,7 @@ Status: Draft
   the notes on smaller screens.
 
 ## 2026-11-13-clients-and-providers-now-also-auto-sync-on-login | 2026-11-13 | Clients and providers now also auto-sync on login
+Version: v2.40.0
 Status: Draft
 
 **New Features**
@@ -125,6 +182,7 @@ Status: Draft
   and a full re-pull on every login would be unnecessary TherapyPMS load.
 
 ## 2026-11-13-deleted-therapypms-appointments-no-longer-linger-in-progressly | 2026-11-13 | Deleted TherapyPMS appointments no longer linger in Progressly
+Version: v2.40.0
 Status: Draft
 
 **Fixed Issues**
@@ -136,6 +194,7 @@ Status: Draft
   showing as an open, recordable session even after being deleted upstream.
 
 ## 2026-11-13-delete-manual-sessions-permission-gated | 2026-11-13 | Delete manual sessions (permission-gated)
+Version: v2.40.0
 Status: Draft
 
 **New Features**
@@ -148,6 +207,7 @@ Status: Draft
   is recorded in the audit log with who did it and why.
 
 ## 2026-11-13-session-note-old-form-builder-completion-tracking | 2026-11-13 | Session Note: Old Form Builder completion tracking
+Version: v2.40.0
 Status: Draft
 
 **Fixed Issues**
@@ -167,6 +227,7 @@ Status: Draft
   bigger number with a "Press N" hint, matching the newer design.
 
 ## 2026-11-13-probe-available-as-an-organization-default | 2026-11-13 | Probe available as an organization default
+Version: v2.40.0
 Status: Draft
 
 **Fixed Issues**
@@ -181,6 +242,7 @@ Status: Draft
 <!-- /developer-fix -->
 
 ## 2026-11-13-responsive-web-layout-improvements | 2026-11-13 | Responsive web layout improvements
+Version: v2.40.0
 Status: Draft
 
 **Fixed Issues**
@@ -191,6 +253,7 @@ Status: Draft
   authenticated workflow acceptance remain pending; see `docs/responsive-layout.md`.
 
 ## 2026-11-12-session-note-dropdown-shows-form-builder-specific-templates | 2026-11-12 | Session note dropdown shows form builder-specific templates
+Version: v2.39.0
 Status: Draft
 
 **New Features**
@@ -203,6 +266,7 @@ Status: Draft
 - Old form builder templates are automatically fetched from TherapyPMS and shown in the dropdown.
 
 ## 2026-11-12-custom-templates-follow-the-selected-form-builder | 2026-11-12 | Custom Templates follow the selected form builder
+Version: v2.39.0
 Status: Draft
 
 **Fixed Issues**
@@ -219,6 +283,7 @@ Status: Draft
   show their specific reason without exposing other response contents.
 
 ## 2026-11-12-superadmin-facility-integration-setup | 2026-11-12 | Superadmin facility integration setup
+Version: v2.39.0
 Status: Draft
 
 **New Features**
@@ -234,6 +299,7 @@ Status: Draft
   automatic login flow when a facility user next signs in.
 
 ## 2026-11-12-workflows-use-configured-target-statuses | 2026-11-12 | Workflows use configured target statuses
+Version: v2.39.0
 Status: Draft
 
 **Fixed Issues**
@@ -247,6 +313,7 @@ Status: Draft
 - Probe, mastery, and maintenance retain their dedicated clinical behavior.
 
 ## 2026-11-12-visible-client-favorite-hearts | 2026-11-12 | Visible client favorite hearts
+Version: v2.39.0
 Status: Draft
 
 **Fixed Issues**
@@ -254,6 +321,7 @@ Status: Draft
   Favorites have a filled heart; other clients have an outline heart.
 
 ## 2026-11-12-facility-appointment-sync-on-every-user-login | 2026-11-12 | Facility appointment sync on every user login
+Version: v2.39.0
 Status: Draft
 
 **Fixed Issues**
@@ -265,6 +333,7 @@ Status: Draft
 - Automatic sync requires the Celery worker; additional history can still be pulled manually.
 
 ## 2026-11-11-automatic-target-opening-validation | 2026-11-11 | Automatic target opening validation
+Version: v2.38.0
 Status: Draft
 
 **Improvements**
@@ -274,6 +343,7 @@ Status: Draft
   the saved direction setting.
 
 ## 2026-11-11-live-graph-and-analytics-updates | 2026-11-11 | Live graph and analytics updates
+Version: v2.38.0
 Status: Draft
 
 **Improvements**
@@ -294,6 +364,7 @@ Status: Draft
 <!-- /developer-fix -->
 
 ## 2026-11-11-persisted-target-observation-periods-for-rate-recording | 2026-11-11 | Persisted target observation periods for rate recording
+Version: v2.38.0
 Status: Draft
 
 **Improvements**
@@ -306,6 +377,7 @@ Status: Draft
   session-duration basis unless explicit target periods are saved.
 
 ## 2026-11-10-superadmin-turns-ai-on-per-tpms-facility | 2026-11-10 | Superadmin turns AI on per TPMS facility
+Version: v2.37.0
 Status: Draft
 
 **New Features**
@@ -314,6 +386,7 @@ Status: Draft
 - When AI is off for a user's facility, they don't see the AI buttons and the server refuses AI requests from them.
 
 ## 2026-11-07-clear-read-only-and-action-permission-states | 2026-11-07 | Clear read-only and action-permission states
+Version: v2.36.0
 Status: Draft
 
 **Improvements**
@@ -322,6 +395,7 @@ Status: Draft
 - Prompting-template empty states suggest creation only when the user has Create permission. Authorized actions can still be disabled for clinical locks or pending requests, with the existing explanations retained.
 
 ## 2026-11-07-privilege-based-pages-and-actions | 2026-11-07 | Privilege-based pages and actions
+Version: v2.36.0
 Status: Draft
 
 **Fixed Issues**
@@ -338,6 +412,7 @@ Status: Draft
 - Privileges shows mandatory administrator permissions as locked, matching the server. Effective permissions refresh when returning to the app or reconnecting, without interrupting pending offline work.
 
 ## 2026-11-07-session-note-annotations-and-program-modifications | 2026-11-07 | Session-note annotations and program modifications
+Version: v2.36.0
 Status: Draft
 
 **New Features**
@@ -353,6 +428,7 @@ Status: Draft
 <!-- /developer-fix -->
 
 ## 2026-11-06-protect-recorded-target-definitions | 2026-11-06 | Protect recorded target definitions
+Version: v2.35.0
 Status: Draft
 
 **Improvements**
@@ -362,6 +438,7 @@ Status: Draft
 - Target editors show protected controls. Single-target, bulk, program-template propagation, and prompt-template API updates enforce the same protections.
 
 ## 2026-11-06-overlapping-graph-points | 2026-11-06 | Overlapping graph points
+Version: v2.35.0
 Status: Draft
 
 **Fixed Issues**
@@ -369,6 +446,7 @@ Status: Draft
 - Tooltips keep each target's individual value and trial totals. Hiding a target updates the marker; plotted dates, values, and calculation rules are unchanged.
 
 ## 2026-11-06-supervisor-session-recording | 2026-11-06 | Supervisor session recording
+Version: v2.35.0
 Status: Draft
 
 **Fixed Issues**
@@ -376,6 +454,7 @@ Status: Draft
 - Staff appointment ownership now compares local DCM user IDs for stored appointments and TherapyPMS provider IDs for live TherapyPMS appointments. Client assignment, practice scoping, recording ownership, and Start Session permissions remain enforced.
 
 ## 2026-11-06-appointment-controls-respect-session-setups | 2026-11-06 | Appointment controls respect session setups
+Version: v2.35.0
 Status: Draft
 
 **Fixed Issues**
@@ -383,6 +462,7 @@ Status: Draft
 - Completed, cancelled, no-show, and already-started appointments no longer show program-assignment actions. The calendar uses the same rules and displays saved program snapshots for existing recordings.
 
 ## 2026-11-06-reusable-session-setups | 2026-11-06 | Reusable session setups
+Version: v2.35.0
 Status: Draft
 
 **New Features**
@@ -405,6 +485,7 @@ Requires the reusable-session-setup migration before use. Existing appointment p
 <!-- /developer-fix -->
 
 ## 2026-11-05-graph-values-follow-target-measurements | 2026-11-05 | Graph values follow target measurements
+Version: v2.34.0
 Status: Draft
 
 **Fixed Issues**
@@ -417,6 +498,7 @@ Status: Draft
 - Rate timer windows are not stored by the recording apps. Historical target-specific observation rates cannot be reconstructed; graphs explicitly identify rates based on session time.
 
 ## 2026-11-05-analytics-date-and-data-point-corrections | 2026-11-05 | Analytics date and data point corrections
+Version: v2.34.0
 Status: Draft
 
 **Fixed Issues**
@@ -425,6 +507,7 @@ Status: Draft
 - Graphs use straight paths between recorded measurements, with extra horizontal room for edge data points.
 
 ## 2026-11-05-client-history-refresh | 2026-11-05 | Client history refresh
+Version: v2.34.0
 Status: Draft
 
 **Improvements**
@@ -432,6 +515,7 @@ Status: Draft
 - The timeline uses a narrower layout on phones and shows the date for every event. Session summaries and activity audit trails remain available.
 
 ## 2026-11-05-dashboard-simplification | 2026-11-05 | Dashboard simplification
+Version: v2.34.0
 Status: Draft
 
 **Improvements**
@@ -441,6 +525,7 @@ Status: Draft
 - Shortcuts stack on narrow screens, and the whole dashboard scrolls together on mobile.
 
 ## 2026-11-05-h5-caregiver-two-way-messaging | 2026-11-05 | H5: Caregiver two-way messaging
+Version: v2.34.0
 Status: Draft
 
 **New Features**
@@ -455,6 +540,7 @@ Prepared locally. A tenant migration and configured notification services are re
 <!-- /developer-fix -->
 
 ## 2026-11-05-account-appearance-preferences | 2026-11-05 | Account appearance preferences
+Version: v2.34.0
 Status: Draft
 
 **New Features**
@@ -463,6 +549,7 @@ Status: Draft
 - Medium preserves the current size and Inter font. Preferences apply across the app and persist in the current browser; the theme also stays synced with the sidebar toggle.
 
 ## 2026-11-05-single-row-sessions-toolbar | 2026-11-05 | Single-row Sessions toolbar
+Version: v2.34.0
 Status: Draft
 
 **Improvements**
@@ -471,6 +558,7 @@ Status: Draft
 - Status counts remain available in the dropdown.
 
 ## 2026-11-05-simpler-sessions-toolbar | 2026-11-05 | Simpler Sessions toolbar
+Version: v2.34.0
 Status: Draft
 
 **Improvements**
@@ -479,6 +567,7 @@ Status: Draft
 - Renamed Quick Start to Start session and added an accessible Clear date range button.
 
 ## 2026-11-05-standalone-abc-section | 2026-11-05 | Standalone ABC section
+Version: v2.34.0
 Status: Draft
 
 **Improvements**
@@ -486,6 +575,7 @@ Status: Draft
 - Moved Standalone ABC Incidents into a collapsed More section below the Sessions list, freeing space for appointments. Open More to view or record an incident.
 
 ## 2026-11-05-client-sessions-layout | 2026-11-05 | Client Sessions layout
+Version: v2.34.0
 Status: Draft
 
 **Improvements**
@@ -495,6 +585,7 @@ Status: Draft
 - Reduced appointment and walk-in row spacing while preserving session permissions, recording controls, notes and approvals.
 
 ## 2026-11-05-compact-program-rows | 2026-11-05 | Compact program rows
+Version: v2.34.0
 Status: Draft
 
 **Improvements**
@@ -502,6 +593,7 @@ Status: Draft
 - Program names, codes and last-run dates now appear on one line, with smaller badges and reduced row padding. Long program names show in full on hover.
 
 ## 2026-11-05-programs-pagination-and-viewport-layout | 2026-11-05 | Programs pagination and viewport layout
+Version: v2.34.0
 Status: Draft
 
 **Improvements**
@@ -510,6 +602,7 @@ Status: Draft
 - Added page navigation, result ranges and 10/20/50 rows per page. Filters reset to page one, and Select all applies to the current page while preserving selections on other pages.
 
 ## 2026-11-05-client-programs-layout | 2026-11-05 | Client Programs layout
+Version: v2.34.0
 Status: Draft
 
 **Improvements**
@@ -518,6 +611,7 @@ Status: Draft
 - Updated table spacing, tags and always-visible row actions, using theme colors for light and dark mode. Existing permissions and program workflows are preserved.
 
 ## 2026-11-05-client-summary-card-readability | 2026-11-05 | Client summary card readability
+Version: v2.34.0
 Status: Draft
 
 **Fixed Issues**
@@ -526,6 +620,7 @@ Status: Draft
 - Made the single summary card more compact and increased the contrast of client details.
 
 ## 2026-11-05-appointment-reminder-preference-location | 2026-11-05 | Appointment reminder preference location
+Version: v2.34.0
 Status: Draft
 
 **Improvements**
@@ -534,6 +629,7 @@ Status: Draft
 - Organization and practice reminder policies continue to apply; saved client preferences are preserved.
 
 ## 2026-11-05-sidebar-notification-and-theme-controls | 2026-11-05 | Sidebar notification and theme controls
+Version: v2.34.0
 Status: Draft
 
 **Improvements**
@@ -542,6 +638,7 @@ Status: Draft
 - Removed the empty desktop top bar to give pages more room.
 
 ## 2026-11-04-therapypms-appointment-sync-on-login | 2026-11-04 | TherapyPMS appointment sync on login
+Version: v2.33.0
 Status: Draft
 
 **Improvements**
@@ -551,6 +648,7 @@ Status: Draft
 - Active appointment pulls are reused rather than dispatching duplicate login-triggered jobs.
 
 ## 2026-11-04-h3-organization-analytics-dashboard | 2026-11-04 | H3: Organization analytics dashboard
+Version: v2.33.0
 Status: Draft
 
 **New Features**
@@ -567,6 +665,7 @@ Prepared locally. All 58 targeted tests (26 reporting tests and 32 email-reminde
 <!-- /developer-fix -->
 
 ## 2026-11-04-h4-appointment-email-reminders | 2026-11-04 | H4: Appointment email reminders
+Version: v2.33.0
 Status: Draft
 
 **New Features**
@@ -582,6 +681,7 @@ Prepared locally. All 32 synthetic reminder tests, web TypeScript, the isolated 
 <!-- /developer-fix -->
 
 ## 2026-11-03-organization-free-trials-and-premium-billing | 2026-11-03 | Organization free trials and premium billing
+Version: v2.32.0
 Status: Draft
 
 **New Features**
@@ -598,6 +698,7 @@ Prepared locally for backend and web only. Synthetic service/API/HTTP and browse
 <!-- /developer-fix -->
 
 ## 2026-11-03-m2-client-document-storage | 2026-11-03 | M2: Client document storage
+Version: v2.32.0
 Status: Draft
 
 **New Features**
@@ -616,6 +717,7 @@ Status: Draft
 - Added binary downloads through the existing cookie-protected browser transport, preserving session refresh and upload CSRF protections.
 
 ## 2026-11-02-scatterplot-observation-coverage | 2026-11-02 | Scatterplot observation coverage
+Version: v2.31.0
 Status: Draft
 
 **New Features**
@@ -636,6 +738,7 @@ Prepared locally. Backend, web offline simulation, rendering, Flutter recovery a
 <!-- /developer-fix -->
 
 ## 2026-11-02-h6-scatterplot-data-collection | 2026-11-02 | H6: Scatterplot data collection
+Version: v2.31.0
 Status: Draft
 
 **New Features**
@@ -652,6 +755,7 @@ Prepared locally. Regression, synthetic database/rendering, web TypeScript, and 
 <!-- /developer-fix -->
 
 ## 2026-11-02-rbt-supervision-tracking | 2026-11-02 | RBT supervision tracking
+Version: v2.31.0
 Status: Draft
 
 **New Features**
@@ -677,6 +781,7 @@ Prepared locally. Backend regression tests, disposable persistence checks, and T
 <!-- /developer-fix -->
 
 ## 2026-10-30-clinical-resource-access-checks | 2026-10-30 | Clinical resource access checks
+Version: v2.30.0
 Status: Draft
 
 **Fixed Issues**
@@ -688,6 +793,7 @@ Status: Draft
 - Local changes only. Multi-organization database and browser acceptance remain unverified; this entry is not ready for publication.
 
 ## 2026-10-26-integration-platform-dropdown | 2026-10-26 | Integration platform dropdown
+Version: v2.29.0
 Status: Draft
 
 **Fixed Issues**
@@ -695,6 +801,7 @@ Status: Draft
 - Fixed the platform selection menu being cut off by the connection card on the Integrations page.
 
 ## 2026-10-25-https-protection-preparation | 2026-10-25 | HTTPS protection preparation
+Version: v2.28.0
 Status: Draft
 
 **Improvements**
@@ -704,6 +811,7 @@ Status: Draft
 - Documented the hosting configuration and checks required before release. These changes are prepared locally and have not been deployed.
 
 ## 2026-10-25-android-session-protection | 2026-10-25 | Android session protection
+Version: v2.28.0
 Status: Draft
 
 **Improvements**
@@ -715,6 +823,7 @@ Status: Draft
 - Prepared and tested locally; physical Android testing is still required before release. Mobile sign-in with two-step verification remains unavailable.
 
 ## 2026-10-25-production-audit-monitoring-preparation | 2026-10-25 | Production audit monitoring preparation
+Version: v2.28.0
 Status: Draft
 
 **Improvements**
@@ -726,6 +835,7 @@ Status: Draft
 - Production destinations and host configuration must be approved and installed before monitoring is active.
 
 ## 2026-10-25-separate-android-notification-controls | 2026-10-25 | Separate Android notification controls
+Version: v2.28.0
 Status: Draft
 
 **New Features**
@@ -739,6 +849,7 @@ Status: Draft
 - Android delivery requires the device to be registered for push notifications and notification permission to be allowed on the phone.
 
 ## 2026-10-24-verify-sensitive-account-changes | 2026-10-24 | Verify sensitive account changes
+Version: v2.27.0
 Status: Draft
 
 **Improvements**
@@ -749,6 +860,7 @@ Status: Draft
 - Strengthened MFA checking so simultaneous requests cannot reuse the same code.
 
 ## 2026-10-24-safer-browser-sign-in-storage | 2026-10-24 | Safer browser sign-in storage
+Version: v2.27.0
 Status: Draft
 
 **Improvements**
@@ -759,6 +871,7 @@ Status: Draft
 - Android sign-in continues using its existing authentication flow.
 
 ## 2026-10-24-account-security-audit-records | 2026-10-24 | Account security audit records
+Version: v2.27.0
 Status: Draft
 
 **Improvements**
@@ -768,6 +881,7 @@ Status: Draft
 - Records distinguish completed sign-ins from requests awaiting two-step verification. Passwords, PINs and session tokens are excluded.
 
 ## 2026-10-24-verify-before-turning-off-pin-protection | 2026-10-24 | Verify before turning off PIN protection
+Version: v2.27.0
 Status: Draft
 
 **Improvements**
@@ -777,6 +891,7 @@ Status: Draft
 - Incorrect verification attempts share the existing five-attempt limit and temporary lockout. Failed verification keeps PIN protection unchanged.
 
 ## 2026-10-24-stronger-pin-protection | 2026-10-24 | Stronger PIN protection
+Version: v2.27.0
 Status: Draft
 
 **Improvements**
@@ -786,6 +901,7 @@ Status: Draft
 - Changing an existing PIN requires the current PIN. Forgotten PINs can be reset by verifying the account password; incorrect recovery attempts also count toward the limit.
 
 ## 2026-10-24-in-app-help-assistant | 2026-10-24 | In-app help assistant
+Version: v2.27.0
 Status: Draft
 
 **New Features**
@@ -796,6 +912,7 @@ Status: Draft
 - When the assistant can't resolve a question itself, it offers a "Send this as a support ticket" button. One click emails the full conversation to the practice's support inbox so a human can follow up — no separate support form needed.
 
 ## 2026-10-21-sidebar-follows-module-permissions | 2026-10-21 | Sidebar follows module permissions
+Version: v2.26.0
 Status: Draft
 
 **Improvements**
@@ -807,6 +924,7 @@ Status: Draft
 - Activities now hides session and note rows without the matching permissions, disables their data requests, and shows export and audit actions only to users with access.
 
 ## 2026-10-21-approved-session-data-is-locked | 2026-10-21 | Approved session data is locked
+Version: v2.26.0
 Status: Draft
 
 **Improvements**
@@ -815,6 +933,7 @@ Status: Draft
 - Approved sessions no longer show Edit data. Delayed offline uploads cannot change approved session data.
 
 ## 2026-10-21-telehealth-links-on-synced-appointments | 2026-10-21 | Telehealth links on synced appointments
+Version: v2.26.0
 Status: Draft
 
 **Improvements**
@@ -824,6 +943,7 @@ Status: Draft
 - Pull appointments again to bring meeting links into previously synced appointments.
 
 ## 2026-10-21-separate-therapypms-connections-for-each-facility | 2026-10-21 | Separate TherapyPMS connections for each facility
+Version: v2.26.0
 Status: Draft
 
 **Improvements**
@@ -833,6 +953,7 @@ Status: Draft
 - Existing TherapyPMS connections move to their matching facility automatically.
 
 ## 2026-10-21-therapypms-provider-role-sync | 2026-10-21 | TherapyPMS provider role sync
+Version: v2.26.0
 Status: Draft
 
 **Fixed Issues**
@@ -840,6 +961,7 @@ Status: Draft
 - TherapyPMS provider sync now uses `provider_type`: Supervisor maps to Clinical Supervisor; other values map to Staff. Each sync updates both the provider directory and linked Progressly account, including existing providers whose type changed.
 
 ## 2026-10-20-session-service-setting-and-service-address | 2026-10-20 | Session Service Setting and Service Address
+Version: v2.25.0
 Status: Draft
 
 **New Features**
@@ -853,6 +975,7 @@ Status: Draft
 - The address requirement also applies to manual sessions and sessions submitted through batch sync.
 
 ## 2026-10-17-appointment-reminders-and-schedule-updates | 2026-10-17 | Appointment reminders and schedule updates
+Version: v2.24.0
 Status: Draft
 
 **New Features**
@@ -861,18 +984,21 @@ Status: Draft
 - Users can manage these notifications from their notification preferences.
 
 ## 2026-10-17-client-tabs-show-the-correct-client-data | 2026-10-17 | Client tabs show the correct client data
+Version: v2.24.0
 Status: Draft
 
 **Fixed Issues**
 - Fixed an ID mismatch that could hide a client's programs, session notes, progress, behavior plans, and history when staff opened the client page. These sections now recognize both the DCM client ID and the external patient ID, while staff access remains limited to their assigned clients.
 
 ## 2026-10-17-pin-unlock-keeps-the-current-page-open | 2026-10-17 | PIN unlock keeps the current page open
+Version: v2.24.0
 Status: Draft
 
 **Fixed Issues**
 - Entering the correct PIN after the screen locked could send users to the login page because their session tokens expired with the inactivity timer. PIN unlock now renews the session and returns users to the page they were using.
 
 ## 2026-10-17-live-supervisor-guidance-during-sessions | 2026-10-17 | Live supervisor guidance during sessions
+Version: v2.24.0
 Status: Draft
 
 **New Features**
@@ -881,6 +1007,7 @@ Status: Draft
 - Only users with session approval access can send guidance; staff can read guidance on their own sessions.
 
 ## 2026-10-17-group-sessions | 2026-10-17 | Group Sessions
+Version: v2.24.0
 Status: Draft
 
 **New Features**
@@ -888,6 +1015,7 @@ Status: Draft
 You can now run a data collection session for multiple clients at once — for example, a social skills group — instead of one client at a time. Pick the clients in the group, choose which programs/goals to run for each one, and switch between clients during the session using a tab bar at the top. Each client's data is still scored, tracked, and reported on individually, exactly as before — grouping them together just makes it easier to run and manage the session as one unit. Find it under **Group Sessions** in the sidebar.
 
 ## 2026-10-17-saved-signatures-for-session-notes | 2026-10-17 | Saved Signatures for Session Notes
+Version: v2.24.0
 Status: Draft
 
 **New Features**
@@ -895,6 +1023,7 @@ Status: Draft
 Users can save a signature in Settings → Account by drawing it or uploading an image. Staff, supervisors, and admins can apply it when signing an approved session note. The signature is recorded on the note and included in its PDF; updating or removing the saved signature does not change notes already signed.
 
 ## 2026-10-17-target-progress-graphs-in-reports | 2026-10-17 | Target progress graphs in reports
+Version: v2.24.0
 Status: Draft
 
 **New Features**
@@ -902,6 +1031,7 @@ Status: Draft
 Client progress reports now have a **"Target progress graph"** option in each program's Settings. When turned on, a small success-rate graph (daily, over the report's date range) appears under every target in that program's table, so you can see each target's trend at a glance instead of just the summary numbers. Off by default; turn it on per program.
 
 ## 2026-10-15-profile-picture | 2026-10-15 | Profile Picture
+Version: v2.23.0
 Status: Draft
 
 **New Features**
@@ -909,6 +1039,7 @@ Status: Draft
 You can now add a profile picture in Settings → Account. It also appears next to your name in the sidebar. If you don't set one, your initials are shown instead, same as before.
 
 ## 2026-10-15-duration-all-trials-view-shows-goal-progress | 2026-10-15 | Duration "All Trials" View Shows Goal Progress
+Version: v2.23.0
 Status: Draft
 
 **Improvements**
@@ -916,6 +1047,7 @@ Status: Draft
 In the duration "All Trials" table, each occurrence is now highlighted green when it meets the target's duration goal and red when it falls short. This replaces the previous highlighting of only the longest and shortest occurrences within a session. Targets without a duration goal remain uncolored.
 
 ## 2026-10-15-trial-count-progress-on-target-cards | 2026-10-15 | Trial Count Progress on Target Cards
+Version: v2.23.0
 Status: Draft
 
 **New Features**
@@ -923,6 +1055,7 @@ Status: Draft
 While recording a session, target cards now display the number of trials collected against the minimum required (e.g., "8 / 10"). The progress indicator turns green once the minimum is met. This feature appears only for targets with a minimum trial count configured in their mastery workflow and is currently available on web only.
 
 ## 2026-10-15-ai-note-template-drafting-uses-client-programs | 2026-10-15 | AI Note Template Drafting Uses Client Programs
+Version: v2.23.0
 Status: Draft
 
 **Improvements**
@@ -930,6 +1063,7 @@ Status: Draft
 The "Draft a note template with AI" workflow now asks you to select a client first, followed by one of that client's actual programs. This helps ensure the drafted fields reflect what's really being tracked for the selected client rather than using a generic program from your library.
 
 ## 2026-10-15-voice-to-text-for-session-notes | 2026-10-15 | Voice-to-Text for Session Notes
+Version: v2.23.0
 Status: Draft
 
 **New Features**
@@ -938,6 +1072,7 @@ Added voice dictation for text fields in session notes. An admin must first enab
 Once enabled, a microphone icon appears next to text fields in a note. Tap the icon, speak, and your words will be transcribed into the field. Supported browsers: Chrome, Edge, and Safari.
 
 ## 2026-10-14-time-zone-setting-in-account-settings | 2026-10-14 | Time Zone setting in Account Settings
+Version: v2.22.0
 Status: Draft
 
 **New Features**
@@ -954,12 +1089,14 @@ Status: Draft
 Note: this covers the web app, analytics, PDFs, and exports. The mobile app still shows times in device time — follow-up planned.
 
 ## 2026-10-12-single-sign-on-from-therapypms | 2026-10-12 | Single sign-on from TherapyPMS
+Version: v2.21.0
 Status: Draft
 
 **New Features**
 - **Sign in to Progressly directly from TherapyPMS**: Admins, supervisors, and staff who are already logged into TherapyPMS can now land in Progressly already signed in, with no separate password prompt. Requires the account to already exist in Progressly; MFA still applies if the account has it turned on.
 
 ## 2026-10-11-13-new-target-data-collection-types-added-to-programs | 2026-10-11 | 13 new target/data collection types added to programs
+Version: v2.20.0
 Status: Draft
 
 **New Features**
@@ -976,6 +1113,7 @@ Status: Draft
 - The program overview/analytics dashboard doesn't yet show correct numbers for most of the new types (shows 0% or "insufficient data" instead) — only the calculation engine behind it is ready.
 
 ## 2026-10-11-pin-lock-screen-redesign-and-lockout-protection | 2026-10-11 | PIN lock screen redesign and lockout protection
+Version: v2.20.0
 Status: Draft
 
 **New Features**
@@ -985,6 +1123,7 @@ Status: Draft
 - **Redesigned PIN lock screen**: The screen-lock overlay got a cleaner, more modern look — simplified avatar and status display, a flatter on-screen keypad, and tidier spacing, with no change to how unlocking works.
 
 ## 2026-10-10-inactivity-auto-logout-and-personal-pin-screen-lock | 2026-10-10 | Inactivity auto-logout and personal PIN screen lock
+Version: v2.19.0
 Status: Draft
 
 **New Features**
@@ -996,6 +1135,7 @@ Status: Draft
 - **PIN lock screen experience**: Provides a fullscreen lock overlay with masked digit indicators, support for both physical keyboard and on-screen numeric keypad input, invalid attempt feedback with shake animations, and a direct "Log out" button. The lock persists across browser refreshes to prevent lock bypass.
 
 ## 2026-09-30-client-directory-saved-views-backed-by-server | 2026-09-30 | Client Directory: saved views backed by server
+Version: v2.18.0
 Status: Draft
 
 **Improvements**
@@ -1003,6 +1143,7 @@ Status: Draft
 - In the My Views dropdown, clicking a view name now **applies** it immediately (sets the status filter and columns). A pencil icon next to each view opens the **Edit View** dialog to rename, change visibility, or delete it.
 
 ## 2026-09-29-more-program-library-buttons-now-match-actual-permissions | 2026-09-29 | More program/library buttons now match actual permissions
+Version: v2.17.0
 Status: Draft
 
 **Fixed Issues**
@@ -1010,24 +1151,28 @@ Status: Draft
 - In **Central Library**, "Import to My Library", "Import Entire Folder", and the per-target copy button were showing even for roles without import permission, so clicking them failed. They now only appear for users who can actually import.
 
 ## 2026-09-29-assign-programs-button-now-matches-actual-permission | 2026-09-29 | "Assign Programs" button now matches actual permission
+Version: v2.17.0
 Status: Draft
 
 **Fixed Issues**
 - On a client's Sessions page, "Assign Programs" / "Edit Programs" / "Link Appointment" were showing for staff who don't actually have that permission, so clicking them failed. The buttons now check the correct permission and are hidden for anyone without it, matching what the backend already enforced.
 
 ## 2026-09-29-start-recording-now-follows-client-provider-assignments | 2026-09-29 | Start Recording now follows client-provider assignments
+Version: v2.17.0
 Status: Draft
 
 **Fixed Issues**
 - On a client's Sessions page, "Start Recording" is now locked to the provider(s) actually assigned to that client in Manage Users / Client Directory, instead of whoever TherapyPMS listed as the appointment's provider.
 
 ## 2026-09-29-staff-client-lists-now-match-their-assignments | 2026-09-29 | Staff client lists now match their assignments
+Version: v2.17.0
 Status: Draft
 
 **Fixed Issues**
 - Staff members (including those linked through TherapyPMS) now only see clients they've actually been assigned to in Manage Users / Client Directory — in the central client switcher, Central Library, Clients list, and elsewhere. Previously, TPMS-linked staff could see every client in the practice regardless of their assignments.
 
 ## 2026-09-29-single-sign-on-sso-launch-from-external-systems | 2026-09-29 | Single Sign-On (SSO) launch from external systems
+Version: v2.17.0
 Status: Hidden
 Type: Developer Fix
 
@@ -1036,6 +1181,7 @@ Type: Developer Fix
 - The other system can also have its users land on a specific page inside Progressly right after signing in: include a `redirect_url` inside the signed token (a path like `/clients/42`, or a full Progressly URL), and `GET /sso/login?token=...` responds with a redirect there (tokens attached safely, never logged or sent anywhere else). The destination has to come from inside the signed token, not a plain link parameter, so no one else can hijack where a valid sign-in link sends someone — and it can only ever point inside Progressly's own site, never out to an external one.
 
 ## 2026-09-29-therapypms-pulls-now-run-in-the-background | 2026-09-29 | TherapyPMS pulls now run in the background
+Version: v2.17.0
 Status: Draft
 
 **Improvements**
@@ -1045,6 +1191,7 @@ Status: Draft
 - A years-long appointment pull could fail partway through if TherapyPMS returned even one appointment with bad data (a negative duration) — that single row stopped the whole month's batch from saving. Bad duration values are now ignored instead of blocking the sync.
 
 ## 2026-09-29-recording-screen-now-notices-when-someone-else-closes-your-session | 2026-09-29 | Recording screen now notices when someone else closes your session
+Version: v2.17.0
 Status: Draft
 
 **Fixed Issues**
@@ -1053,12 +1200,14 @@ Status: Draft
 - A staff member's session list for a client only ever showed sessions they personally recorded — so if a colleague had already recorded and submitted today's appointment, their screen still offered "Start Recording," risking a duplicate session for the same appointment. The list now shows every session recorded for that client, by anyone. Opening the full trial/behavior detail of a colleague's session is still limited to the recording staff member, supervisors and admins — other staff see its status (e.g. "Approved") instead of a working link.
 
 ## 2026-09-28-program-edits-now-show-an-error-message-when-they-fail | 2026-09-28 | Program edits now show an error message when they fail
+Version: v2.16.0
 Status: Draft
 
 **Fixed Issues**
 - Editing a program's status/phase, tags, treatment area, instructions, or other fields silently did nothing when the save was rejected (e.g. an invalid value) — no error appeared, so it looked like the click didn't register. Now shows an error message explaining what went wrong.
 
 ## 2026-09-28-program-library-copy-programs-straight-to-clients | 2026-09-28 | Program Library: copy programs straight to clients
+Version: v2.16.0
 Status: Draft
 
 **New Features**
@@ -1069,12 +1218,14 @@ Status: Draft
 - **Preview** now opens a compact, read-only view (program name, Instructions/Targets tabs, target status pills) instead of the full editor — click the expand icon to switch to full editing.
 
 ## 2026-09-28-update-available-notice | 2026-09-28 | Update available notice
+Version: v2.16.0
 Status: Draft
 
 **New Features**
 - When a new version of the app is deployed, users now see a banner at the bottom of the screen letting them know an update is ready, with buttons to update now (reloads with the latest version) or dismiss for later.
 
 ## 2026-09-28-client-directory-toolbar-filters-export-and-saved-views | 2026-09-28 | Client Directory: toolbar filters, export, and saved views
+Version: v2.16.0
 Status: Draft
 
 **New Features**
@@ -1094,6 +1245,7 @@ Status: Draft
 - Assigned rows are highlighted with a subtle blue tint so it's immediately clear who is already on the client.
 
 ## 2026-09-27-client-list-cleanup-real-clients-a-new-directory-screen-and-a-session | 2026-09-27 | Client list cleanup: real clients, a new directory screen, and a sessions fix
+Version: v2.15.0
 Status: Draft
 
 **New Features**
@@ -1110,6 +1262,7 @@ Status: Draft
 - Cleaned up leftover provider/test data that had been mixed into the client list.
 
 ## 2026-09-27-favorite-your-clients-for-easy-access | 2026-09-27 | Favorite your clients for easy access
+Version: v2.15.0
 Status: Draft
 
 **New Features**
@@ -1118,6 +1271,7 @@ Status: Draft
 - Favorites are per-user — favoriting a client only affects your own dropdown, not your teammates'.
 
 ## 2026-09-27-providers-sign-in-with-a-progressly-password-not-therapypms | 2026-09-27 | Providers sign in with a Progressly password, not TherapyPMS
+Version: v2.15.0
 Status: Draft
 
 **New Features**
@@ -1140,6 +1294,7 @@ Status: Draft
 - The password-set link (and some notification email links) show "localhost" instead of the real Progressly address in the live environment. This is a server configuration setting, not a code issue — needs to be corrected on the live server.
 
 ## 2026-09-26-therapypms-pull-sync-clients-providers-appointments | 2026-09-26 | TherapyPMS Pull sync (clients, providers, appointments)
+Version: v2.14.0
 Status: Draft
 
 **New Features**
@@ -1151,6 +1306,7 @@ Status: Draft
 - Disconnect clears stored TherapyPMS credentials and the practice binding, not just the connected flag.
 
 ## 2026-09-26-organization-integrations-page | 2026-09-26 | Organization Integrations page
+Version: v2.14.0
 Status: Draft
 
 **New Features**
@@ -1160,6 +1316,7 @@ Status: Draft
 - Wrong or missing credentials show an error toast; a success toast and status line confirm a working connection.
 
 ## 2026-09-26-layout-settings-for-note-and-form-templates | 2026-09-26 | Layout Settings for Note and Form Templates
+Version: v2.14.0
 Status: Draft
 
 **New Features**
@@ -1168,6 +1325,7 @@ Status: Draft
 - The configured header/footer is now included automatically every time a note or form is exported as a PDF.
 
 ## 2026-09-26-templates-moved-into-their-own-pages | 2026-09-26 | Templates moved into their own pages
+Version: v2.14.0
 Status: Draft
 
 **Improvements**
@@ -1176,6 +1334,7 @@ Status: Draft
 - Old `/templates` links still work — they redirect to Note Templates.
 
 ## 2026-09-26-central-library-redesign | 2026-09-26 | Central Library redesign
+Version: v2.14.0
 Status: Draft
 
 **Improvements**
@@ -1184,6 +1343,7 @@ Status: Draft
 - Added a "Showing X of Y programs" line above the grid.
 
 ## 2026-09-26-email-option-for-two-step-verification | 2026-09-26 | Email option for two-step verification
+Version: v2.14.0
 Status: Draft
 
 **New Features**
@@ -1195,6 +1355,7 @@ Status: Draft
 - Turning off two-step verification with the email method now also requires a fresh code, same as the authenticator app.
 
 ## 2026-09-26-program-library-redesign | 2026-09-26 | Program Library redesign
+Version: v2.14.0
 Status: Draft
 
 **Improvements**
@@ -1205,6 +1366,7 @@ Status: Draft
 - The Client tab's program table got the same "+ Assign area" quick-fix link for consistency.
 
 ## 2026-09-24-menu-permissions-enforced-everywhere-for-programs-and-notes | 2026-09-24 | Menu permissions enforced everywhere for programs and notes
+Version: v2.13.0
 Status: Draft
 
 **Improvements**
@@ -1214,6 +1376,7 @@ Status: Draft
 - The program details window hides everything that changes the program (rename, phase, add/import/edit/delete targets, bulk edit, modules) from people who can only view. The **Organization** switch on the Programs page only shows for people who can open the Program Library.
 
 ## 2026-09-24-delete-archived-programs | 2026-09-24 | Delete archived programs
+Version: v2.13.0
 Status: Draft
 
 **New Features**
@@ -1221,6 +1384,7 @@ Status: Draft
 - A program can only be permanently deleted after it has been archived, and not if any of its targets has recorded session data. Those programs stay archived so no clinical records are lost.
 
 ## 2026-09-24-fixed-archiving-a-program-did-nothing | 2026-09-24 | Fixed: archiving a program did nothing
+Version: v2.13.0
 Status: Draft
 
 **Fixed Issues**
@@ -1228,6 +1392,7 @@ Status: Draft
 - The **Archived** tab was always empty. It now lists the client's archived programs.
 
 ## 2026-09-24-targets-required-when-creating-a-program | 2026-09-24 | Targets required when creating a program
+Version: v2.13.0
 Status: Draft
 
 **Improvements**
@@ -1236,6 +1401,7 @@ Status: Draft
 - The program and its targets are now saved together. If a target is rejected, nothing is saved, instead of a program being created with only some of its targets.
 
 ## 2026-09-24-new-program-preview-step | 2026-09-24 | New Program: Preview step
+Version: v2.13.0
 Status: Draft
 
 **Improvements**
@@ -1244,6 +1410,7 @@ Status: Draft
 - Instructions (for everyone, or staff-only) are now written on the Preview step, just above the **Create program** button.
 
 ## 2026-09-24-stricter-program-validation | 2026-09-24 | Stricter program validation
+Version: v2.13.0
 Status: Draft
 
 **Improvements**
@@ -1252,6 +1419,7 @@ Status: Draft
 - In **New Program**, the name field stops at 200 characters (with a counter near the limit). Saving without a name takes you back to the name field with a message. Targets without a label or with a duplicate label show a warning icon.
 
 ## 2026-09-23-guided-new-program-dialog | 2026-09-23 | Guided New Program dialog
+Version: v2.12.0
 Status: Draft
 
 **Improvements**
@@ -1260,6 +1428,7 @@ Status: Draft
 - The main button now says **Create program** and is available on every step, with a hint that you can create it now and finish the rest later. The footer shows the current step and target count.
 
 ## 2026-09-23-friendlier-client-programs-page | 2026-09-23 | Friendlier client Programs page
+Version: v2.12.0
 Status: Draft
 
 **Improvements**
@@ -1270,6 +1439,7 @@ Status: Draft
 - Removed the row checkboxes, which had no bulk actions to go with them.
 
 ## 2026-09-23-professional-note-pdfs | 2026-09-23 | Professional note PDFs
+Version: v2.12.0
 Status: Draft
 
 **Improvements**
@@ -1277,6 +1447,7 @@ Status: Draft
 - Tables, headings and lists from the template carry over. Signatures show who signed, their role and when, and every page has a confidentiality footer with the page number.
 
 ## 2026-09-23-easier-note-forms | 2026-09-23 | Easier note forms
+Version: v2.12.0
 Status: Draft
 
 **Improvements**
@@ -1284,12 +1455,14 @@ Status: Draft
 - Required fields are labelled **Required**, the inputs have clearer hover and focus states, and the date and signature options sit in a tidy bar at the top with a short how-to line above the form.
 
 ## 2026-09-23-ai-note-templates-from-a-program | 2026-09-23 | AI note templates from a program
+Version: v2.12.0
 Status: Draft
 
 **New Features**
 - On **Templates → Notes**, the new **Draft with AI** button builds a note template from a Program Library program. Pick the program (add an optional instruction), and the template form opens pre-filled with suggested fields to review and edit before saving. Nothing is saved until you save it, and it only appears when AI is turned on.
 
 ## 2026-09-23-redesigned-sign-in-page | 2026-09-23 | Redesigned sign-in page
+Version: v2.12.0
 Status: Draft
 
 **Improvements**
@@ -1298,6 +1471,7 @@ Status: Draft
 - On phones the page stacks cleanly with the form first.
 
 ## 2026-09-23-new-library-program-matches-new-program | 2026-09-23 | New Library Program matches New Program
+Version: v2.12.0
 Status: Draft
 
 **Improvements**
@@ -1305,6 +1479,7 @@ Status: Draft
 - Draft with AI works in the same place, and its suggested targets are now added to the library program too.
 
 ## 2026-09-23-ai-on-off-switch | 2026-09-23 | AI on/off switch
+Version: v2.12.0
 Status: Hidden
 Type: Developer Fix
 
@@ -1313,6 +1488,7 @@ Type: Developer Fix
 - Changing it needs a server restart; the web app picks it up on the next page load.
 
 ## 2026-09-23-draft-programs-with-ai | 2026-09-23 | Draft programs with AI
+Version: v2.12.0
 Status: Draft
 
 **New Features**
@@ -1322,6 +1498,7 @@ Status: Draft
 - Descriptions are sent to the AI service, so don't type client names or details. It is a drafting aid, not clinical advice, and it is told not to copy published curricula.
 
 ## 2026-09-22-treatment-plan-signatures | 2026-09-22 | Treatment plan signatures
+Version: v2.11.0
 Status: Draft
 
 **New Features**
@@ -1331,6 +1508,7 @@ Status: Draft
 - Only finalized plans can be signed, each person can sign once, and staff-level users can't sign.
 
 ## 2026-09-22-draft-assessments-with-ai | 2026-09-22 | Draft assessments with AI
+Version: v2.11.0
 Status: Draft
 
 **New Features**
@@ -1342,6 +1520,7 @@ Status: Draft
 - AI drafting failed with a generic "The AI service returned an error" because the default model had been retired by the provider. The default model was updated, and the message now says when the configured model isn't available so it's clear what to change.
 
 ## 2026-09-22-assessment-programs | 2026-09-22 | Assessment programs
+Version: v2.11.0
 Status: Draft
 
 **New Features**
@@ -1352,6 +1531,7 @@ Status: Draft
 - Nothing from any licensed assessment is included; practices enter their own skills.
 
 ## 2026-09-22-trend-by-phase-birthday-icon-and-long-session-warnings | 2026-09-22 | Trend by phase, birthday icon and long-session warnings
+Version: v2.11.0
 Status: Draft
 
 **Improvements**
@@ -1360,6 +1540,7 @@ Status: Draft
 - **Long-session warnings.** On the Activities page, a session longer than 12 hours shows a warning icon next to its duration. Submitting a live session that has been open for more than 12 hours now asks you to confirm first, and its timer shows a warning mark.
 
 ## 2026-09-22-duration-all-trials-view | 2026-09-22 | Duration "All Trials" view
+Version: v2.11.0
 Status: Draft
 
 **New Features**
@@ -1373,6 +1554,7 @@ Status: Draft
 - The client **Analytics** page could open on a program that wasn't in the program buttons at the top (for example one with no targets), which looked empty. It now opens on the first program shown in the buttons.
 
 ## 2026-09-21-edit-data-in-completed-sessions | 2026-09-21 | Edit data in completed sessions
+Version: v2.10.0
 Status: Draft
 
 **New Features**
@@ -1382,6 +1564,7 @@ Status: Draft
 - Automatic target advancement and prompt fading are not re-run after an edit. Instead, when you click **Done editing**, a **Please review these goals** list shows any goals that changed stage or prompt level because of that session, so you can correct them by hand if the fixed data no longer supports the change.
 
 ## 2026-09-21-manual-session-entry | 2026-09-21 | Manual session entry
+Version: v2.10.0
 Status: Draft
 
 **New Features**
@@ -1391,12 +1574,14 @@ Status: Draft
 - Safeguards: a manual session can't end in the future, can't be longer than 24 hours, and can't start more than a year ago.
 
 ## 2026-09-21-session-recording-privilege-enforced | 2026-09-21 | Session recording privilege enforced
+Version: v2.10.0
 Status: Draft
 
 **Fixed Issues**
 - The **Start sessions** privilege is now enforced by the system, not just hidden in the screens. Roles without it can no longer start a session, record or delete data, submit, or upload photos and video during a session, even through the API. Admins always keep it, and roles that have it (staff and supervisors by default) see no change.
 
 ## 2026-09-21-graphs-baselines-last-run-date-and-report-saving | 2026-09-21 | Graphs, baselines, last run date and report saving
+Version: v2.10.0
 Status: Draft
 
 **New Features**
@@ -1410,6 +1595,7 @@ Status: Draft
 - **Progress reports are now saved on the server.** Before, drafts, published and locked reports lived only in one browser, so clearing the browser lost them and other computers couldn't see them. Existing browser drafts move up automatically the first time they're opened, and a "Saving… / Saved" note shows in the toolbar.
 
 ## 2026-09-21-multi-factor-authentication-mfa | 2026-09-21 | Multi-Factor Authentication (MFA)
+Version: v2.10.0
 Status: Draft
 
 **New Features**
@@ -1421,6 +1607,7 @@ Status: Draft
 - Web only for now. Users with MFA on can't sign in on the mobile app yet.
 
 ## 2026-09-21-session-prototypes-removed | 2026-09-21 | Session Prototypes removed
+Version: v2.10.0
 Status: Draft
 
 **Improvements**
@@ -1428,6 +1615,7 @@ Status: Draft
 - Removed the Session Prototypes tab from Settings and its privileges. Previously saved session prototypes were deleted.
 
 ## 2026-09-21-program-prototypes | 2026-09-21 | Program Prototypes
+Version: v2.10.0
 Status: Draft
 
 **New Features**
@@ -1436,6 +1624,7 @@ Status: Draft
 - New privileges for Program Prototypes (View, Create, Edit, Delete). Admins have them by default.
 
 ## 2026-09-21-what-s-new-page | 2026-09-21 | What's New page
+Version: v2.10.0
 Status: Draft
 
 **New Features**
@@ -1443,6 +1632,7 @@ Status: Draft
 - Superadmins can write, edit, publish and hide release notes from **Changelog** in the superadmin menu.
 
 ## 2026-09-21-knowledge-base-editing-improvements | 2026-09-21 | Knowledge Base editing improvements
+Version: v2.10.0
 Status: Draft
 
 **New Features**
