@@ -10,6 +10,12 @@ from ninja import Router
 from ninja.errors import HttpError
 
 from apps.accounts.models import APIKey, User
+from apps.accounts.permissions import (
+    SUPERADMIN_DELEGATABLE_PERMISSIONS,
+    require_not_targeting_sales_unless_superuser,
+    require_superadmin_or_any_delegated,
+    require_superadmin_or_delegated,
+)
 from apps.integrations.models import PullJob
 from .models import Domain, Organization, OrganizationTpmsAdminId
 from .schemas import (
@@ -31,6 +37,7 @@ from .schemas import (
     SuperadminUserCreate,
     SuperadminUserSchema,
     SuperadminUserUpdate,
+    SuperadminDelegatedPermissionsUpdate,
     TpmsAdminIdCreate,
     TpmsAdminEmailSettingSchema,
     TpmsAdminEmailSettingUpdate,
@@ -165,7 +172,9 @@ def _serialize_practice_email_settings() -> list[dict]:
 
 @router.get('/superadmin/practice-email-settings', response=list[OrganizationPracticeEmailSettingsSchema])
 def list_superadmin_practice_email_settings(request):
-    _require_superadmin(request)
+    # Shared read: the Features page needs manage_features, the Organizations
+    # & Facilities page needs manage_organizations — either unlocks the list.
+    require_superadmin_or_any_delegated(request, ('manage_features', 'manage_organizations'))
     return _serialize_practice_email_settings()
 
 
@@ -186,7 +195,7 @@ def _serialize_facility_integration(facility: OrganizationTpmsAdminId) -> dict:
 
 
 def _superadmin_integration_facility(request, mapping_id: int) -> OrganizationTpmsAdminId:
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_facility_integrations')
     # Organizations and facility mappings are shared tables. Resolve the selected
     # mapping explicitly, rather than using the superadmin's current tenant.
     try:
@@ -197,7 +206,7 @@ def _superadmin_integration_facility(request, mapping_id: int) -> OrganizationTp
 
 @router.get('/superadmin/facility-integrations', response=list[SuperadminFacilityIntegrationSchema])
 def list_superadmin_facility_integrations(request):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_facility_integrations')
     facilities = OrganizationTpmsAdminId.objects.select_related('organization').order_by(
         'organization__name', 'facility_name', 'admin_id',
     )
@@ -249,7 +258,7 @@ def disconnect_superadmin_facility_integration(request, mapping_id: int):
 
 @router.post('/superadmin/organizations', response={201: OrganizationPracticeEmailSettingsSchema})
 def create_superadmin_organization(request, data: OrganizationSuperadminCreate):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_organizations')
     slug = _normalize_slug(data.slug or data.name)
     schema_name = (data.schema_name or _schema_from_slug(slug)).lower()
     domain = (data.domain or _domain_for_slug(slug)).lower()
@@ -367,7 +376,7 @@ def update_superadmin_practice_email_setting(
     mapping_id: int,
     data: TpmsAdminEmailSettingUpdate,
 ):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_features')
     try:
         row = OrganizationTpmsAdminId.objects.get(id=mapping_id)
     except OrganizationTpmsAdminId.DoesNotExist:
@@ -663,7 +672,7 @@ def _serialize_superadmin_api_key(key: APIKey, facility_names: dict[int, str] | 
 
 @router.get('/superadmin/api-keys', response=list[SuperadminAPIKeySchema])
 def list_superadmin_api_keys(request, organization_id: int | None = None):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_api_keys')
     qs = APIKey.objects.select_related('organization').order_by('-created_at')
     if organization_id is not None:
         qs = qs.filter(organization_id=organization_id)
@@ -674,7 +683,7 @@ def list_superadmin_api_keys(request, organization_id: int | None = None):
 
 @router.post('/superadmin/api-keys', response={201: SuperadminAPIKeyCreatedSchema})
 def create_superadmin_api_key(request, data: SuperadminAPIKeyCreate):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_api_keys')
     try:
         org = Organization.objects.get(id=data.organization_id)
     except Organization.DoesNotExist:
@@ -723,7 +732,7 @@ def create_superadmin_api_key(request, data: SuperadminAPIKeyCreate):
 
 @router.delete('/superadmin/api-keys/{key_id}', response={204: None})
 def revoke_superadmin_api_key(request, key_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_api_keys')
     try:
         key = APIKey.objects.get(id=key_id)
     except APIKey.DoesNotExist:
@@ -743,7 +752,7 @@ def revoke_superadmin_api_key(request, key_id: int):
 # `role`/organization of their own to rank against).
 # ---------------------------------------------------------------------------
 
-_SUPERADMIN_ASSIGNABLE_ROLES = {User.Role.ADMIN, User.Role.SUPERVISOR, User.Role.STAFF}
+_SUPERADMIN_ASSIGNABLE_ROLES = {User.Role.ADMIN, User.Role.SUPERVISOR, User.Role.STAFF, User.Role.SALES}
 
 
 def _serialize_superadmin_user(user: User, facility_names: dict[int, str] | None = None) -> dict:
@@ -764,12 +773,16 @@ def _serialize_superadmin_user(user: User, facility_names: dict[int, str] | None
             if user.external_admin_id is not None else None
         ),
         'created_at': user.created_at,
+        'superadmin_delegated_permissions': {
+            key: bool((user.superadmin_delegated_permissions or {}).get(key))
+            for key in SUPERADMIN_DELEGATABLE_PERMISSIONS
+        },
     }
 
 
 @router.get('/superadmin/users', response=list[SuperadminUserSchema])
 def list_superadmin_users(request, organization_id: int | None = None, external_admin_id: int | None = None, role: str | None = None):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_users')
     from apps.accounts.models import User as _User
     valid_roles = {c[0] for c in _User.Role.choices}
     if role and role in valid_roles:
@@ -788,6 +801,11 @@ def list_superadmin_users(request, organization_id: int | None = None, external_
         qs = qs.filter(external_admin_id=external_admin_id)
     elif organization_id is not None:
         qs = qs.filter(organization_id=organization_id)
+    # A delegated (non-superuser) caller can't act on a 'sales' row anyway
+    # (require_not_targeting_sales_unless_superuser) — hide them here too so
+    # the UI never shows an Edit control that would just 403.
+    if not getattr(request.user, 'is_superuser', False):
+        qs = qs.exclude(role=User.Role.SALES)
     users = list(qs)
     facility_names = _facility_name_map({u.external_admin_id for u in users if u.external_admin_id is not None})
     return [_serialize_superadmin_user(u, facility_names) for u in users]
@@ -795,14 +813,15 @@ def list_superadmin_users(request, organization_id: int | None = None, external_
 
 @router.post('/superadmin/users', response={201: SuperadminUserSchema})
 def create_superadmin_user(request, data: SuperadminUserCreate):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_users')
+    require_not_targeting_sales_unless_superuser(request, data.role)
     try:
         org = Organization.objects.get(id=data.organization_id)
     except Organization.DoesNotExist:
         raise HttpError(404, 'Organization not found')
 
     if data.role not in _SUPERADMIN_ASSIGNABLE_ROLES:
-        raise HttpError(400, 'Role must be one of: admin, supervisor, staff')
+        raise HttpError(400, 'Role must be one of: admin, supervisor, staff, sales')
     if len(data.password) < 8:
         raise HttpError(400, 'Password must be at least 8 characters')
     if User.objects.filter(email__iexact=data.email).exists():
@@ -849,22 +868,30 @@ def create_superadmin_user(request, data: SuperadminUserCreate):
 
 @router.patch('/superadmin/users/{user_id}/deactivate', response={204: None})
 def deactivate_superadmin_user(request, user_id: int):
-    _require_superadmin(request)
-    updated = User.objects.filter(id=user_id, role__in=_SUPERADMIN_ASSIGNABLE_ROLES).update(is_active=False)
-    if not updated:
+    require_superadmin_or_delegated(request, 'manage_users')
+    try:
+        target = User.objects.get(id=user_id, role__in=_SUPERADMIN_ASSIGNABLE_ROLES)
+    except User.DoesNotExist:
         raise HttpError(404, 'User not found')
+    require_not_targeting_sales_unless_superuser(request, target.role)
+    target.is_active = False
+    target.save(update_fields=['is_active'])
     return 204, None
 
 
 @router.patch('/superadmin/users/{user_id}', response=SuperadminUserSchema)
 def update_superadmin_user(request, user_id: int, data: SuperadminUserUpdate):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_users')
     try:
         user = User.objects.select_related('organization').get(
             id=user_id, role__in=_SUPERADMIN_ASSIGNABLE_ROLES
         )
     except User.DoesNotExist:
         raise HttpError(404, 'User not found')
+    # Block a delegated (non-superuser) caller from touching a 'sales' row at
+    # all, in either direction — its current role or a role change onto it.
+    require_not_targeting_sales_unless_superuser(request, user.role)
+    require_not_targeting_sales_unless_superuser(request, data.role)
     if data.email is not None:
         email = data.email.strip().lower()
         if User.objects.filter(email__iexact=email).exclude(pk=user_id).exists():
@@ -885,6 +912,47 @@ def update_superadmin_user(request, user_id: int, data: SuperadminUserUpdate):
             raise HttpError(400, 'Password must be at least 8 characters.')
         user.set_password(data.password)
     user.save()
+    facility_names = _facility_name_map(
+        {user.external_admin_id} if user.external_admin_id is not None else set()
+    )
+    return _serialize_superadmin_user(user, facility_names)
+
+
+@router.patch('/superadmin/users/{user_id}/delegated-permissions', response=SuperadminUserSchema)
+def update_superadmin_user_delegated_permissions(
+    request, user_id: int, data: SuperadminDelegatedPermissionsUpdate,
+):
+    """Grant or revoke individual superadmin-only capabilities (Knowledge Base,
+    Changelog, Organization creation) for a 'sales' role account. Only a real
+    superuser may call this — a user holding a delegated permission can never
+    grant it onward, which would allow escalation."""
+    if not getattr(request.user, 'is_superuser', False):
+        raise HttpError(403, 'Superadmin access required')
+
+    unknown = set(data.permissions) - set(SUPERADMIN_DELEGATABLE_PERMISSIONS)
+    if unknown:
+        raise HttpError(400, f'Unknown permission(s): {sorted(unknown)}')
+
+    try:
+        user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        raise HttpError(404, 'User not found')
+    if user.is_superuser:
+        raise HttpError(400, 'User is already a superadmin')
+    if user.role != User.Role.SALES:
+        raise HttpError(400, 'Delegated permissions can only be granted to a "sales" role user')
+
+    granted = dict(user.superadmin_delegated_permissions or {})
+    granted.update({key: bool(value) for key, value in data.permissions.items()})
+    user.superadmin_delegated_permissions = granted
+    user.save(update_fields=['superadmin_delegated_permissions'])
+
+    from shared.audit import log_event
+    log_event(
+        'superadmin_delegated_permissions_updated', request.user.pk, 'user', user.pk,
+        {'changes': data.permissions},
+    )
+
     facility_names = _facility_name_map(
         {user.external_admin_id} if user.external_admin_id is not None else set()
     )

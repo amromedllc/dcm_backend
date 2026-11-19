@@ -15,7 +15,7 @@ from PIL import Image
 
 from apps.accounts.api import _same_practice_q
 from apps.accounts.auth import partner_auth
-from apps.accounts.permissions import require_permission
+from apps.accounts.permissions import require_permission, require_superadmin_or_delegated
 from apps.central_library.models import (
     CentralProgram, CentralProgramFolder, CentralTarget,
     ChangelogEntry, KnowledgeBaseMedia, KnowledgeBaseModule, KnowledgeBaseTopic,
@@ -579,7 +579,7 @@ def _validate_knowledge_base_video_upload(file: UploadedFile) -> None:
 
 @router.get('/superadmin/knowledge-base/modules', response=list[KnowledgeBaseModuleSchema])
 def superadmin_list_knowledge_base_modules(request):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     with schema_context(get_public_schema_name()):
         modules = (
             KnowledgeBaseModule.objects
@@ -591,7 +591,7 @@ def superadmin_list_knowledge_base_modules(request):
 
 @router.post('/superadmin/knowledge-base/modules', response={201: KnowledgeBaseModuleSchema})
 def superadmin_create_knowledge_base_module(request, data: KnowledgeBaseModuleRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     _validate_knowledge_base_icon(data.icon)
     with schema_context(get_public_schema_name()):
         module = KnowledgeBaseModule.objects.create(
@@ -610,14 +610,14 @@ def superadmin_create_knowledge_base_module(request, data: KnowledgeBaseModuleRe
 
 @router.get('/superadmin/knowledge-base/modules/{module_id}', response=KnowledgeBaseModuleSchema)
 def superadmin_get_knowledge_base_module(request, module_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     with schema_context(get_public_schema_name()):
         return _serialize_knowledge_base_module(_get_knowledge_base_module_or_404(module_id), request)
 
 
 @router.patch('/superadmin/knowledge-base/modules/{module_id}', response=KnowledgeBaseModuleSchema)
 def superadmin_update_knowledge_base_module(request, module_id: int, data: KnowledgeBaseModuleUpdateRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     with schema_context(get_public_schema_name()):
         module = _get_knowledge_base_module_or_404(module_id)
         updates = data.dict(exclude_unset=True)
@@ -633,7 +633,7 @@ def superadmin_update_knowledge_base_module(request, module_id: int, data: Knowl
 
 @router.delete('/superadmin/knowledge-base/modules/{module_id}', response={204: None})
 def superadmin_delete_knowledge_base_module(request, module_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     with schema_context(get_public_schema_name()):
         module = _get_knowledge_base_module_or_404(module_id)
         module.delete()
@@ -642,7 +642,7 @@ def superadmin_delete_knowledge_base_module(request, module_id: int):
 
 @router.post('/superadmin/knowledge-base/modules/{module_id}/video', response=KnowledgeBaseModuleSchema)
 def superadmin_upload_knowledge_base_video(request, module_id: int, file: UploadedFile = File(...)):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     _validate_knowledge_base_video_upload(file)
     with schema_context(get_public_schema_name()):
         module = _get_knowledge_base_module_or_404(module_id)
@@ -657,7 +657,7 @@ def superadmin_upload_knowledge_base_video(request, module_id: int, file: Upload
 
 @router.delete('/superadmin/knowledge-base/modules/{module_id}/video', response=KnowledgeBaseModuleSchema)
 def superadmin_delete_knowledge_base_video(request, module_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     with schema_context(get_public_schema_name()):
         module = _get_knowledge_base_module_or_404(module_id)
         if module.video:
@@ -671,7 +671,7 @@ def superadmin_delete_knowledge_base_video(request, module_id: int):
 
 @router.post('/superadmin/knowledge-base/modules/{module_id}/topics', response={201: KnowledgeBaseTopicSchema})
 def superadmin_create_knowledge_base_topic(request, module_id: int, data: KnowledgeBaseTopicRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     with schema_context(get_public_schema_name()):
         module = _get_knowledge_base_module_or_404(module_id)
         topic = KnowledgeBaseTopic.objects.create(
@@ -687,7 +687,7 @@ def superadmin_create_knowledge_base_topic(request, module_id: int, data: Knowle
 
 @router.patch('/superadmin/knowledge-base/topics/{topic_id}', response=KnowledgeBaseTopicSchema)
 def superadmin_update_knowledge_base_topic(request, topic_id: int, data: KnowledgeBaseTopicUpdateRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     with schema_context(get_public_schema_name()):
         topic = _get_knowledge_base_topic_or_404(topic_id)
         updates = data.dict(exclude_unset=True)
@@ -703,7 +703,7 @@ def superadmin_update_knowledge_base_topic(request, topic_id: int, data: Knowled
 
 @router.post('/superadmin/knowledge-base/topics/{topic_id}/video', response=KnowledgeBaseTopicSchema)
 def superadmin_upload_knowledge_base_topic_video(request, topic_id: int, file: UploadedFile = File(...)):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     _validate_knowledge_base_video_upload(file)
     with schema_context(get_public_schema_name()):
         topic = _get_knowledge_base_topic_or_404(topic_id)
@@ -718,7 +718,7 @@ def superadmin_upload_knowledge_base_topic_video(request, topic_id: int, file: U
 
 @router.delete('/superadmin/knowledge-base/topics/{topic_id}/video', response=KnowledgeBaseTopicSchema)
 def superadmin_delete_knowledge_base_topic_video(request, topic_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     with schema_context(get_public_schema_name()):
         topic = _get_knowledge_base_topic_or_404(topic_id)
         if topic.video:
@@ -732,7 +732,7 @@ def superadmin_delete_knowledge_base_topic_video(request, topic_id: int):
 
 @router.delete('/superadmin/knowledge-base/topics/{topic_id}', response={204: None})
 def superadmin_delete_knowledge_base_topic(request, topic_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     with schema_context(get_public_schema_name()):
         topic = _get_knowledge_base_topic_or_404(topic_id)
         topic.delete()
@@ -743,7 +743,7 @@ def superadmin_delete_knowledge_base_topic(request, topic_id: int):
 def superadmin_upload_knowledge_base_media(request, file: UploadedFile = File(...)):
     """Upload an image or video to embed inline in an article/topic's rich
     text (distinct from the single attached module/topic `video`)."""
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     content_type = file.content_type or ''
     if content_type in IMAGE_CONTENT_TYPES:
         validate_image_upload(file)
@@ -796,14 +796,14 @@ def list_changelog_entries(request):
 
 @router.get('/superadmin/changelog', response=list[ChangelogEntrySchema])
 def superadmin_list_changelog_entries(request):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_changelog')
     with schema_context(get_public_schema_name()):
         return [_serialize_changelog_entry(entry) for entry in ChangelogEntry.objects.all()]
 
 
 @router.post('/superadmin/changelog/import-feature-drafts', response=dict)
 def superadmin_import_changelog_feature_drafts(request):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_changelog')
     from apps.central_library.changelog_notepad import import_notepad
     try:
         return import_notepad(user=request.user)
@@ -813,7 +813,7 @@ def superadmin_import_changelog_feature_drafts(request):
 
 @router.post('/superadmin/changelog', response={201: ChangelogEntrySchema})
 def superadmin_create_changelog_entry(request, data: ChangelogEntryRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_changelog')
     with schema_context(get_public_schema_name()):
         entry = ChangelogEntry.objects.create(
             version=data.version.strip(),
@@ -828,7 +828,7 @@ def superadmin_create_changelog_entry(request, data: ChangelogEntryRequest):
 
 @router.patch('/superadmin/changelog/{entry_id}', response=ChangelogEntrySchema)
 def superadmin_update_changelog_entry(request, entry_id: int, data: ChangelogEntryUpdateRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_changelog')
     with schema_context(get_public_schema_name()):
         entry = _get_changelog_entry_or_404(entry_id)
         updates = data.dict(exclude_unset=True)
@@ -844,7 +844,7 @@ def superadmin_update_changelog_entry(request, entry_id: int, data: ChangelogEnt
 
 @router.delete('/superadmin/changelog/{entry_id}', response={204: None})
 def superadmin_delete_changelog_entry(request, entry_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_changelog')
     with schema_context(get_public_schema_name()):
         _get_changelog_entry_or_404(entry_id).delete()
     return 204, None
@@ -2988,7 +2988,7 @@ def _normalize_central_target_payload(payload) -> tuple[str, str]:
 
 @router.get('/superadmin/central-program-folders', response=list[CentralProgramFolderSchema])
 def superadmin_list_central_program_folders(request):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     return [
         {
             'id': folder.id,
@@ -3002,7 +3002,7 @@ def superadmin_list_central_program_folders(request):
 
 @router.post('/superadmin/central-program-folders', response={201: CentralProgramFolderSchema})
 def superadmin_create_central_program_folder(request, data: CentralProgramFolderRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     folder = CentralProgramFolder.objects.create(
         name=data.name,
         display_order=data.display_order,
@@ -3018,7 +3018,7 @@ def superadmin_create_central_program_folder(request, data: CentralProgramFolder
 
 @router.patch('/superadmin/central-program-folders/{folder_id}', response=CentralProgramFolderSchema)
 def superadmin_update_central_program_folder(request, folder_id: int, data: CentralProgramFolderRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     folder = _get_central_folder_or_404(folder_id)
     folder.name = data.name
     folder.display_order = data.display_order
@@ -3033,7 +3033,7 @@ def superadmin_update_central_program_folder(request, folder_id: int, data: Cent
 
 @router.delete('/superadmin/central-program-folders/{folder_id}', response={204: None})
 def superadmin_delete_central_program_folder(request, folder_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     folder = _get_central_folder_or_404(folder_id)
     folder.delete()
     return 204, None
@@ -3041,7 +3041,7 @@ def superadmin_delete_central_program_folder(request, folder_id: int):
 
 @router.get('/superadmin/central-programs', response=list[OrgProgramSchema])
 def superadmin_list_central_programs(request):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     qs = CentralProgram.objects.prefetch_related('targets', 'settings', 'targets__settings').all()
     return [_serialize_superadmin_central_program(program, request) for program in qs]
 
@@ -3049,7 +3049,7 @@ def superadmin_list_central_programs(request):
 @router.post('/superadmin/central-programs', response={201: OrgProgramSchema})
 @transaction.atomic
 def superadmin_create_central_program(request, data: CentralProgramRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     _validate_central_program_fields(data)
     linked_settings = validate_setting_links(data.setting_ids)
     program = CentralProgram.objects.create(
@@ -3075,7 +3075,7 @@ def superadmin_create_central_program(request, data: CentralProgramRequest):
 
 @router.get('/superadmin/central-programs/{program_id}', response=OrgProgramSchema)
 def superadmin_get_central_program(request, program_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     program = _get_superadmin_central_program_or_404(program_id)
     return _serialize_superadmin_central_program(program, request, include_targets=True)
 
@@ -3083,7 +3083,7 @@ def superadmin_get_central_program(request, program_id: int):
 @router.patch('/superadmin/central-programs/{program_id}', response=OrgProgramSchema)
 @transaction.atomic
 def superadmin_update_central_program(request, program_id: int, data: CentralProgramUpdateRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     _validate_central_program_fields(data)
     program = _get_superadmin_central_program_or_404(program_id)
     updates = data.dict(exclude_unset=True)
@@ -3099,7 +3099,7 @@ def superadmin_update_central_program(request, program_id: int, data: CentralPro
 
 @router.post('/superadmin/central-programs/{program_id}/image', response=OrgProgramSchema)
 def superadmin_upload_central_program_image(request, program_id: int, file: UploadedFile = File(...)):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     program = _get_superadmin_central_program_or_404(program_id)
     validate_image_upload(file)
     program.image = file
@@ -3109,7 +3109,7 @@ def superadmin_upload_central_program_image(request, program_id: int, file: Uplo
 
 @router.delete('/superadmin/central-programs/{program_id}', response={204: None})
 def superadmin_delete_central_program(request, program_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     program = _get_superadmin_central_program_or_404(program_id)
     program.delete()
     return 204, None
@@ -3117,7 +3117,7 @@ def superadmin_delete_central_program(request, program_id: int):
 
 @router.get('/superadmin/central-programs/{program_id}/targets', response=list[CentralTargetSchema])
 def superadmin_list_central_targets(request, program_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     program = _get_superadmin_central_program_or_404(program_id)
     return [_serialize_superadmin_central_target(target) for target in program.targets.all()]
 
@@ -3125,7 +3125,7 @@ def superadmin_list_central_targets(request, program_id: int):
 @router.post('/superadmin/central-programs/{program_id}/targets', response={201: CentralTargetSchema})
 @transaction.atomic
 def superadmin_create_central_target(request, program_id: int, data: CentralTargetRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     program = _get_superadmin_central_program_or_404(program_id)
     target = _create_central_target(program, data)
     return 201, _serialize_superadmin_central_target(target)
@@ -3158,7 +3158,7 @@ def _create_central_target(program, data: CentralTargetRequest, *, display_order
 @router.patch('/superadmin/central-targets/{target_id}', response=CentralTargetSchema)
 @transaction.atomic
 def superadmin_update_central_target(request, target_id: int, data: CentralTargetUpdateRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     target = _get_central_target_or_404(target_id)
     updates = data.dict(exclude_unset=True)
     ids = updates.pop('setting_ids', None)
@@ -3189,7 +3189,7 @@ def superadmin_update_central_target(request, target_id: int, data: CentralTarge
 
 @router.delete('/superadmin/central-targets/{target_id}', response={204: None})
 def superadmin_delete_central_target(request, target_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     target = _get_central_target_or_404(target_id)
     target.delete()
     return 204, None

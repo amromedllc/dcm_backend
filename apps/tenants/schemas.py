@@ -208,6 +208,13 @@ class SuperadminUserSchema(Schema):
     external_admin_id: int | None
     tpms_facility_name: str | None
     created_at: datetime
+    superadmin_delegated_permissions: dict[str, bool] = {}
+
+
+class SuperadminDelegatedPermissionsUpdate(Schema):
+    """Keys must be one of accounts.permissions.SUPERADMIN_DELEGATABLE_PERMISSIONS;
+    unknown keys are rejected server-side, not silently dropped."""
+    permissions: dict[str, bool]
 
 
 class ImpersonateRequest(Schema):
