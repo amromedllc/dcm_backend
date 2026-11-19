@@ -141,6 +141,8 @@ def _serialize_superadmin_org(org: Organization) -> dict:
                     'facility_name': row.facility_name,
                     'email_notifications_enabled': row.email_notifications_enabled,
                     'ai_enabled': row.ai_enabled,
+                    'wiley_enabled': row.wiley_enabled,
+                    'wiley_entitled': row.wiley_entitled,
                 }
             for row in org.tpms_admin_ids.all()
         ],
@@ -167,6 +169,13 @@ def _serialize_practice_email_settings() -> list[dict]:
 def list_superadmin_practice_email_settings(request):
     _require_superadmin(request)
     return _serialize_practice_email_settings()
+
+
+@router.get('/superadmin/practice-planner-status')
+def get_superadmin_practice_planner_status(request):
+    _require_superadmin(request)
+    from apps.integrations.practice_planner.access import provider_status
+    return provider_status()
 
 
 def _serialize_facility_integration(facility: OrganizationTpmsAdminId) -> dict:
@@ -337,8 +346,11 @@ def update_superadmin_organization(request, organization_id: int, data: Organiza
 
 
 @router.post('/superadmin/tpms-admin-ids', response={201: TpmsAdminEmailSettingSchema})
+@transaction.atomic
 def create_superadmin_tpms_admin_id(request, data: TpmsAdminIdCreate):
     _require_superadmin(request)
+    from apps.integrations.practice_planner.access import validate_enablement, audit_feature_change
+    validate_enablement(data.wiley_enabled, data.wiley_entitled)
     try:
         org = Organization.objects.get(id=data.organization_id)
     except Organization.DoesNotExist:
@@ -351,30 +363,42 @@ def create_superadmin_tpms_admin_id(request, data: TpmsAdminIdCreate):
         facility_name=data.facility_name.strip(),
         email_notifications_enabled=data.email_notifications_enabled,
         ai_enabled=data.ai_enabled,
+        wiley_enabled=data.wiley_enabled,
+        wiley_entitled=data.wiley_entitled,
     )
+    audit_feature_change(request.user.pk, row, {'enabled': False, 'entitled': False})
     return 201, {
         'id': row.id,
         'admin_id': row.admin_id,
         'facility_name': row.facility_name,
         'email_notifications_enabled': row.email_notifications_enabled,
         'ai_enabled': row.ai_enabled,
+        'wiley_enabled': row.wiley_enabled,
+        'wiley_entitled': row.wiley_entitled,
     }
 
 
 @router.patch('/superadmin/practice-email-settings/{mapping_id}', response=TpmsAdminEmailSettingSchema)
+@transaction.atomic
 def update_superadmin_practice_email_setting(
     request,
     mapping_id: int,
     data: TpmsAdminEmailSettingUpdate,
 ):
     _require_superadmin(request)
+    from apps.integrations.practice_planner.access import validate_enablement, audit_feature_change
     try:
-        row = OrganizationTpmsAdminId.objects.get(id=mapping_id)
+        row = OrganizationTpmsAdminId.objects.select_for_update().get(id=mapping_id)
     except OrganizationTpmsAdminId.DoesNotExist:
         raise HttpError(404, 'TPMS admin ID not found')
 
+    previous_wiley = {'enabled': row.wiley_enabled, 'entitled': row.wiley_entitled}
+    if data.wiley_enabled is True:
+        validate_enablement(True, data.wiley_entitled if data.wiley_entitled is not None else row.wiley_entitled)
     update_fields = []
     if data.admin_id is not None:
+        if data.admin_id != row.admin_id and (row.wiley_enabled or row.wiley_entitled or data.wiley_enabled or data.wiley_entitled):
+            raise HttpError(409, 'Turn off Wiley and remove license confirmation before remapping a facility')
         if OrganizationTpmsAdminId.objects.exclude(id=row.id).filter(admin_id=data.admin_id).exists():
             raise HttpError(409, 'TPMS admin ID already mapped')
         row.admin_id = data.admin_id
@@ -388,14 +412,22 @@ def update_superadmin_practice_email_setting(
     if data.ai_enabled is not None:
         row.ai_enabled = data.ai_enabled
         update_fields.append('ai_enabled')
+    for field in ('wiley_enabled', 'wiley_entitled'):
+        value = getattr(data, field)
+        if value is not None:
+            setattr(row, field, value)
+            update_fields.append(field)
     if update_fields:
         row.save(update_fields=update_fields)
+    audit_feature_change(request.user.pk, row, previous_wiley)
     return {
         'id': row.id,
         'admin_id': row.admin_id,
         'facility_name': row.facility_name,
         'email_notifications_enabled': row.email_notifications_enabled,
         'ai_enabled': row.ai_enabled,
+        'wiley_enabled': row.wiley_enabled,
+        'wiley_entitled': row.wiley_entitled,
     }
 
 

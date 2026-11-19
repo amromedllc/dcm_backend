@@ -113,7 +113,7 @@ def _serialize_treatment_plan(plan: TreatmentPlan) -> dict[str, Any]:
 def _get_treatment_plan_or_404(request, client_id: int, plan_id: int) -> TreatmentPlan:
     _get_client_or_404(request, client_id)
     try:
-        return TreatmentPlan.objects.get(id=plan_id, client_id=client_id)
+        return TreatmentPlan.objects.get(id=plan_id, client_id=client_id, planning_mode='analytics')
     except TreatmentPlan.DoesNotExist:
         raise HttpError(404, 'Treatment plan not found')
 
@@ -641,7 +641,7 @@ def delete_client(request, client_id: int):
 def list_treatment_plans(request, client_id: int):
     require_permission(request, 'client_treatment_plan')
     _get_client_or_404(request, client_id)
-    return list(TreatmentPlan.objects.filter(client_id=client_id))
+    return list(TreatmentPlan.objects.filter(client_id=client_id, planning_mode='analytics'))
 
 
 @router.post('/{client_id}/treatment-plans/generate', response={201: TreatmentPlanSchema})

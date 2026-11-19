@@ -83,6 +83,8 @@ class OrganizationTpmsAdminId(models.Model):
     facility_name = models.CharField(max_length=200, blank=True)
     email_notifications_enabled = models.BooleanField(default=False)
     ai_enabled = models.BooleanField(default=False)
+    wiley_enabled = models.BooleanField(default=False)
+    wiley_entitled = models.BooleanField(default=False)
     integration_platform = models.CharField(max_length=30, blank=True, default='')
     integration_email = models.EmailField(blank=True, default='')
     integration_password_encrypted = models.TextField(blank=True, default='')
@@ -96,6 +98,25 @@ class OrganizationTpmsAdminId(models.Model):
     class Meta:
         app_label = 'tenants'
         ordering = ['admin_id']
+
+    def _validate_wiley_scope(self):
+        if not self.pk:
+            return
+        old = type(self).objects.filter(pk=self.pk).values(
+            'organization_id', 'admin_id', 'wiley_enabled', 'wiley_entitled',
+        ).first()
+        if old and (old['organization_id'] != self.organization_id or old['admin_id'] != self.admin_id):
+            if old['wiley_enabled'] or old['wiley_entitled'] or self.wiley_enabled or self.wiley_entitled:
+                from django.core.exceptions import ValidationError
+                raise ValidationError('Turn off Wiley and remove license confirmation before remapping a facility')
+
+    def clean(self):
+        super().clean()
+        self._validate_wiley_scope()
+
+    def save(self, *args, **kwargs):
+        self._validate_wiley_scope()
+        return super().save(*args, **kwargs)
 
     def __str__(self):
         label = f'{self.admin_id} ({self.facility_name})' if self.facility_name else str(self.admin_id)

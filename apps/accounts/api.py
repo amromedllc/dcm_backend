@@ -409,7 +409,9 @@ def get_features(request):
     """Which optional features are switched on for this deployment and this user's TPMS
     facility (used to show or hide them in the web app)."""
     from shared import ai_client
-    return {'ai_enabled': ai_client.is_enabled(request.user)}
+    from apps.integrations.practice_planner.access import availability_for_request
+    return {'ai_enabled': ai_client.is_enabled(request.user),
+            'practice_planner': availability_for_request(request)}
 
 
 @router.get('/account/step-up', response=dict, auth=jwt_auth_any_role)

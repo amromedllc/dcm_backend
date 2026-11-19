@@ -93,6 +93,8 @@ class TpmsAdminEmailSettingSchema(Schema):
     facility_name: str = ''
     email_notifications_enabled: bool
     ai_enabled: bool = False
+    wiley_enabled: bool = False
+    wiley_entitled: bool = False
 
 
 class TpmsAdminIdSeed(Schema):
@@ -135,6 +137,8 @@ class TpmsAdminIdCreate(Schema):
     facility_name: str = ''
     email_notifications_enabled: bool = False
     ai_enabled: bool = False
+    wiley_enabled: bool = False
+    wiley_entitled: bool = False
 
 
 class TpmsAdminEmailSettingUpdate(Schema):
@@ -142,6 +146,8 @@ class TpmsAdminEmailSettingUpdate(Schema):
     facility_name: str | None = None
     email_notifications_enabled: bool | None = None
     ai_enabled: bool | None = None
+    wiley_enabled: bool | None = None
+    wiley_entitled: bool | None = None
 
 
 class SuperadminAPIKeyCreate(Schema):

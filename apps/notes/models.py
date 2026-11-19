@@ -215,6 +215,7 @@ class NoteSignature(OrganizationScopedMixin):
     signer_role = models.CharField(max_length=50)
     signature_type = models.CharField(max_length=20, choices=SignatureType.choices)
     signature_data = models.TextField(blank=True)
+    content_hash = models.CharField(max_length=64, blank=True)
     signed_at = models.DateTimeField(auto_now_add=True)
     ip_address_hash = models.CharField(max_length=64, blank=True)
 
@@ -227,3 +228,6 @@ class NoteSignature(OrganizationScopedMixin):
 
     def __str__(self) -> str:
         return f'{self.signer_name} [{self.signature_type}] @ {self.signed_at:%Y-%m-%d %H:%M}'
+
+
+from .planner_models import ClientHomeworkAssignment, NoteAddendum, NoteContentApplication  # noqa: E402,F401

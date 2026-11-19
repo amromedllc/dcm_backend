@@ -24,6 +24,7 @@ from shared import ai_client
 from shared.ai_client import AIError
 from .template_draft import generate_template_draft
 from .services import submit_note, approve_note, reject_note, resolve_template_tokens, apply_session_autofill
+from .planner_services import note_content_hash
 
 router = Router(auth=partner_auth)
 
@@ -460,6 +461,7 @@ def sign_note(request, note_id: int, data: SignNoteRequest):
         signer_role=request.user.role,
         signature_type=data.signature_type,
         signature_data=data.signature_data,
+        content_hash=note_content_hash(note),
         ip_address_hash=ip_hash,
     )
     return 201, sig

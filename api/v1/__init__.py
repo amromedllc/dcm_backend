@@ -22,6 +22,9 @@ from apps.notifications.api import router as notifications_router
 from apps.integrations.api import router as integrations_router
 from apps.audit.api import router as audit_router
 from apps.tenants.api import router as tenants_router
+from apps.integrations.practice_planner.api import router as practice_planner_router
+from apps.clients.planner_api import router as planner_client_router
+from apps.notes.planner_api import router as planner_notes_router
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +90,9 @@ api.add_router('/', notifications_router, tags=['Notifications'])
 api.add_router('/integrations', integrations_router, tags=['Integrations'])
 api.add_router('/', audit_router, tags=['Audit'])
 api.add_router('/organization', tenants_router, tags=['Organization'])
+api.add_router('/practice-planner', practice_planner_router, tags=['Practice Planner'])
+api.add_router('/practice-planner', planner_client_router, tags=['Structured Drafts'])
+api.add_router('/practice-planner', planner_notes_router, tags=['Planner Notes'])
 
 
 @api.get('/partner/whoami', auth=partner_auth, tags=['Partner API'])

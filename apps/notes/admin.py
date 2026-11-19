@@ -15,7 +15,8 @@ class NoteTemplateAdmin(OrganizationScopedAdminMixin, ModelAdmin):
 class NoteSignatureInline(OrganizationScopedAdminMixin, TabularInline):
     model = NoteSignature
     extra = 0
-    readonly_fields = ['signer_id', 'signer_name', 'signer_role', 'signature_type', 'signed_at', 'ip_address_hash']
+    readonly_fields = ['signer_id', 'signer_name', 'signer_role', 'signature_type', 'signature_data',
+                        'content_hash', 'signed_at', 'ip_address_hash']
     can_delete = False
 
 

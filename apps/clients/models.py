@@ -1,3 +1,5 @@
+import uuid
+
 from django.conf import settings
 from django.db import models, transaction
 from django.utils import timezone
@@ -116,6 +118,10 @@ class ClientFavorite(OrganizationScopedMixin):
 
 
 class TreatmentPlan(TenantAwareModel):
+    class PlanningMode(models.TextChoices):
+        ANALYTICS = 'analytics', 'Analytics'
+        STRUCTURED = 'structured', 'Structured'
+
     class Status(models.TextChoices):
         DRAFT = 'draft', 'Draft'
         FINALIZED = 'finalized', 'Finalized'
@@ -133,6 +139,11 @@ class TreatmentPlan(TenantAwareModel):
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT, db_index=True)
     sections = models.JSONField(default=dict)
     source_snapshot = models.JSONField(default=dict, blank=True)
+    planning_mode = models.CharField(max_length=20, choices=PlanningMode.choices, default=PlanningMode.ANALYTICS)
+    plan_series_id = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    revision_number = models.PositiveIntegerField(default=1)
+    previous_revision = models.ForeignKey('self', on_delete=models.PROTECT, null=True, blank=True, related_name='next_revisions')
+    lock_version = models.PositiveIntegerField(default=1)
     finalized_at = models.DateTimeField(null=True, blank=True)
     finalized_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -143,11 +154,48 @@ class TreatmentPlan(TenantAwareModel):
         db_constraint=False,
     )
 
-    _org_scoped_fk_fields = ('client',)
+    _org_scoped_fk_fields = ('client', 'previous_revision')
 
     class Meta:
         app_label = 'clients'
         ordering = ['-plan_date', '-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['organization', 'plan_series_id', 'revision_number'], name='planner_unique_series_revision'),
+            models.CheckConstraint(condition=models.Q(revision_number__gte=1), name='planner_positive_revision'),
+        ]
+
+    def save(self, *args, **kwargs):
+        from django.core.exceptions import ValidationError
+        if self.planning_mode == self.PlanningMode.STRUCTURED:
+            from shared.tenancy import current_org_id
+            org_id = current_org_id()
+            if self.client.organization_id != org_id or self.organization_id not in (None, org_id):
+                raise ValidationError('Structured plan organization does not match tenant context')
+        if not self._state.adding:
+            old = type(self).objects.get(pk=self.pk)
+            if any(getattr(old, field) != getattr(self, field) for field in (
+                'client_id', 'organization_id', 'plan_series_id', 'revision_number', 'previous_revision_id', 'planning_mode',
+            )):
+                raise ValidationError('Plan revision identity is immutable; create a new revision')
+        if self.previous_revision_id:
+            previous = self.previous_revision
+            if (previous.pk == self.pk or previous.client_id != self.client_id
+                    or previous.plan_series_id != self.plan_series_id
+                    or previous.revision_number >= self.revision_number
+                    or previous.planning_mode != self.planning_mode):
+                raise ValidationError('Revision must follow an earlier plan in the same client series and mode')
+        elif self.revision_number != 1:
+            raise ValidationError('A later revision requires its previous revision')
+        if self.planning_mode == self.PlanningMode.STRUCTURED and not self._state.adding:
+            if old.status == self.Status.FINALIZED:
+                if self.status not in (self.Status.FINALIZED, self.Status.ARCHIVED):
+                    raise ValidationError('A finalized structured plan cannot return to draft')
+                if any(getattr(old, field) != getattr(self, field)
+                       for field in ('title', 'plan_date', 'date_from', 'date_to')):
+                    raise ValidationError('Finalized structured plan content is immutable; create a new revision')
+            elif old.status == self.Status.ARCHIVED:
+                raise ValidationError('An archived structured plan cannot be changed')
+        return super().save(*args, **kwargs)
 
     def _derive_organization_id(self) -> int | None:
         return self.client.organization_id
@@ -193,6 +241,38 @@ class TreatmentPlanSignature(OrganizationScopedMixin):
 
     def __str__(self) -> str:
         return f'{self.signer_name} signed plan {self.plan_id} @ {self.signed_at:%Y-%m-%d %H:%M}'
+
+
+class PlanActivation(OrganizationScopedMixin):
+    """Append-only effective-date history for a finalized structured plan revision.
+
+    Never updated or deleted (see the matching PostgreSQL trigger); a correction
+    is recorded as a new row, so the plan's activation history stays a full audit trail.
+    """
+    plan = models.ForeignKey(TreatmentPlan, on_delete=models.CASCADE, related_name='activations')
+    effective_from = models.DateField()
+    effective_to = models.DateField(null=True, blank=True)
+    activated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='plan_activations',
+        db_constraint=False,
+    )
+    activated_at = models.DateTimeField(auto_now_add=True)
+
+    _org_scoped_fk_fields = ('plan',)
+
+    class Meta:
+        app_label = 'clients'
+        ordering = ['effective_from', 'id']
+
+    def _derive_organization_id(self) -> int | None:
+        return self.plan.organization_id
+
+    def __str__(self) -> str:
+        return f'Plan {self.plan_id} active {self.effective_from} → {self.effective_to or "open"}'
 
 
 class ClientDirectoryView(OrganizationScopedMixin):
@@ -279,3 +359,9 @@ class ClientDocument(TenantAwareModel):
 
     def __str__(self):
         return f'Client document #{self.pk}'
+
+
+from .planner_models import (  # noqa: E402,F401
+    ClientDiagnosis, TreatmentPlanDiagnosis, TreatmentPlanProblem,
+    TreatmentPlanGoal, TreatmentPlanObjective, TreatmentPlanIntervention,
+)

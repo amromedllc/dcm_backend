@@ -34,6 +34,79 @@ increment MAJOR. All notes shipped together share a version.
 Imports fill missing versions and replace matching legacy date and initial v1 sequence versions, while
 preserving manually assigned semantic versions, content, publication and IDs.
 
+## wiley-practice-access-controls | 2026-11-17 | Wiley practice access controls
+Version: v2.43.0
+Status: Draft
+
+**New Features**
+- Superadmins can control Wiley planner access per TPMS facility, with access
+  disabled by default and a separate license-confirmation setting.
+- Backend checks enforce practice access, and turning it off blocks new planner
+  requests while existing saved plans and notes remain readable.
+- Manage the Wiley switch and license confirmation in Superadmin → Features.
+
+<!-- developer-fix -->
+- Requires the shared tenants 0017 migration and deployment. Development mock
+  content works without Wiley credentials; the live adapter and clinician plan
+  builder remain later stages. No practice was enabled or live service changed.
+- Remapping a facility requires removing its existing Wiley enablement and
+  license confirmation first, preventing grants from transferring practices.
+<!-- /developer-fix -->
+
+
+## practice-planner-foundation | 2026-11-17 | Practice planner foundation
+Status: Hidden
+Type: Developer Fix
+
+**New Features**
+- Add the private practice-planner foundation: explicit client diagnoses,
+  structured plan hierarchy, revision identity, immutable selected-content
+  snapshots, and a synthetic provider with separate editions.
+- No clinician feature or live Wiley access is enabled. Superadmin practice
+  enablement and clinical workflows remain subsequent stages.
+- Developer verification covers the complete synthetic hierarchy, diagnosis
+  selections, tenant rejection and metadata-only audit events. PostgreSQL
+  migrations backfill a distinct revision series for each existing plan.
+
+
+## structured-plan-finalization-signing-revision | 2026-11-18 | Structured plan finalization, signing and revision history
+Status: Hidden
+Type: Developer Fix
+
+**New Features**
+- Add finalize, sign, revise and activation-history endpoints for the private
+  structured treatment-plan builder. A finalized plan's content is frozen at
+  the model layer (including in Django admin and bulk paths); corrections
+  require creating a new draft revision rather than editing finalized content.
+- Signatures now bind to a hash of the complete structured payload (diagnoses
+  and the full problem→goal→objective→intervention tree), not just plan
+  metadata. Plan activation effective-date history is append-only and
+  protected by a PostgreSQL trigger, matching the existing content-snapshot
+  immutability pattern.
+- No clinician feature or live Wiley access is enabled. Clinical use remains
+  gated behind the synthetic-only practice planner switch.
+
+
+## progress-note-autofill-addenda-homework | 2026-11-18 | Progress-note autofill, addenda and homework (private)
+Status: Hidden
+Type: Developer Fix
+
+**New Features**
+- Add backend support for resolving a client's active structured plan
+  revision on a note date, previewing synthetic progress-note prompts for
+  clinician-selected objectives, and merging that text into a note field
+  without overwriting existing narrative by default. Every preview/apply
+  action is snapshotted (plan, objectives, templates, rendered text) for
+  provenance.
+- Note signatures now bind a hash of the signed note's content plus any
+  applied planner provenance. Signed notes can receive append-only
+  addenda. Add local homework assignments drawn from the synthetic
+  provider's homework content, with simple assigned/completed status.
+- No clinician feature or live Wiley access is enabled. Immutability for
+  note signatures, applications and addenda is enforced by a PostgreSQL
+  trigger, matching the existing structured-plan pattern.
+
+
 ## superadmin-separate-feature-management | 2026-11-17 | Separate feature management
 Version: v2.43.0
 Status: Draft

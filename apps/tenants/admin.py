@@ -33,7 +33,8 @@ class DomainInline(TabularInline):
 class TpmsAdminIdInline(TabularInline):
     model = OrganizationTpmsAdminId
     extra = 1
-    fields = ['admin_id', 'facility_name', 'email_notifications_enabled', 'ai_enabled']
+    fields = ['admin_id', 'facility_name', 'email_notifications_enabled', 'ai_enabled', 'wiley_enabled', 'wiley_entitled']
+    readonly_fields = ['wiley_enabled', 'wiley_entitled']
 
     def has_view_permission(self, request, obj=None):
         return request.user.is_superuser
@@ -58,7 +59,8 @@ class OrganizationAdmin(TenantAdminMixin, ModelAdmin):
 
 @admin.register(OrganizationTpmsAdminId)
 class OrganizationTpmsAdminIdAdmin(_SuperuserOnlyAdminMixin, ModelAdmin):
-    list_display = ['admin_id', 'facility_name', 'organization', 'email_notifications_enabled', 'ai_enabled', 'created_at']
+    list_display = ['admin_id', 'facility_name', 'organization', 'email_notifications_enabled', 'ai_enabled', 'wiley_enabled', 'wiley_entitled', 'created_at']
+    readonly_fields = ['wiley_enabled', 'wiley_entitled']
     list_filter = ['email_notifications_enabled', 'ai_enabled', 'organization']
     list_editable = ['email_notifications_enabled', 'ai_enabled']
     search_fields = ['admin_id', 'facility_name', 'organization__name', 'organization__slug']

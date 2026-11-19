@@ -33,6 +33,11 @@ class TreatmentPlanAdmin(OrganizationScopedAdminMixin, ModelAdmin):
     search_fields = ['title', 'client__first_name', 'client__last_name']
     readonly_fields = ['created_at', 'updated_at', 'finalized_at']
 
+    def has_delete_permission(self, request, obj=None):
+        if obj is not None and obj.planning_mode == TreatmentPlan.PlanningMode.STRUCTURED and obj.status != TreatmentPlan.Status.DRAFT:
+            return False
+        return super().has_delete_permission(request, obj)
+
 
 @admin.register(ClientDirectoryView)
 class ClientDirectoryViewAdmin(OrganizationScopedAdminMixin, ModelAdmin):

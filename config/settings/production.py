@@ -171,6 +171,10 @@ AI_API_KEY = env('AI_API_KEY', default='')
 AI_MODEL = env('AI_MODEL', default='nvidia/nemotron-3-super-120b-a12b')
 AI_TIMEOUT_SECONDS = env.int('AI_TIMEOUT_SECONDS', default=60)
 
+PRACTICE_PLANNER_PROVIDER = env('PRACTICE_PLANNER_PROVIDER', default='disabled')
+WILEY_API_KEY = env('WILEY_API_KEY', default='')
+WILEY_API_BASE_URL = env('WILEY_API_BASE_URL', default='https://api.qa.practiceplanners.wiley.com')
+
 SUPPORT_EMAIL = env('SUPPORT_EMAIL', default='')
 
 DOCUSEAL_BASE_URL = env('DOCUSEAL_BASE_URL')

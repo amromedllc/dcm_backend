@@ -108,3 +108,6 @@ class PullJob(TenantAwareModel):
 
     def __str__(self) -> str:
         return f'{self.job_type} pull [{self.status}] — {self.created_at:%Y-%m-%d}'
+
+
+from .planner_models import PlannerContentSnapshot  # noqa: E402,F401
