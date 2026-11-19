@@ -347,7 +347,7 @@ def update_superadmin_organization(request, organization_id: int, data: Organiza
 
 @router.post('/superadmin/tpms-admin-ids', response={201: TpmsAdminEmailSettingSchema})
 def create_superadmin_tpms_admin_id(request, data: TpmsAdminIdCreate):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_organizations')
     try:
         org = Organization.objects.get(id=data.organization_id)
     except Organization.DoesNotExist:
@@ -376,7 +376,10 @@ def update_superadmin_practice_email_setting(
     mapping_id: int,
     data: TpmsAdminEmailSettingUpdate,
 ):
-    require_superadmin_or_delegated(request, 'manage_features')
+    # Shared by two pages: Features (ai_enabled/email_notifications_enabled)
+    # needs manage_features; Organizations & Facilities (admin_id/facility_name
+    # rename) needs manage_organizations — either unlocks this endpoint.
+    require_superadmin_or_any_delegated(request, ('manage_features', 'manage_organizations'))
     try:
         row = OrganizationTpmsAdminId.objects.get(id=mapping_id)
     except OrganizationTpmsAdminId.DoesNotExist:
@@ -410,7 +413,7 @@ def update_superadmin_practice_email_setting(
 
 @router.delete('/superadmin/practice-email-settings/{mapping_id}', response={204: None})
 def delete_superadmin_tpms_admin_id(request, mapping_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_organizations')
     try:
         row = OrganizationTpmsAdminId.objects.get(id=mapping_id)
     except OrganizationTpmsAdminId.DoesNotExist:
