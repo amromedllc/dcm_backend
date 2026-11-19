@@ -31,7 +31,12 @@ from .auth import (
     create_access_token, create_refresh_token, decode_token, is_token_blocked, session_start_from_payload, consume_refresh_token,
     jwt_auth, jwt_auth_any_role, token_tenant_mismatch,
 )
-from .permissions import get_user_permissions, require_permission, resolve_permission_organization
+from .permissions import (
+    get_user_permissions,
+    require_permission,
+    resolve_permission_organization,
+    user_has_any_delegated_permission,
+)
 
 
 from .schemas import (
@@ -188,11 +193,11 @@ def login(request, data: LoginRequest):
 
     local_user = User.objects.filter(email__iexact=data.email).exclude(role=User.Role.CAREGIVER).first()
     if local_user is not None:
-        if local_user.is_superuser:
-            superuser_tokens = _superadmin_local_auth(request, tenant, data.email, data.password)
-            if superuser_tokens is None:
+        if local_user.is_superuser or user_has_any_delegated_permission(local_user):
+            platform_tokens = _platform_local_auth(request, tenant, data.email, data.password)
+            if platform_tokens is None:
                 raise HttpError(401, 'Invalid email or password')
-            return _mfa_gate(tenant, superuser_tokens)
+            return _mfa_gate(tenant, platform_tokens)
         return _mfa_gate(tenant, _staff_local_auth(tenant, local_user, data.password))
 
     try:
@@ -614,14 +619,23 @@ def remove_user_mfa(request, user_id: int, data: MfaRemoveRequest):
     return 204, None
 
 
-def _superadmin_local_auth(request, tenant, email: str, password: str) -> TokenResponse | None:
-    """Allow platform superusers into the web app with their Django password.
+def _platform_local_auth(request, tenant, email: str, password: str) -> TokenResponse | None:
+    """Allow platform-side accounts into the web app with their Django
+    password, without needing to belong to the tenant they're logging into:
+    real superusers, and non-superusers holding any
+    superadmin_delegated_permissions grant (e.g. a sales-team login scoped to
+    Knowledge Base / Changelog / Organization creation — see
+    accounts.permissions.user_has_any_delegated_permission). A delegated
+    grant never widens past the specific permissions it names; this only
+    changes *where* the account is allowed to log in from.
 
     Regular users must still authenticate through TherapyPMS; this fallback is
     only for platform-owned superadmin tools that used to require /admin.
     """
     user = authenticate(request, username=email, password=password)
-    if user is None or not user.is_active or not user.is_superuser:
+    if user is None or not user.is_active:
+        return None
+    if not user.is_superuser and not user_has_any_delegated_permission(user):
         return None
     if tenant is not None and user.organization_id is None:
         user.organization = tenant

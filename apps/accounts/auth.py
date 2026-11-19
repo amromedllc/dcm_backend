@@ -200,8 +200,17 @@ class JWTAuth(_BaseJWTAuth):
     """The API's default auth. Excludes caregiver by construction — every
     endpoint using the default auth (i.e. almost the whole app) fails
     closed for portal accounts with no per-endpoint check required. See
-    apps.caregiver_portal for the only caregiver-reachable surface."""
-    allowed_roles = frozenset({User.Role.ADMIN, User.Role.SUPERVISOR, User.Role.STAFF, User.Role.REPORTING})
+    apps.caregiver_portal for the only caregiver-reachable surface.
+
+    SALES is included so a user holding superadmin_delegated_permissions can
+    reach the handful of endpoints gated by require_superadmin_or_delegated
+    (Knowledge Base, Changelog, Organization creation) — this only gets them
+    past *authentication*; every actual permission check still happens via
+    that function (accounts.permissions), which fails closed for a sales
+    account with no grant for that specific capability."""
+    allowed_roles = frozenset({
+        User.Role.ADMIN, User.Role.SUPERVISOR, User.Role.STAFF, User.Role.REPORTING, User.Role.SALES,
+    })
 
 
 class AnyRoleJWTAuth(_BaseJWTAuth):

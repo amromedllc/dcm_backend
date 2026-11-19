@@ -447,6 +447,78 @@ def _apply_role_guarantees(role: str, permissions: dict[str, bool]) -> dict[str,
     return permissions
 
 
+SUPERADMIN_DELEGATABLE_PERMISSIONS: dict[str, str] = {
+    'manage_knowledge_base': 'Manage Knowledge Base',
+    'manage_changelog': 'Manage Changelog',
+    'manage_organizations': 'Create / Onboard Organizations',
+    'manage_features': 'Manage Features',
+    'manage_facility_integrations': 'Manage Facility Integrations',
+    'manage_users': 'Manage Users',
+    'manage_api_keys': 'Manage API Keys',
+    'manage_central_programs': 'Manage Central Programs',
+}
+
+
+def user_has_delegated_superadmin_permission(user: User, permission: str) -> bool:
+    if getattr(user, 'role', None) != User.Role.SALES:
+        return False
+    if permission not in SUPERADMIN_DELEGATABLE_PERMISSIONS:
+        return False
+    granted = getattr(user, 'superadmin_delegated_permissions', None) or {}
+    return bool(granted.get(permission))
+
+
+def user_has_any_delegated_permission(user: User) -> bool:
+    """True if a 'sales' role account has been granted any of
+    SUPERADMIN_DELEGATABLE_PERMISSIONS — used to let a platform-side account
+    (e.g. a sales-team login) authenticate without belonging to a specific
+    organization, the same way a real superuser does (see accounts.api.login
+    / _platform_local_auth)."""
+    if getattr(user, 'role', None) != User.Role.SALES:
+        return False
+    granted = getattr(user, 'superadmin_delegated_permissions', None) or {}
+    return any(bool(granted.get(key)) for key in SUPERADMIN_DELEGATABLE_PERMISSIONS)
+
+
+def require_superadmin_or_delegated(request, permission: str) -> None:
+    """Allow a real superuser, or a user who was explicitly granted this one
+    delegated permission. Never widen this to accept any granted permission
+    for any check — callers must pass the specific key they are gating."""
+    user = request.user
+    if getattr(user, 'is_superuser', False):
+        return
+    if user_has_delegated_superadmin_permission(user, permission):
+        return
+    raise HttpError(403, 'Superadmin access required')
+
+
+def require_superadmin_or_any_delegated(request, permissions: tuple[str, ...]) -> None:
+    """Like require_superadmin_or_delegated, but passes if the caller holds
+    ANY one of several keys — for an endpoint shared by more than one
+    superadmin page (e.g. the organization list read by both the Features
+    and Organizations & Facilities pages)."""
+    user = request.user
+    if getattr(user, 'is_superuser', False):
+        return
+    if any(user_has_delegated_superadmin_permission(user, permission) for permission in permissions):
+        return
+    raise HttpError(403, 'Superadmin access required')
+
+
+def require_not_targeting_sales_unless_superuser(request, role: str | None) -> None:
+    """A delegated (non-superuser) 'manage_users' grant may create/edit
+    admin/supervisor/staff/reporting/caregiver accounts, but never a 'sales'
+    account — letting a delegated sales user onboard or edit other sales
+    accounts would be a path to permissions spreading without a real
+    superadmin ever approving it. Only a real superuser may touch a 'sales'
+    row (create, edit role onto/off of it, deactivate it)."""
+    if role != User.Role.SALES:
+        return
+    if getattr(request.user, 'is_superuser', False):
+        return
+    raise HttpError(403, 'Only a superadmin may manage a Sales account')
+
+
 def user_has_permission(user: User, organization, permission: str) -> bool:
     return get_user_permissions(user, organization).get(permission, False)
 

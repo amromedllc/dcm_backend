@@ -101,6 +101,7 @@ class UserSchema(Schema):
     mfa_enabled: bool = False
     avatar_url: str | None = None
     created_at: datetime
+    superadmin_delegated_permissions: dict[str, bool] = {}
 
 
 class CaregiverClientSchema(Schema):
