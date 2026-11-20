@@ -72,7 +72,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     language = models.CharField(max_length=16, null=True, blank=True)
     avatar = models.ImageField(upload_to=_user_avatar_upload_path, max_length=500, blank=True, null=True)
     signature_data = models.TextField(blank=True, default='')
-    superadmin_delegated_permissions = models.JSONField(default=dict, blank=True)
+    superadmin_delegated_permissions = models.JSONField(default=dict, db_default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -117,6 +117,13 @@ class User(AbstractBaseUser, PermissionsMixin):
         self.pin_lock_enabled = True
         self.pin_failed_attempts = 0
         self.pin_locked_until = None
+
+    def save(self, *args, **kwargs):
+        # Delegated grants are always a mapping; treat explicit None from any
+        # account-provisioning path the same as an omitted value.
+        if self.superadmin_delegated_permissions is None:
+            self.superadmin_delegated_permissions = {}
+        return super().save(*args, **kwargs)
 
     def check_pin(self, pin: str) -> bool:
         from django.contrib.auth.hashers import check_password
