@@ -592,6 +592,7 @@ def pull_providers(org: Organization) -> PullResult:
                     external_admin_id=practice_admin_id,
                     external_employee_id=employee_id,
                     organization_id=org_id,
+                    superadmin_delegated_permissions={},
                 )
                 user.set_unusable_password()
                 user.save()
