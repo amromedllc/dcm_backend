@@ -11,6 +11,6 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='user',
             name='superadmin_delegated_permissions',
-            field=models.JSONField(blank=True, db_default=dict, default=dict),
+            field=models.JSONField(blank=True, db_default={}, default=dict),
         ),
     ]

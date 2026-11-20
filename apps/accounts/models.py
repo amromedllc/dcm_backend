@@ -72,7 +72,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     language = models.CharField(max_length=16, null=True, blank=True)
     avatar = models.ImageField(upload_to=_user_avatar_upload_path, max_length=500, blank=True, null=True)
     signature_data = models.TextField(blank=True, default='')
-    superadmin_delegated_permissions = models.JSONField(default=dict, db_default=dict, blank=True)
+    superadmin_delegated_permissions = models.JSONField(default=dict, db_default={}, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
