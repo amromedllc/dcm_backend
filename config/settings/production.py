@@ -166,7 +166,7 @@ TPMS_SSO_SECRET_KEY = env('TPMS_SSO_SECRET_KEY', default='')
 # AI is used only when AI_ENABLED is true AND AI_API_KEY is set.
 AI_API_BASE_URL = env('AI_API_BASE_URL', default='https://integrate.api.nvidia.com/v1')
 # Master switch. When False, AI is refused by the server and its buttons are hidden in the web app.
-AI_ENABLED = env.bool('AI_ENABLED', default=False)
+AI_ENABLED = env.bool('AI_ENABLED', default=True)
 AI_API_KEY = env('AI_API_KEY', default='')
 AI_MODEL = env('AI_MODEL', default='nvidia/nemotron-3-super-120b-a12b')
 AI_TIMEOUT_SECONDS = env.int('AI_TIMEOUT_SECONDS', default=60)
