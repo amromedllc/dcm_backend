@@ -51,8 +51,15 @@ class Domain(DomainMixin):
     Maps a hostname (e.g. acme.dcm-platform.com) to an Organization tenant.
     Each Organization must have at least one Domain.
     """
+    # django-tenants' DomainMixin declares this field globally unique. Shared
+    # Progressly hostnames need one row per organization instead.
+    domain = models.CharField(max_length=253, db_index=True)
+
     class Meta:
         app_label = 'tenants'
+        constraints = [
+            models.UniqueConstraint(fields=['domain', 'tenant'], name='unique_domain_per_tenant'),
+        ]
 
 
 class OrganizationTpmsAdminId(models.Model):
@@ -91,6 +98,7 @@ class OrganizationTpmsAdminId(models.Model):
     last_client_sync_at = models.DateTimeField(null=True, blank=True)
     last_provider_sync_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
