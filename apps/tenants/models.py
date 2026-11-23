@@ -98,6 +98,7 @@ class OrganizationTpmsAdminId(models.Model):
     last_client_sync_at = models.DateTimeField(null=True, blank=True)
     last_provider_sync_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
