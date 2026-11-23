@@ -197,6 +197,10 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'apps.notifications.tasks.send_upcoming_appointment_reminders',
         'schedule': crontab(minute='*/5'),
     },
+    'deactivate-expired-free-trials': {
+        'task': 'apps.tenants.tasks.deactivate_expired_free_trials',
+        'schedule': crontab(minute=0),
+    },
 }
 
 STATIC_URL = '/static/'
@@ -239,6 +243,13 @@ USE_TZ = True
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 TENANT_BASE_DOMAIN = env('TENANT_BASE_DOMAIN')
+
+# Public self-service demo signup (apps.tenants.public_signup) — see
+# apps.tenants.captcha. REQUIRE_SIGNUP_CAPTCHA=false (the default) lets that
+# endpoint accept signups on X-Signup-Key + rate limiting alone, with no
+# Turnstile account configured yet. Flip to true once a real site exists.
+TURNSTILE_SECRET_KEY = env('TURNSTILE_SECRET_KEY', default='')
+REQUIRE_SIGNUP_CAPTCHA = env.bool('REQUIRE_SIGNUP_CAPTCHA', default=False)
 
 CORS_ALLOWED_ORIGINS = env.list(
     'CORS_ALLOWED_ORIGINS',

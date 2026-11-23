@@ -1,12 +1,20 @@
+import hashlib
+import secrets
+
 from django_tenants.models import TenantMixin, DomainMixin
+from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 
 class Organization(TenantMixin):
     class Plan(models.TextChoices):
+        FREE_TRIAL = 'free_trial', 'Free Trial (30 days)'
         STARTER = 'starter', 'Starter'
         PROFESSIONAL = 'professional', 'Professional'
         ENTERPRISE = 'enterprise', 'Enterprise'
+
+    FREE_TRIAL_DAYS = 30
 
     class AutomaticLogoutMinutes(models.IntegerChoices):
         FIVE_MINUTES = 5, '5 minutes'
@@ -33,6 +41,13 @@ class Organization(TenantMixin):
     integration_email = models.EmailField(blank=True, default='')
     integration_password_encrypted = models.TextField(blank=True, default='')
     integration_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
+    # Matches a stray `ai_enabled NOT NULL` column already present on this
+    # table in at least one environment; not otherwise wired up at the
+    # Organization level today (see OrganizationTpmsAdminId.ai_enabled for
+    # the per-facility flag actually used by AI drafting).
+    ai_enabled = models.BooleanField(default=False)
+    # Set on creation when plan == FREE_TRIAL; see tasks.deactivate_expired_free_trials.
+    trial_ends_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -126,3 +141,58 @@ class DefaultTargetStatus(models.Model):
 
     def __str__(self):
         return self.label
+
+
+class PublicSignupKey(models.Model):
+    """
+    A platform-wide secret (not bound to any Organization) that authorizes
+    the public, unauthenticated self-service demo-signup endpoint
+    (see apps.tenants.public_signup). Meant to be handed to one trusted
+    caller — e.g. the marketing website's backend — not shipped to a browser.
+
+    The raw key is shown once at creation — only its SHA-256 hash is stored,
+    same convention as apps.accounts.models.APIKey.
+    """
+    name = models.CharField(max_length=100)
+    key_prefix = models.CharField(max_length=12, db_index=True)
+    key_hash = models.CharField(max_length=64)
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='+',
+    )
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        app_label = 'tenants'
+
+    @classmethod
+    def generate(cls, name: str, created_by=None) -> tuple['PublicSignupKey', str]:
+        raw_key = f'signup_{secrets.token_urlsafe(32)}'
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        instance = cls.objects.create(
+            name=name,
+            key_prefix=raw_key[:12],
+            key_hash=key_hash,
+            created_by=created_by,
+        )
+        return instance, raw_key
+
+    @classmethod
+    def verify(cls, raw_key: str) -> 'PublicSignupKey | None':
+        if not raw_key.startswith('signup_'):
+            return None
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        try:
+            key = cls.objects.get(key_prefix=raw_key[:12], key_hash=key_hash, is_active=True)
+        except cls.DoesNotExist:
+            return None
+        key.last_used_at = timezone.now()
+        key.save(update_fields=['last_used_at'])
+        return key
+
+    def __str__(self):
+        return self.name
