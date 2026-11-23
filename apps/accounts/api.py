@@ -26,18 +26,26 @@ from .security_audit import audit_security
 from . import step_up
 from .pin_security import verify_pin_attempt, set_account_pin, update_pin_protection
 from . import mfa
-from .models import PasswordSetLink, User, UserMFA
+from .models import PasswordResetLink, PasswordSetLink, User, UserMFA
 from .auth import (
     INACTIVE_FACILITY_MESSAGE,
+    consume_refresh_token,
     create_access_token,
     create_refresh_token,
     decode_token,
+    is_token_blocked,
     jwt_auth,
     jwt_auth_any_role,
+    session_start_from_payload,
     token_tenant_mismatch,
     user_facility_is_active,
 )
-from .permissions import get_user_permissions, require_permission, resolve_permission_organization
+from .permissions import (
+    get_user_permissions,
+    require_permission,
+    resolve_permission_organization,
+    user_has_any_delegated_permission,
+)
 from .schemas import (
     LoginRequest,
     StepUpRequest,
