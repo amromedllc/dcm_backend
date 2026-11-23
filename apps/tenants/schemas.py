@@ -114,6 +114,29 @@ class OrganizationPracticeEmailSettingsSchema(Schema):
     tpms_admin_ids: list[TpmsAdminEmailSettingSchema]
 
 
+class PublicSignupRequest(Schema):
+    first_name: str
+    last_name: str
+    email: str
+    organization_name: str
+    password: str
+    confirm_password: str
+    phone_number: str
+    captcha_token: str = ''
+
+
+class PublicSignupResponse(Schema):
+    organization_id: int
+    organization_name: str
+    organization_slug: str
+    domain: str
+    trial_ends_at: datetime
+    user_id: int
+    email: str
+    access_token: str
+    refresh_token: str
+
+
 class OrganizationSuperadminCreate(Schema):
     name: str
     slug: str

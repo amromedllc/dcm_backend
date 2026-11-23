@@ -22,6 +22,7 @@ from apps.notifications.api import router as notifications_router
 from apps.integrations.api import router as integrations_router
 from apps.audit.api import router as audit_router
 from apps.tenants.api import router as tenants_router
+from apps.tenants.public_signup import router as public_signup_router
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,7 @@ api.add_router('/', notifications_router, tags=['Notifications'])
 api.add_router('/integrations', integrations_router, tags=['Integrations'])
 api.add_router('/', audit_router, tags=['Audit'])
 api.add_router('/organization', tenants_router, tags=['Organization'])
+api.add_router('/public', public_signup_router, tags=['Public Signup'])
 
 
 @api.get('/partner/whoami', auth=partner_auth, tags=['Partner API'])
