@@ -102,48 +102,11 @@ class TenantResolverMiddleware:
         hostname = request.get_host().split(':')[0]
         request.tenant = None
 
-        domains = list(Domain.objects.filter(domain=hostname).select_related('tenant')[:2])
-        if len(domains) == 1:
-            request.tenant = domains[0].tenant
-        elif len(domains) > 1:
-            # A shared hostname cannot identify an organization by itself.
-            # Prefer the organization bound to an existing signed-in session;
-            # for login, resolve by the globally unique Progressly email.
-            org_id = _org_id_from_jwt(request)
-            if org_id:
-                request.tenant = next((row.tenant for row in domains if row.tenant_id == org_id), None)
-
-            if request.tenant is None:
-                api_key_org_id = _org_id_from_api_key(request)
-                if api_key_org_id:
-                    request.tenant = next(
-                        (row.tenant for row in domains if row.tenant_id == api_key_org_id), None,
-                    )
-
-            if request.tenant is None and request.path == '/api/v1/auth/login':
-                try:
-                    payload = json.loads(request.body or b'{}')
-                    email = payload.get('email') if isinstance(payload, dict) else None
-                    if email:
-                        from apps.accounts.models import User
-                        user = User.objects.filter(email__iexact=email).only(
-                            'organization_id', 'is_superuser',
-                        ).first()
-                        if user and user.organization_id:
-                            request.tenant = next(
-                                (row.tenant for row in domains if row.tenant_id == user.organization_id), None,
-                            )
-                        elif user and user.is_superuser:
-                            request.tenant = domains[0].tenant
-                except (ValueError, UnicodeDecodeError):
-                    pass
-
-            if request.tenant is None:
-                response = JsonResponse(
-                    {'detail': 'Organization could not be determined for this shared domain.'}, status=400,
-                )
-                response['X-Request-ID'] = request_id
-                return response
+        try:
+            domain = Domain.objects.select_related('tenant').get(domain=hostname)
+            request.tenant = domain.tenant
+        except Domain.DoesNotExist:
+            pass
 
         if request.tenant is None:
             org_id = _org_id_from_jwt(request)

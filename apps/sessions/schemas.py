@@ -228,7 +228,6 @@ class TrialEventSchema(Schema):
     value_seconds: float | None = None
     recorded_at: datetime
     staff_notes: str
-    cue_at: datetime | None = None
 
 
 class TrialEventCreateRequest(Schema):
@@ -243,8 +242,6 @@ class TrialEventCreateRequest(Schema):
     value_seconds: float | None = Field(default=None, ge=0)
     recorded_at: datetime
     staff_notes: str = ''
-    # Cue/instruction onset for a latency target; latency = recorded_at - cue_at.
-    cue_at: datetime | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +260,6 @@ class BehaviorEventSchema(Schema):
     severity: str
     notes: str
     client_event_id: str | None = None
-    denominator_count: int | None = None
 
 
 class BehaviorEventCreateRequest(Schema):
@@ -275,9 +271,6 @@ class BehaviorEventCreateRequest(Schema):
     frequency_count: int = Field(default=1, ge=0)
     severity: BehaviorEvent.Severity | Literal[''] = ''
     notes: str = ''
-    client_event_id: str | None = None
-    # Explicit denominator for a `percentage` target (numerator is frequency_count).
-    denominator_count: int | None = Field(default=None, ge=0)
     client_event_id: str | None = Field(default=None, min_length=1, max_length=64)
 
     @model_validator(mode='after')
@@ -305,8 +298,6 @@ class ABCEventSchema(Schema):
     id: int
     session_run_id: int | None = None
     client_id: int | None = None
-    target_id: int | None = None
-    target_name: str = ''
     occurred_at: datetime
     ended_at: datetime | None = None
     duration_seconds: int | None = None
@@ -321,14 +312,12 @@ class ABCEventSchema(Schema):
 
 
 class ABCEventCreateRequest(Schema):
-    target_id: int | None = None
-    target_name: str = ''
     occurred_at: datetime
     ended_at: datetime | None = None
     duration_seconds: int | None = Field(default=None, ge=0)
-    antecedent: str = ''
+    antecedent: NonEmptyStr
     behavior_description: NonEmptyStr
-    consequence: str = ''
+    consequence: NonEmptyStr
     setting: str = ''
     staff_response: str = ''
     notes: str = ''

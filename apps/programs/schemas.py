@@ -359,9 +359,6 @@ class TargetSchema(TargetCodeSchema):
     interval_pause_on_warning: bool = False
     interval_warn_seconds_before: int = 10
     interval_warning_sound: str = ''
-    rating_min: int = 1
-    rating_max: int = 5
-    percentage_fixed_denominator: int | None = None
     status: str
     mastery_mode: str
     current_prompt_level_index: int
@@ -402,9 +399,6 @@ class TargetCreateRequest(Schema):
     interval_pause_on_warning: bool = False
     interval_warn_seconds_before: int = Field(default=10, ge=0)
     interval_warning_sound: str = ''
-    rating_min: int = Field(default=1, ge=1)
-    rating_max: int = Field(default=5, ge=1)
-    percentage_fixed_denominator: int | None = Field(default=None, ge=1)
     status: str = ''  # empty = resolve server-side to the org's default TargetStatus
     mastery_mode: Target.MasteryMode = Target.MasteryMode.MANUAL
     display_order: int = Field(default=0, ge=0)
@@ -435,9 +429,6 @@ class TargetUpdateRequest(Schema):
     interval_pause_on_warning: bool | None = None
     interval_warn_seconds_before: int | None = Field(default=None, ge=0)
     interval_warning_sound: str | None = None
-    rating_min: int | None = Field(default=None, ge=1)
-    rating_max: int | None = Field(default=None, ge=1)
-    percentage_fixed_denominator: int | None = Field(default=None, ge=1)
     status: str | None = None
     mastery_mode: Target.MasteryMode | None = None
     current_prompt_level_index: int | None = Field(default=None, ge=0)
@@ -554,7 +545,6 @@ class OrgProgramSchema(ProgramCodeSchema):
     professional_instructions_html: str = ''
     custom_field_values: dict[str, Any] = {}
     prompting_template_id: int | None = None
-    prompting_levels: list[dict] = []
     workflow_template_id: int | None = None
     folder_id: int | None = None
     image_url: str | None = None
@@ -672,14 +662,6 @@ class ImportCentralFolderResult(Schema):
     skipped_count: int
 
 
-class ImportCentralProgramsResult(Schema):
-    created_count: int
-    updated_count: int
-    skipped_count: int
-    folder_id: int
-    folder_name: str
-
-
 class CentralProgramFolderRequest(Schema):
     name: NonEmptyStr
     display_order: int = Field(default=0, ge=0)
@@ -721,7 +703,6 @@ class CentralProgramRequest(Schema):
     tags: list[str] = []
     objective: str = ''
     instructions: str = ''
-    prompting_levels: list[dict] = []
     folder_id: int | None = None
     display_order: int = Field(default=0, ge=0)
 
@@ -737,7 +718,6 @@ class CentralProgramUpdateRequest(Schema):
     tags: list[str] | None = None
     objective: str | None = None
     instructions: str | None = None
-    prompting_levels: list[dict] | None = None
     folder_id: int | None = None
     display_order: int | None = Field(default=None, ge=0)
 

@@ -147,7 +147,6 @@ def _serialize_superadmin_org(org: Organization) -> dict:
                     'admin_id': row.admin_id,
                     'facility_name': row.facility_name,
                     'email_notifications_enabled': row.email_notifications_enabled,
-                    'is_active': row.is_active,
                     'ai_enabled': row.ai_enabled,
                 }
             for row in org.tpms_admin_ids.all()
@@ -269,6 +268,8 @@ def create_superadmin_organization(request, data: OrganizationSuperadminCreate):
         raise HttpError(409, 'Organization slug already exists')
     if Organization.objects.filter(schema_name=schema_name).exists():
         raise HttpError(409, 'Organization schema already exists')
+    if Domain.objects.filter(domain=domain).exists():
+        raise HttpError(409, 'Organization domain already exists')
     seed_admin_ids = [item.admin_id for item in data.tpms_admin_ids]
     duplicate_admin_ids = OrganizationTpmsAdminId.objects.filter(admin_id__in=seed_admin_ids)
     if duplicate_admin_ids.exists():
@@ -292,7 +293,6 @@ def create_superadmin_organization(request, data: OrganizationSuperadminCreate):
                 organization=org,
                 admin_id=item.admin_id,
                 facility_name=item.facility_name.strip(),
-                is_active=item.is_active,
             )
 
     return 201, _serialize_superadmin_org(
@@ -332,8 +332,8 @@ def update_superadmin_organization(request, organization_id: int, data: Organiza
         domain = data.domain.lower().strip()
         if not domain:
             raise HttpError(400, 'Domain is required')
-        if org.domains.exclude(is_primary=True).filter(domain=domain).exists():
-            raise HttpError(409, 'Domain is already registered for this organization')
+        if Domain.objects.exclude(tenant=org).filter(domain=domain).exists():
+            raise HttpError(409, 'Organization domain already exists')
         primary = org.domains.filter(is_primary=True).first()
         if primary:
             primary.domain = domain
@@ -359,7 +359,6 @@ def create_superadmin_tpms_admin_id(request, data: TpmsAdminIdCreate):
         admin_id=data.admin_id,
         facility_name=data.facility_name.strip(),
         email_notifications_enabled=data.email_notifications_enabled,
-        is_active=data.is_active,
         ai_enabled=data.ai_enabled,
     )
     return 201, {
@@ -367,7 +366,6 @@ def create_superadmin_tpms_admin_id(request, data: TpmsAdminIdCreate):
         'admin_id': row.admin_id,
         'facility_name': row.facility_name,
         'email_notifications_enabled': row.email_notifications_enabled,
-        'is_active': row.is_active,
         'ai_enabled': row.ai_enabled,
     }
 
@@ -399,9 +397,6 @@ def update_superadmin_practice_email_setting(
     if data.email_notifications_enabled is not None:
         row.email_notifications_enabled = data.email_notifications_enabled
         update_fields.append('email_notifications_enabled')
-    if data.is_active is not None:
-        row.is_active = data.is_active
-        update_fields.append('is_active')
     if data.ai_enabled is not None:
         row.ai_enabled = data.ai_enabled
         update_fields.append('ai_enabled')
@@ -412,7 +407,6 @@ def update_superadmin_practice_email_setting(
         'admin_id': row.admin_id,
         'facility_name': row.facility_name,
         'email_notifications_enabled': row.email_notifications_enabled,
-        'is_active': row.is_active,
         'ai_enabled': row.ai_enabled,
     }
 

@@ -6,24 +6,8 @@ from typing import Any
 from django.conf import settings
 from django.utils import timezone
 from ninja.security import HttpBearer, APIKeyHeader
-from ninja.errors import HttpError
 
 from .models import User, APIKey
-from apps.tenants.models import OrganizationTpmsAdminId
-
-
-INACTIVE_FACILITY_MESSAGE = 'This facility is inactive. Please contact the Progressly support team.'
-
-
-def user_facility_is_active(user: User, organization_id: int) -> bool:
-    """Require TPMS-linked accounts to belong to an active mapped facility."""
-    if user.is_superuser or user.external_admin_id is None:
-        return True
-    return OrganizationTpmsAdminId.objects.filter(
-        organization_id=organization_id,
-        admin_id=user.external_admin_id,
-        is_active=True,
-    ).exists()
 
 # ---------------------------------------------------------------------------
 # Token blocklist (Redis-backed)
@@ -203,8 +187,6 @@ class _BaseJWTAuth(HttpBearer):
             from .session_security import enforce_session_activity
             enforce_session_activity(payload, getattr(request, 'tenant', None))
             user = User.objects.get(id=int(payload['sub']), is_active=True)
-            if not user_facility_is_active(user, int(payload['org_id'])):
-                raise HttpError(403, INACTIVE_FACILITY_MESSAGE)
             if self.allowed_roles is not None and user.role not in self.allowed_roles:
                 return None
             request.user = user
