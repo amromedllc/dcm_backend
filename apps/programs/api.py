@@ -1,5 +1,7 @@
 import os
 import tempfile
+from copy import copy
+from functools import wraps
 from types import SimpleNamespace
 
 from django.core.exceptions import ObjectDoesNotExist
@@ -14,15 +16,24 @@ from PIL import Image
 
 from apps.accounts.api import _same_practice_q
 from apps.accounts.auth import partner_auth
-from apps.accounts.permissions import require_permission
+from apps.accounts.permissions import require_permission, require_superadmin_or_delegated
 from apps.central_library.models import (
     CentralProgram, CentralProgramFolder, CentralTarget,
     ChangelogEntry, KnowledgeBaseMedia, KnowledgeBaseModule, KnowledgeBaseTopic,
 )
 from apps.central_library.management.commands.import_central_programs import import_file
+from shared import ai_client
 from shared.ai_client import AIError
 from shared.html_sanitize import sanitize_kb_html
+from apps.central_library.settings_service import (
+    validate_setting_links, sync_legacy_links, apply_program_settings, pull_links, pull_setting,
+)
+from .data_protection import (
+    MESSAGE as DATA_PROTECTION_MESSAGE, guard_target_changes, protected_target_ids,
+    scoring_signature, template_has_history,
+)
 from .assessment_draft import generate_assessment_draft, normalize_assessment_draft
+from apps.clients.id_aliases import client_identifier_aliases
 from .program_draft import generate_program_draft
 from shared.uploads import (
     IMAGE_CONTENT_TYPES, VIDEO_CONTENT_TYPES, validate_image_upload, validate_media_upload,
@@ -94,9 +105,21 @@ def _require_program_write(request, action: str) -> None:
     _require_any_permission(request, (f'client_programs_{action}', f'org_programs_{action}'))
 
 
+def _atomic_program_edit(view):
+    """Authorize edits before opening the mutation transaction."""
+    @wraps(view)
+    def wrapped(request, *args, **kwargs):
+        _require_program_write(request, 'edit')
+        with transaction.atomic():
+            return view(request, *args, **kwargs)
+    return wrapped
+
+
 def _check_program_write(request, program: Program, action: str) -> None:
     """Library (template) programs need org_programs_<action>; a client's programs need client_programs_<action>."""
     require_permission(request, f"{'org' if program.is_template else 'client'}_programs_{action}")
+    if action == 'edit' and program.is_locked:
+        raise HttpError(423, 'This program is locked. Unlock it before making changes.')
 
 
 def _require_any_permission(request, permissions: tuple[str, ...]) -> None:
@@ -186,8 +209,9 @@ def _validate_lesson_program_ids(request, client_id: int, program_ids: list[int]
         raise HttpError(400, 'A playlist cannot contain the same program more than once')
     programs = Program.objects.filter(
         id__in=program_ids,
-        external_client_id=client_id,
-        external_client_id__in=_accessible_external_client_ids(request),
+        external_client_id__in=(
+            client_identifier_aliases(client_id) & _accessible_external_client_ids(request)
+        ),
     )
     if set(programs.values_list('id', flat=True)) != set(program_ids):
         raise HttpError(400, 'One or more selected programs are not available for this client')
@@ -557,7 +581,7 @@ def _validate_knowledge_base_video_upload(file: UploadedFile) -> None:
 
 @router.get('/superadmin/knowledge-base/modules', response=list[KnowledgeBaseModuleSchema])
 def superadmin_list_knowledge_base_modules(request):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     with schema_context(get_public_schema_name()):
         modules = (
             KnowledgeBaseModule.objects
@@ -569,7 +593,7 @@ def superadmin_list_knowledge_base_modules(request):
 
 @router.post('/superadmin/knowledge-base/modules', response={201: KnowledgeBaseModuleSchema})
 def superadmin_create_knowledge_base_module(request, data: KnowledgeBaseModuleRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     _validate_knowledge_base_icon(data.icon)
     with schema_context(get_public_schema_name()):
         module = KnowledgeBaseModule.objects.create(
@@ -588,14 +612,14 @@ def superadmin_create_knowledge_base_module(request, data: KnowledgeBaseModuleRe
 
 @router.get('/superadmin/knowledge-base/modules/{module_id}', response=KnowledgeBaseModuleSchema)
 def superadmin_get_knowledge_base_module(request, module_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     with schema_context(get_public_schema_name()):
         return _serialize_knowledge_base_module(_get_knowledge_base_module_or_404(module_id), request)
 
 
 @router.patch('/superadmin/knowledge-base/modules/{module_id}', response=KnowledgeBaseModuleSchema)
 def superadmin_update_knowledge_base_module(request, module_id: int, data: KnowledgeBaseModuleUpdateRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     with schema_context(get_public_schema_name()):
         module = _get_knowledge_base_module_or_404(module_id)
         updates = data.dict(exclude_unset=True)
@@ -611,7 +635,7 @@ def superadmin_update_knowledge_base_module(request, module_id: int, data: Knowl
 
 @router.delete('/superadmin/knowledge-base/modules/{module_id}', response={204: None})
 def superadmin_delete_knowledge_base_module(request, module_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     with schema_context(get_public_schema_name()):
         module = _get_knowledge_base_module_or_404(module_id)
         module.delete()
@@ -620,7 +644,7 @@ def superadmin_delete_knowledge_base_module(request, module_id: int):
 
 @router.post('/superadmin/knowledge-base/modules/{module_id}/video', response=KnowledgeBaseModuleSchema)
 def superadmin_upload_knowledge_base_video(request, module_id: int, file: UploadedFile = File(...)):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     _validate_knowledge_base_video_upload(file)
     with schema_context(get_public_schema_name()):
         module = _get_knowledge_base_module_or_404(module_id)
@@ -635,7 +659,7 @@ def superadmin_upload_knowledge_base_video(request, module_id: int, file: Upload
 
 @router.delete('/superadmin/knowledge-base/modules/{module_id}/video', response=KnowledgeBaseModuleSchema)
 def superadmin_delete_knowledge_base_video(request, module_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     with schema_context(get_public_schema_name()):
         module = _get_knowledge_base_module_or_404(module_id)
         if module.video:
@@ -649,7 +673,7 @@ def superadmin_delete_knowledge_base_video(request, module_id: int):
 
 @router.post('/superadmin/knowledge-base/modules/{module_id}/topics', response={201: KnowledgeBaseTopicSchema})
 def superadmin_create_knowledge_base_topic(request, module_id: int, data: KnowledgeBaseTopicRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     with schema_context(get_public_schema_name()):
         module = _get_knowledge_base_module_or_404(module_id)
         topic = KnowledgeBaseTopic.objects.create(
@@ -665,7 +689,7 @@ def superadmin_create_knowledge_base_topic(request, module_id: int, data: Knowle
 
 @router.patch('/superadmin/knowledge-base/topics/{topic_id}', response=KnowledgeBaseTopicSchema)
 def superadmin_update_knowledge_base_topic(request, topic_id: int, data: KnowledgeBaseTopicUpdateRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     with schema_context(get_public_schema_name()):
         topic = _get_knowledge_base_topic_or_404(topic_id)
         updates = data.dict(exclude_unset=True)
@@ -681,7 +705,7 @@ def superadmin_update_knowledge_base_topic(request, topic_id: int, data: Knowled
 
 @router.post('/superadmin/knowledge-base/topics/{topic_id}/video', response=KnowledgeBaseTopicSchema)
 def superadmin_upload_knowledge_base_topic_video(request, topic_id: int, file: UploadedFile = File(...)):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     _validate_knowledge_base_video_upload(file)
     with schema_context(get_public_schema_name()):
         topic = _get_knowledge_base_topic_or_404(topic_id)
@@ -696,7 +720,7 @@ def superadmin_upload_knowledge_base_topic_video(request, topic_id: int, file: U
 
 @router.delete('/superadmin/knowledge-base/topics/{topic_id}/video', response=KnowledgeBaseTopicSchema)
 def superadmin_delete_knowledge_base_topic_video(request, topic_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     with schema_context(get_public_schema_name()):
         topic = _get_knowledge_base_topic_or_404(topic_id)
         if topic.video:
@@ -710,7 +734,7 @@ def superadmin_delete_knowledge_base_topic_video(request, topic_id: int):
 
 @router.delete('/superadmin/knowledge-base/topics/{topic_id}', response={204: None})
 def superadmin_delete_knowledge_base_topic(request, topic_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     with schema_context(get_public_schema_name()):
         topic = _get_knowledge_base_topic_or_404(topic_id)
         topic.delete()
@@ -721,7 +745,7 @@ def superadmin_delete_knowledge_base_topic(request, topic_id: int):
 def superadmin_upload_knowledge_base_media(request, file: UploadedFile = File(...)):
     """Upload an image or video to embed inline in an article/topic's rich
     text (distinct from the single attached module/topic `video`)."""
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_knowledge_base')
     content_type = file.content_type or ''
     if content_type in IMAGE_CONTENT_TYPES:
         validate_image_upload(file)
@@ -774,14 +798,24 @@ def list_changelog_entries(request):
 
 @router.get('/superadmin/changelog', response=list[ChangelogEntrySchema])
 def superadmin_list_changelog_entries(request):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_changelog')
     with schema_context(get_public_schema_name()):
         return [_serialize_changelog_entry(entry) for entry in ChangelogEntry.objects.all()]
 
 
+@router.post('/superadmin/changelog/import-feature-drafts', response=dict)
+def superadmin_import_changelog_feature_drafts(request):
+    require_superadmin_or_delegated(request, 'manage_changelog')
+    from apps.central_library.changelog_notepad import import_notepad
+    try:
+        return import_notepad(user=request.user)
+    except (OSError, ValueError):
+        raise HttpError(400, 'The bundled changelog notepad could not be imported')
+
+
 @router.post('/superadmin/changelog', response={201: ChangelogEntrySchema})
 def superadmin_create_changelog_entry(request, data: ChangelogEntryRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_changelog')
     with schema_context(get_public_schema_name()):
         entry = ChangelogEntry.objects.create(
             version=data.version.strip(),
@@ -796,7 +830,7 @@ def superadmin_create_changelog_entry(request, data: ChangelogEntryRequest):
 
 @router.patch('/superadmin/changelog/{entry_id}', response=ChangelogEntrySchema)
 def superadmin_update_changelog_entry(request, entry_id: int, data: ChangelogEntryUpdateRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_changelog')
     with schema_context(get_public_schema_name()):
         entry = _get_changelog_entry_or_404(entry_id)
         updates = data.dict(exclude_unset=True)
@@ -812,7 +846,7 @@ def superadmin_update_changelog_entry(request, entry_id: int, data: ChangelogEnt
 
 @router.delete('/superadmin/changelog/{entry_id}', response={204: None})
 def superadmin_delete_changelog_entry(request, entry_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_changelog')
     with schema_context(get_public_schema_name()):
         _get_changelog_entry_or_404(entry_id).delete()
     return 204, None
@@ -928,33 +962,8 @@ def _serialize_program(program: Program, request=None, include_targets: bool = F
 
 
 def _optimized_program_image_url(request, image_field) -> str | None:
-    if not image_field:
-        return None
-
-    try:
-        source_path = image_field.path
-        source_url = image_field.url
-    except (NotImplementedError, ValueError):
-        return request.build_absolute_uri(image_field.url)
-
-    optimized_path = f'{source_path}.card.webp'
-    optimized_url = f'{source_url}.card.webp'
-
-    try:
-        source_mtime = os.path.getmtime(source_path)
-        optimized_is_current = (
-            os.path.exists(optimized_path)
-            and os.path.getmtime(optimized_path) >= source_mtime
-        )
-        if not optimized_is_current:
-            with Image.open(source_path) as img:
-                img = img.convert('RGB')
-                img.thumbnail((1200, 800), Image.Resampling.LANCZOS)
-                img.save(optimized_path, 'WEBP', quality=82, method=6)
-    except OSError:
-        return request.build_absolute_uri(source_url)
-
-    return request.build_absolute_uri(optimized_url)
+    from shared.program_images import program_card_image_url
+    return program_card_image_url(request, image_field)
 
 
 # ---------------------------------------------------------------------------
@@ -965,8 +974,9 @@ def _optimized_program_image_url(request, image_field) -> str | None:
 def list_programs(request, client_id: int, category: str | None = None, status: str | None = None, include_archived: bool = False):
     _require_program_read(request)
     qs = Program.objects.filter(
-        external_client_id=client_id,
-        external_client_id__in=_accessible_external_client_ids(request),
+        external_client_id__in=(
+            client_identifier_aliases(client_id) & _accessible_external_client_ids(request)
+        ),
     )
     if not include_archived:
         qs = qs.filter(archived_at__isnull=True)
@@ -1037,13 +1047,22 @@ def get_program(request, program_id: int):
 
 
 @router.patch('/programs/{program_id}', response=ProgramSchema)
+@_atomic_program_edit
 def update_program(request, program_id: int, data: ProgramUpdateRequest):
-    _require_program_write(request, 'edit')
     program = _get_program_or_404(request, program_id)
     _check_program_write(request, program, 'edit')
     if program.is_locked:
         raise HttpError(400, 'This program is locked. Unlock it before making changes.')
     updates = data.dict(exclude_none=True)
+    if updates.get('prompting_template_id') == program.prompting_template_id:
+        updates.pop('prompting_template_id', None)
+    targets = list(program.targets.all())
+    protected = protected_target_ids(t.id for t in targets)
+    if protected and 'category' in updates and updates['category'] != program.category:
+        raise HttpError(409, DATA_PROTECTION_MESSAGE)
+    if 'prompting_template_id' in updates:
+        for target in targets:
+            guard_target_changes(target, {'prompting_template_id': updates['prompting_template_id']}, protected)
     _validate_template_refs(request, updates.get('prompting_template_id'), updates.get('workflow_template_id'))
     if updates.get('category') == Program.Category.INSTRUCTIONS_ONLY and program.targets.exists():
         raise HttpError(400, 'Cannot switch to Instructions Only while this program still has targets — remove them first')
@@ -1151,8 +1170,8 @@ def delete_program_permanently(request, program_id: int):
     _check_program_write(request, program, 'delete')
     if program.archived_at is None:
         raise HttpError(400, 'Archive the program first — only archived programs can be permanently deleted')
-    if _last_run_by_target(program.targets.values_list('id', flat=True)):
-        raise HttpError(409, 'This program has recorded session data, so it cannot be permanently deleted. Leave it archived.')
+    if protected_target_ids(program.targets.values_list('id', flat=True)):
+        raise HttpError(409, 'This program has recorded data or saved sessions, so it cannot be permanently deleted. Leave it archived.')
     try:
         with transaction.atomic():
             program.delete()
@@ -1362,6 +1381,23 @@ def _validate_default_sub_fields(request, data: dict) -> None:
     )
 
 
+def _guard_recorded_sub_items(request, target, items):
+    existing = list(target.child_items.order_by('display_order', 'id'))
+    if not existing:
+        original = Target.objects.get(id=target.id)
+        before = original.sub_items
+        fields = ('key', 'measurement_type', 'measurement', 'prompting_template_id')
+        if [[raw.get(field) for field in fields] for raw in before] != [[raw.get(field) for field in fields] for raw in items]:
+            raise HttpError(409, DATA_PROTECTION_MESSAGE)
+        return
+    if [item.key for item in existing] != [str(raw.get('key') or f'item_{i + 1}')[:100] for i, raw in enumerate(items)]:
+        raise HttpError(409, DATA_PROTECTION_MESSAGE)
+    for child, raw in zip(existing, items):
+        config = _resolve_sub_item_config(request, target, raw)
+        if any(config[field] != getattr(child, field) for field in ('measurement_type', 'measurement', 'prompting_template_id')):
+            raise HttpError(409, DATA_PROTECTION_MESSAGE)
+
+
 def _sync_target_sub_items(request, target: Target, items: list[dict], user=None) -> None:
     existing = {item.key: item for item in target.child_items.all()}
     seen: set[str] = set()
@@ -1462,6 +1498,9 @@ def list_targets(request, program_id: int, staff_view: bool = False):
     if staff_view:
         qs = qs.visible_to_staff()
     targets = list(qs)
+    protected = protected_target_ids(t.id for t in targets)
+    for target in targets:
+        target.data_definition_locked = target.id in protected
     last_by_target = _last_run_by_target(t.id for t in targets)
     for target in targets:
         target.last_run_at = last_by_target.get(target.id)
@@ -1522,15 +1561,21 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
 @router.get('/targets/{target_id}', response=TargetSchema)
 def get_target(request, target_id: int):
     _require_program_read(request)
-    return _get_target_or_404(request, target_id)
+    target = _get_target_or_404(request, target_id)
+    target.data_definition_locked = bool(protected_target_ids([target.id]))
+    return target
 
 
 @router.patch('/targets/{target_id}', response=TargetSchema)
+@_atomic_program_edit
 def update_target(request, target_id: int, data: TargetUpdateRequest):
-    _require_program_write(request, 'edit')
     target = _get_target_or_404(request, target_id)
     _check_program_write(request, target.program, 'edit')
+    original = copy(target)
+    protected = protected_target_ids([target.id])
     updates = data.dict(exclude_none=True)
+    if updates.get('prompting_template_id') == target.prompting_template_id:
+        updates.pop('prompting_template_id', None)
     _validate_template_refs(request, updates.get('prompting_template_id'), updates.get('workflow_template_id'))
     old_status = target.status
     for field, value in updates.items():
@@ -1545,7 +1590,7 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
         _validate_target_status(request, updates['status'])
     if 'interval_warning_sound' in updates:
         _validate_interval_warning_sound(updates['interval_warning_sound'])
-    mt_changed = 'measurement_type' in updates
+    mt_changed = 'measurement_type' in updates and updates['measurement_type'] != original.measurement_type
     if mt_changed:
         _validate_measurement_type(updates['measurement_type'], allow_legacy=True)
     _validate_prompting_required(
@@ -1584,8 +1629,13 @@ def update_target(request, target_id: int, data: TargetUpdateRequest):
         }
         _validate_default_sub_fields(request, resolved)
         for k, v in resolved.items():
-            setattr(target, k, v)
+            if k in updates:
+                setattr(target, k, v)
     _require_sub_items_if_needed(target.measurement_type, target.sub_items)
+    guard_target_changes(original, {field: getattr(target, field) for field in updates}, protected)
+    if target.id in protected and 'sub_items' in updates:
+        _guard_recorded_sub_items(request, target, target.sub_items)
+    target.data_definition_locked = target.id in protected
     target.save()
     if target.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES and (
         'sub_items' in updates or 'sub_item_progression' in updates or default_sub_changed
@@ -1616,6 +1666,8 @@ def delete_target(request, target_id: int):
     _require_program_write(request, 'edit')
     target = _get_target_or_404(request, target_id)
     _check_program_write(request, target.program, 'edit')
+    if protected_target_ids([target.id]):
+        raise HttpError(409, 'This target has session history. Close or archive it instead of deleting it.')
     target.delete()
     return 204, None
 
@@ -1657,7 +1709,7 @@ def client_target_history(request, client_id: int):
     _assert_client_accessible(request, client_id)
     qs = (
         TargetStatusChange.objects
-        .filter(target__program__external_client_id=client_id)
+        .filter(target__program__external_client_id__in=client_identifier_aliases(client_id))
         .select_related('target', 'target__program', 'created_by')
         .order_by('-created_at')[:200]
     )
@@ -1725,7 +1777,10 @@ def client_program_audit(request, client_id: int):
 
     from apps.audit.models import AuditLog
 
-    program_ids = list(Program.objects.filter(external_client_id=client_id).values_list('id', flat=True))
+    program_ids = list(
+        Program.objects.filter(external_client_id__in=client_identifier_aliases(client_id))
+        .values_list('id', flat=True)
+    )
     target_ids = list(Target.objects.filter(program_id__in=program_ids).values_list('id', flat=True))
     qs = (
         AuditLog.objects
@@ -1762,9 +1817,9 @@ _BULK_UPDATE_FK_MODELS = {
 
 
 @router.post('/programs/{program_id}/targets/bulk-update', response=BulkUpdateResult)
+@_atomic_program_edit
 def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest):
     """Update specific fields across multiple targets without touching unspecified fields."""
-    _require_program_write(request, 'edit')
     program = _get_program_or_404(request, program_id)
     _check_program_write(request, program, 'edit')
     updates = data.dict(exclude={'target_ids'}, exclude_none=True)
@@ -1816,6 +1871,11 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
             updates['measurement_type'], None, None,
         )
 
+    selected = list(Target.objects.filter(id__in=data.target_ids, program_id=program_id))
+    protected = protected_target_ids(target.id for target in selected)
+    for target in selected:
+        guard_target_changes(target, updates, protected)
+
     template_for_prompt_index = None
     if 'prompting_template_id' in updates:
         template = _settings_qs(PromptingTemplate, request).filter(id=updates['prompting_template_id']).first()
@@ -1828,7 +1888,8 @@ def bulk_update_targets(request, program_id: int, data: BulkUpdateTargetsRequest
     if updated == 0:
         raise HttpError(400, 'No matching targets found for this program')
     if template_for_prompt_index:
-        for target in Target.objects.filter(id__in=data.target_ids, program_id=program_id):
+        changed_prompt_ids = [target.id for target in selected if target.prompting_template_id != updates['prompting_template_id']]
+        for target in Target.objects.filter(id__in=changed_prompt_ids, program_id=program_id):
             target.current_prompt_level_index = _initial_prompt_level_index(template_for_prompt_index, target)
             target.save(update_fields=['current_prompt_level_index', 'updated_at'])
     return BulkUpdateResult(updated_count=updated, target_ids=data.target_ids)
@@ -1889,6 +1950,12 @@ def update_prompting_template(request, template_id: int, data: PromptingTemplate
     if data.name:
         _check_unique_name(PromptingTemplate, request, data.name, exclude_id=template_id)
     payload = _normalize_prompting_template_settings(payload, template)
+    scoring_changed = (
+        ('levels' in payload and scoring_signature(payload['levels']) != scoring_signature(template.levels))
+        or ('outcome_measurement' in payload and payload['outcome_measurement'] != template.outcome_measurement)
+    )
+    if scoring_changed and template_has_history(template.id):
+        raise HttpError(409, 'This prompt template has session history. Duplicate it to change its scoring or levels.')
     for field, value in payload.items():
         setattr(template, field, value)
     template.save()
@@ -1905,6 +1972,8 @@ def delete_prompting_template(request, template_id: int):
         raise HttpError(404, 'Template not found')
     if template.is_locked:
         raise HttpError(423, 'Prompting template is locked')
+    if template_has_history(template.id):
+        raise HttpError(409, 'This prompt template has session history and cannot be deleted.')
     template.delete()
     return 204, None
 
@@ -1973,6 +2042,7 @@ def _serialize_lesson(lesson: Lesson) -> dict:
             'program_id': lp.program_id,
             'program_name': lp.program.name,
             'display_order': lp.display_order,
+            'is_pinned': lp.is_pinned,
         }
         for lp in lesson.lesson_programs.select_related('program').all()
     ]
@@ -1983,110 +2053,130 @@ def _serialize_lesson(lesson: Lesson) -> dict:
         'therapist_message': lesson.therapist_message,
         'lesson_type': lesson.lesson_type,
         'is_active': lesson.is_active,
+        'is_reusable': lesson.is_reusable,
+        'is_default': lesson.is_default,
         'programs': programs,
         'created_at': lesson.created_at,
         'updated_at': lesson.updated_at,
     }
 
 
-"""
-Session Playlist API is paused for now.
+def _session_setup_client(request, client_id: int):
+    from apps.clients.api import _get_accessible_clients
+    clients = _get_accessible_clients(request).select_for_update()
+    client = clients.filter(id=client_id).first() or clients.filter(external_id=str(client_id)).first()
+    if client is None:
+        raise HttpError(404, 'Client not found')
+    return client
 
-These endpoints exposed reusable playlist/template management in the client
-Sessions page, but users confused playlists with actual submitted/open session
-records. Keep the underlying Lesson model because appointment program
-assignment depends on it; only the standalone playlist API is disabled.
+
+def _get_session_setup_or_404(request, lesson_id: int) -> Lesson:
+    lesson = _get_lesson_or_404(request, lesson_id)
+    if not lesson.is_reusable or not lesson.is_active:
+        raise HttpError(404, 'Session setup not found')
+    return lesson
+
+
+def _require_session_setup_write(request):
+    _require_supervisor(request)
+    require_permission(request, 'sessions_edit')
+
+
+def _validate_setup_pins(program_ids, pinned_ids):
+    if len(set(pinned_ids)) != len(pinned_ids) or not set(pinned_ids).issubset(program_ids):
+        raise HttpError(400, 'Pinned programs must belong to this session setup')
+
 
 @router.get('/lessons', response=list[LessonSchema])
 def list_lessons(request, client_id: int):
+    _require_any_permission(request, ('client_sessions', 'session_start'))
+    _assert_client_accessible(request, client_id)
     lessons = Lesson.objects.filter(
-        external_client_id=client_id,
-        external_client_id__in=_accessible_external_client_ids(request),
-        is_active=True,
-    )
-    return [_serialize_lesson(l) for l in lessons]
+        external_client_id__in=client_identifier_aliases(client_id), is_active=True, is_reusable=True,
+    ).prefetch_related('lesson_programs__program')
+    return [_serialize_lesson(lesson) for lesson in lessons]
 
 
 @router.post('/lessons', response={201: LessonSchema})
+@transaction.atomic
 def create_lesson(request, data: LessonCreateRequest):
-    _require_supervisor(request)
-    _assert_client_accessible(request, data.client_id)
+    _require_session_setup_write(request)
+    client = _session_setup_client(request, data.client_id)
     if not data.program_ids:
-        raise HttpError(400, 'Select at least one program for the playlist')
-    program_ids = _validate_lesson_program_ids(request, data.client_id, data.program_ids)
+        raise HttpError(400, 'Select at least one program for the session setup')
+    program_ids = _validate_lesson_program_ids(request, client.id, data.program_ids)
+    _validate_setup_pins(program_ids, data.pinned_program_ids)
+    defaults = Lesson.objects.filter(external_client_id__in=client_identifier_aliases(client.id), is_default=True)
+    make_default = data.is_default or not defaults.exists()
+    if make_default:
+        defaults.update(is_default=False)
     lesson = Lesson.objects.create(
-        external_client_id=data.client_id,
-        name=data.name,
-        therapist_message=data.therapist_message,
-        lesson_type=data.lesson_type,
-        created_by=request.user,
+        external_client_id=client.id, name=data.name, therapist_message=data.therapist_message,
+        lesson_type=Lesson.LessonType.OPEN, is_reusable=True, is_default=make_default, created_by=request.user,
     )
     for order, program_id in enumerate(program_ids):
-        LessonProgram.objects.create(lesson=lesson, program_id=program_id, display_order=order)
+        LessonProgram.objects.create(lesson=lesson, program_id=program_id, display_order=order, is_pinned=program_id in data.pinned_program_ids)
     return 201, _serialize_lesson(lesson)
 
 
 @router.get('/lessons/{lesson_id}', response=LessonSchema)
 def get_lesson(request, lesson_id: int):
-    return _serialize_lesson(_get_lesson_or_404(request, lesson_id))
+    _require_any_permission(request, ('client_sessions', 'session_start'))
+    return _serialize_lesson(_get_session_setup_or_404(request, lesson_id))
 
 
 @router.patch('/lessons/{lesson_id}', response=LessonSchema)
+@transaction.atomic
 def update_lesson(request, lesson_id: int, data: LessonUpdateRequest):
-    _require_supervisor(request)
-    lesson = _get_lesson_or_404(request, lesson_id)
+    _require_session_setup_write(request)
+    lesson = _get_session_setup_or_404(request, lesson_id)
+    client = _session_setup_client(request, lesson.external_client_id)
+    lesson = Lesson.objects.select_for_update().get(pk=lesson.pk)
+    if not lesson.is_active:
+        raise HttpError(404, 'Session setup not found')
     payload = data.dict(exclude_none=True)
+    payload.pop('lesson_type', None)
     program_ids = payload.pop('program_ids', None)
-    if program_ids is not None and not program_ids:
-        raise HttpError(400, 'Select at least one program for the playlist')
+    pinned_ids = payload.pop('pinned_program_ids', None)
     if program_ids is not None:
-        program_ids = _validate_lesson_program_ids(request, lesson.external_client_id, program_ids)
+        if not program_ids:
+            raise HttpError(400, 'Select at least one program for the session setup')
+        program_ids = _validate_lesson_program_ids(request, client.id, program_ids)
+    effective_ids = program_ids if program_ids is not None else list(lesson.lesson_programs.values_list('program_id', flat=True))
+    if pinned_ids is None:
+        pinned_ids = list(lesson.lesson_programs.filter(is_pinned=True, program_id__in=effective_ids).values_list('program_id', flat=True))
+    _validate_setup_pins(effective_ids, pinned_ids)
+    if payload.get('is_active') is False:
+        payload['is_default'] = False
+    if payload.get('is_default'):
+        Lesson.objects.filter(external_client_id__in=client_identifier_aliases(client.id), is_default=True).exclude(pk=lesson.pk).update(is_default=False)
     for field, value in payload.items():
         setattr(lesson, field, value)
     lesson.save()
     if program_ids is not None:
         LessonProgram.objects.filter(lesson=lesson).delete()
         for order, program_id in enumerate(program_ids):
-            LessonProgram.objects.create(lesson=lesson, program_id=program_id, display_order=order)
+            LessonProgram.objects.create(lesson=lesson, program_id=program_id, display_order=order, is_pinned=program_id in pinned_ids)
+    elif data.pinned_program_ids is not None:
+        lesson.lesson_programs.update(is_pinned=False)
+        lesson.lesson_programs.filter(program_id__in=pinned_ids).update(is_pinned=True)
     return _serialize_lesson(lesson)
 
 
 @router.delete('/lessons/{lesson_id}', response={204: None})
+@transaction.atomic
 def delete_lesson(request, lesson_id: int):
-    _require_supervisor(request)
-    lesson = _get_lesson_or_404(request, lesson_id)
+    _require_session_setup_write(request)
+    lesson = _get_session_setup_or_404(request, lesson_id)
+    _session_setup_client(request, lesson.external_client_id)
+    lesson = Lesson.objects.select_for_update().get(pk=lesson.pk)
     lesson.is_active = False
-    lesson.save(update_fields=['is_active'])
+    lesson.is_default = False
+    lesson.save(update_fields=['is_active', 'is_default'])
     return 204, None
 
 
-@router.post('/lessons/{lesson_id}/programs', response={201: LessonProgramSchema})
-def add_program_to_lesson(request, lesson_id: int, data: AddProgramToLessonRequest):
-    _require_supervisor(request)
-    lesson = _get_lesson_or_404(request, lesson_id)
-    _validate_lesson_program_ids(request, lesson.external_client_id, [data.program_id])
-    lp, _ = LessonProgram.objects.get_or_create(
-        lesson=lesson,
-        program_id=data.program_id,
-        defaults={'display_order': data.display_order},
-    )
-    return 201, {
-        'id': lp.id,
-        'program_id': lp.program_id,
-        'program_name': lp.program.name,
-        'display_order': lp.display_order,
-    }
-
-
-@router.delete('/lessons/{lesson_id}/programs/{program_id}', response={204: None})
-def remove_program_from_lesson(request, lesson_id: int, program_id: int):
-    _require_supervisor(request)
-    _get_lesson_or_404(request, lesson_id)
-    LessonProgram.objects.filter(lesson_id=lesson_id, program_id=program_id).delete()
-    return 204, None
-"""
-
-
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Org-level program library (facility-wide templates)
 # ---------------------------------------------------------------------------
@@ -2275,6 +2365,7 @@ def draft_assessment_with_ai(request, data: AssessmentDraftRequest):
     the draft goes back to the person to review and edit first."""
     require_permission(request, 'org_programs_create')
     try:
+        ai_client.ensure_enabled_for_user(request.user)
         return generate_assessment_draft(data.description)
     except AIError as exc:
         raise HttpError(exc.status, str(exc)) from exc
@@ -2716,16 +2807,14 @@ def _serialize_central_program(
         copied_names = set(linked.targets.values_list('name', flat=True)) if linked else set()
         targets = [
             {
-                'id': t['id'], 'name': t['name'], 'status': 'waiting',
-                'measurement_type': t['measurement_type'],
-                'measurement': t['measurement'], 'timer_type': t['timer_type'],
-                'display_order': t['display_order'], 'is_visible_to_staff': t['is_visible_to_staff'],
-                'already_copied': t['name'] in copied_names,
+                'id': target.id, 'name': target.name, 'status': 'waiting',
+                'measurement_type': target.measurement_type,
+                'measurement': target.measurement, 'timer_type': target.timer_type,
+                'display_order': target.display_order, 'is_visible_to_staff': target.is_visible_to_staff,
+                'already_copied': target.name in copied_names,
+                'setting_ids': [setting.pk for setting in target.settings.all()],
             }
-            for t in program.targets.all().values(
-                'id', 'name', 'measurement_type', 'measurement', 'timer_type',
-                'display_order', 'is_visible_to_staff',
-            )
+            for target in program.targets.all()
         ]
     target_count = program.targets.count()
     imported_target_count = min(import_progress.get(program.id, 0), target_count)
@@ -2733,6 +2822,11 @@ def _serialize_central_program(
         'id': program.id,
         'is_template': True,
         'name': program.name,
+        'setting_ids': [setting.pk for setting in program.settings.all()],
+        'configuration': program.configuration,
+        'instructions_html': program.configuration.get('instructions_html', ''),
+        'professional_instructions_html': program.configuration.get('professional_instructions_html', ''),
+        'custom_field_values': program.configuration.get('custom_field_values', {}),
         'category': program.category,
         'status': program.status,
         'phase': program.phase,
@@ -2763,7 +2857,7 @@ def _get_central_folder_or_404(folder_id: int) -> CentralProgramFolder:
 
 def _get_superadmin_central_program_or_404(program_id: int) -> CentralProgram:
     try:
-        return CentralProgram.objects.prefetch_related('targets').get(id=program_id)
+        return CentralProgram.objects.prefetch_related('targets', 'settings', 'targets__settings').get(id=program_id)
     except CentralProgram.DoesNotExist:
         raise HttpError(404, 'Program not found')
 
@@ -2773,6 +2867,41 @@ def _get_central_target_or_404(target_id: int) -> CentralTarget:
         return CentralTarget.objects.select_related('program').get(id=target_id)
     except CentralTarget.DoesNotExist:
         raise HttpError(404, 'Target not found')
+
+
+def _clean_central_configuration(configuration):
+    result = dict(configuration or {})
+    for key in ('instructions_html', 'professional_instructions_html'):
+        if key in result:
+            result[key] = sanitize_kb_html(result[key])
+    return result
+
+
+def _sync_central_labels(program):
+    area = program.settings.filter(kind='treatment_area').first()
+    tags = list(program.settings.filter(kind='tag').values_list('name', flat=True))
+    if area:
+        program.treatment_area = area.name
+    if tags:
+        program.tags = tags
+    program.save()
+    sync_legacy_links(program)
+
+
+def _validate_central_target_settings(settings, measurement):
+    for setting in settings:
+        if setting.kind == 'workflow' and not _workflow_matches_measurement(
+                SimpleNamespace(phases=setting.configuration['phases']), measurement):
+            raise HttpError(400, 'Central workflow does not match the selected measurement')
+
+
+def _validate_central_sub_items(items):
+    for item in items:
+        if {'prompting_template_id', 'workflow_template_id'}.intersection(item):
+            raise HttpError(400, 'Central steps must link central setting_ids, not facility template IDs')
+        linked = validate_setting_links(item.get('setting_ids', []), target=True)
+        if any(setting.kind not in {'prompting', 'workflow'} for setting in linked):
+            raise HttpError(400, 'Steps accept prompting and workflow settings only')
 
 
 def _validate_central_program_fields(data) -> None:
@@ -2795,6 +2924,8 @@ def _serialize_superadmin_central_target(target: CentralTarget) -> dict:
         'id': target.id,
         'program_id': target.program_id,
         'name': target.name,
+        'setting_ids': [setting.pk for setting in target.settings.all()],
+        'configuration': target.configuration,
         'measurement_type': target.measurement_type,
         'measurement': target.measurement,
         'timer_type': target.timer_type,
@@ -2813,6 +2944,8 @@ def _serialize_superadmin_central_program(program: CentralProgram, request, incl
         'id': program.id,
         'is_template': True,
         'name': program.name,
+        'setting_ids': [setting.pk for setting in program.settings.all()],
+        'configuration': program.configuration,
         'category': program.category,
         'status': program.status,
         'phase': program.phase,
@@ -2832,6 +2965,7 @@ def _serialize_superadmin_central_program(program: CentralProgram, request, incl
             {
                 'id': target.id,
                 'name': target.name,
+                'setting_ids': [setting.pk for setting in target.settings.all()],
                 'status': 'waiting',
                 'measurement_type': target.measurement_type,
                 'measurement': target.measurement,
@@ -2858,7 +2992,7 @@ def _normalize_central_target_payload(payload) -> tuple[str, str]:
 
 @router.get('/superadmin/central-program-folders', response=list[CentralProgramFolderSchema])
 def superadmin_list_central_program_folders(request):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     return [
         {
             'id': folder.id,
@@ -2872,7 +3006,7 @@ def superadmin_list_central_program_folders(request):
 
 @router.post('/superadmin/central-program-folders', response={201: CentralProgramFolderSchema})
 def superadmin_create_central_program_folder(request, data: CentralProgramFolderRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     folder = CentralProgramFolder.objects.create(
         name=data.name,
         display_order=data.display_order,
@@ -2888,7 +3022,7 @@ def superadmin_create_central_program_folder(request, data: CentralProgramFolder
 
 @router.patch('/superadmin/central-program-folders/{folder_id}', response=CentralProgramFolderSchema)
 def superadmin_update_central_program_folder(request, folder_id: int, data: CentralProgramFolderRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     folder = _get_central_folder_or_404(folder_id)
     folder.name = data.name
     folder.display_order = data.display_order
@@ -2903,7 +3037,7 @@ def superadmin_update_central_program_folder(request, folder_id: int, data: Cent
 
 @router.delete('/superadmin/central-program-folders/{folder_id}', response={204: None})
 def superadmin_delete_central_program_folder(request, folder_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     folder = _get_central_folder_or_404(folder_id)
     folder.delete()
     return 204, None
@@ -2911,16 +3045,19 @@ def superadmin_delete_central_program_folder(request, folder_id: int):
 
 @router.get('/superadmin/central-programs', response=list[OrgProgramSchema])
 def superadmin_list_central_programs(request):
-    _require_superadmin(request)
-    qs = CentralProgram.objects.prefetch_related('targets').all()
+    require_superadmin_or_delegated(request, 'manage_central_programs')
+    qs = CentralProgram.objects.prefetch_related('targets', 'settings', 'targets__settings').all()
     return [_serialize_superadmin_central_program(program, request) for program in qs]
 
 
 @router.post('/superadmin/central-programs', response={201: OrgProgramSchema})
+@transaction.atomic
 def superadmin_create_central_program(request, data: CentralProgramRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     _validate_central_program_fields(data)
+    linked_settings = validate_setting_links(data.setting_ids)
     program = CentralProgram.objects.create(
+        configuration=_clean_central_configuration(data.configuration.model_dump()),
         name=data.name,
         category=data.category,
         phase=data.phase,
@@ -2934,6 +3071,10 @@ def superadmin_create_central_program(request, data: CentralProgramRequest):
         display_order=data.display_order,
         created_by=request.user,
     )
+    program.settings.set(linked_settings)
+    _sync_central_labels(program)
+    for index, target_data in enumerate(data.targets):
+        _create_central_target(program, target_data, display_order=index)
     return 201, _serialize_superadmin_central_program(program, request, include_targets=True)
 
 
@@ -2967,25 +3108,41 @@ def superadmin_import_central_programs(
 
 @router.get('/superadmin/central-programs/{program_id}', response=OrgProgramSchema)
 def superadmin_get_central_program(request, program_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     program = _get_superadmin_central_program_or_404(program_id)
     return _serialize_superadmin_central_program(program, request, include_targets=True)
 
 
 @router.patch('/superadmin/central-programs/{program_id}', response=OrgProgramSchema)
+@transaction.atomic
 def superadmin_update_central_program(request, program_id: int, data: CentralProgramUpdateRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     _validate_central_program_fields(data)
     program = _get_superadmin_central_program_or_404(program_id)
-    for field, value in data.dict(exclude_unset=True).items():
-        setattr(program, field, value)
+    updates = data.dict(exclude_unset=True)
+    ids = updates.pop('setting_ids', None)
+    if ids is not None:
+        program.settings.set(validate_setting_links(ids))
+    for field, value in updates.items():
+        setattr(program, field, _clean_central_configuration(value) if field == 'configuration' else value)
     program.save()
+    _sync_central_labels(program)
+    return _serialize_superadmin_central_program(program, request, include_targets=True)
+
+
+@router.post('/superadmin/central-programs/{program_id}/image', response=OrgProgramSchema)
+def superadmin_upload_central_program_image(request, program_id: int, file: UploadedFile = File(...)):
+    require_superadmin_or_delegated(request, 'manage_central_programs')
+    program = _get_superadmin_central_program_or_404(program_id)
+    validate_image_upload(file)
+    program.image = file
+    program.save(update_fields=['image', 'updated_at'])
     return _serialize_superadmin_central_program(program, request, include_targets=True)
 
 
 @router.delete('/superadmin/central-programs/{program_id}', response={204: None})
 def superadmin_delete_central_program(request, program_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     program = _get_superadmin_central_program_or_404(program_id)
     program.delete()
     return 204, None
@@ -2993,17 +3150,27 @@ def superadmin_delete_central_program(request, program_id: int):
 
 @router.get('/superadmin/central-programs/{program_id}/targets', response=list[CentralTargetSchema])
 def superadmin_list_central_targets(request, program_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     program = _get_superadmin_central_program_or_404(program_id)
     return [_serialize_superadmin_central_target(target) for target in program.targets.all()]
 
 
 @router.post('/superadmin/central-programs/{program_id}/targets', response={201: CentralTargetSchema})
+@transaction.atomic
 def superadmin_create_central_target(request, program_id: int, data: CentralTargetRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     program = _get_superadmin_central_program_or_404(program_id)
+    target = _create_central_target(program, data)
+    return 201, _serialize_superadmin_central_target(target)
+
+
+def _create_central_target(program, data: CentralTargetRequest, *, display_order=None):
     measurement, timer_type = _normalize_central_target_payload(data)
+    linked_settings = validate_setting_links(data.setting_ids, target=True)
+    _validate_central_target_settings(linked_settings, measurement)
+    _validate_central_sub_items(data.sub_items)
     target = CentralTarget.objects.create(
+        configuration=_clean_central_configuration(data.configuration.model_dump()),
         program=program,
         name=data.name,
         measurement_type=data.measurement_type,
@@ -3013,17 +3180,24 @@ def superadmin_create_central_target(request, program_id: int, data: CentralTarg
         sd_text=data.sd_text,
         teaching_instructions=data.teaching_instructions,
         prompting_levels=data.prompting_levels,
-        display_order=data.display_order,
+        display_order=data.display_order if display_order is None else display_order,
         is_visible_to_staff=data.is_visible_to_staff,
     )
-    return 201, _serialize_superadmin_central_target(target)
+    target.settings.set(linked_settings)
+    sync_legacy_links(target)
+    return target
 
 
 @router.patch('/superadmin/central-targets/{target_id}', response=CentralTargetSchema)
+@transaction.atomic
 def superadmin_update_central_target(request, target_id: int, data: CentralTargetUpdateRequest):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     target = _get_central_target_or_404(target_id)
     updates = data.dict(exclude_unset=True)
+    ids = updates.pop('setting_ids', None)
+    linked_settings = validate_setting_links(ids, target=True) if ids is not None else list(target.settings.all())
+    if 'sub_items' in updates:
+        _validate_central_sub_items(updates['sub_items'])
     next_measurement_type = updates.get('measurement_type', target.measurement_type)
     measurement_payload = SimpleNamespace(
         measurement_type=next_measurement_type,
@@ -3031,18 +3205,24 @@ def superadmin_update_central_target(request, target_id: int, data: CentralTarge
         timer_type=updates.get('timer_type', target.timer_type),
     )
     measurement, timer_type = _normalize_central_target_payload(measurement_payload)
+    _validate_central_target_settings(linked_settings, measurement)
     for field, value in updates.items():
         if field not in {'measurement', 'timer_type'}:
-            setattr(target, field, value)
+            setattr(target, field, _clean_central_configuration(value) if field == 'configuration' else value)
     target.measurement = measurement
     target.timer_type = timer_type
     target.save()
+    if ids is not None:
+        target.settings.set(linked_settings)
+    if 'prompting_levels' in updates and ids is None:
+        target.settings.remove(*target.settings.filter(kind='prompting'))
+        sync_legacy_links(target)
     return _serialize_superadmin_central_target(target)
 
 
 @router.delete('/superadmin/central-targets/{target_id}', response={204: None})
 def superadmin_delete_central_target(request, target_id: int):
-    _require_superadmin(request)
+    require_superadmin_or_delegated(request, 'manage_central_programs')
     target = _get_central_target_or_404(target_id)
     target.delete()
     return 204, None
@@ -3062,7 +3242,7 @@ def list_central_programs(
     elif unfiled:
         qs = qs.filter(folder_id__isnull=True)
     import_progress = _central_import_progress(request)
-    return [_serialize_central_program(p, request, import_progress=import_progress) for p in qs.prefetch_related('targets')]
+    return [_serialize_central_program(p, request, import_progress=import_progress) for p in qs.prefetch_related('targets', 'settings', 'targets__settings')]
 
 
 # Registered before /central-programs/{program_id} below — same routing
@@ -3084,6 +3264,7 @@ def list_central_program_folders(request):
 
 
 @router.post('/central-programs/folders/{folder_id}/import', response={201: ImportCentralFolderResult})
+@transaction.atomic
 def import_central_folder(request, folder_id: int):
     """Import every not-yet-imported program in a Central Library folder into
     the caller's org library in one shot, filing them all into a same-named
@@ -3128,7 +3309,7 @@ def import_central_folder(request, folder_id: int):
 def get_central_program(request, program_id: int):
     require_permission(request, 'central_library_view')
     try:
-        program = _central_qs().prefetch_related('targets').get(id=program_id)
+        program = _central_qs().prefetch_related('targets', 'settings', 'targets__settings').get(id=program_id)
     except CentralProgram.DoesNotExist:
         raise HttpError(404, 'Program not found')
     return _serialize_central_program(program, request, include_targets=True, import_progress=_central_import_progress(request))
@@ -3171,13 +3352,13 @@ def _create_linked_org_program(source: CentralProgram, user) -> Program:
         display_order=source.display_order,
         created_by=user,
     )
+    apply_program_settings(dest, source, user)
     _copy_image(source.image, dest)
     return dest
 
 
 def _append_central_targets(dest: Program, targets, user) -> None:
-    """Copies each given CentralTarget into dest as a new Target, appended
-    after whatever targets dest already has."""
+    """Copy linked settings into this facility, then attach local IDs only."""
     start_order = dest.targets.count()
     for i, t in enumerate(targets):
         prompting_template = None
@@ -3187,27 +3368,51 @@ def _append_central_targets(dest: Program, targets, user) -> None:
                 levels=t.prompting_levels,
                 created_by=user,
             )
+        sync_legacy_links(t)
+        linked = pull_links(t, user)
+        prompting = linked.get('prompting', [(None, dest.prompting_template)])[0][1]
+        workflow = linked.get('workflow', [(None, dest.workflow_template)])[0][1]
         measurement, timer_type = _resolve_measurement_fields(
             t.measurement_type, t.measurement or None, t.timer_type or None,
         )
+        if workflow and not _workflow_matches_measurement(workflow, measurement):
+            if linked.get('workflow'):
+                raise HttpError(400, f'Workflow does not match target "{t.name}" measurement')
+            workflow = None  # mixed-measurement programs inherit only compatible defaults
+        starting = linked.get('target_status', [])
+        if not starting:
+            source_status = t.program.settings.filter(kind='target_status').first()
+            if source_status:
+                starting = [(source_status.pk, pull_setting(source_status, user))]
+        fallback = _settings_qs(TargetStatus, SimpleNamespace(user=user), include_org_defaults=True).filter(is_default=True).first()
+        status = starting[0][1].key if starting else (fallback.key if fallback else 'waiting')
+        sub_items = []
+        for raw in t.sub_items:
+            step = dict(raw)
+            ids = step.pop('setting_ids', [])
+            for setting in validate_setting_links(ids, target=True):
+                if setting.kind not in {'prompting', 'workflow'}:
+                    raise HttpError(400, 'Steps accept prompting and workflow settings')
+                local = pull_setting(setting, user)
+                step['prompting_template_id' if setting.kind == 'prompting' else 'workflow_template_id'] = local.pk
+            sub_items.append(step)
+        config = dict(t.configuration)
+        if config.get('mastery_mode') == 'automatic' and workflow is None:
+            raise HttpError(400, f'Automatic mastery for "{t.name}" requires a compatible workflow')
         copied = Target.objects.create(
-            program=dest,
-            name=t.name,
-            measurement_type=t.measurement_type,
-            measurement=measurement,
-            timer_type=timer_type,
-            sub_items=t.sub_items,
-            sd_text=t.sd_text,
-            teaching_instructions=t.teaching_instructions,
-            display_order=start_order + i,
-            is_visible_to_staff=t.is_visible_to_staff,
-            prompting_template=prompting_template,
-            created_by=user,
+            program=dest, name=t.name, measurement_type=t.measurement_type,
+            measurement=measurement, timer_type=timer_type, sub_items=sub_items,
+            sd_text=t.sd_text, teaching_instructions=t.teaching_instructions,
+            display_order=start_order + i, is_visible_to_staff=t.is_visible_to_staff,
+            prompting_template=prompting, workflow_template=workflow, status=status,
+            current_prompt_level_index=_initial_prompt_level_index(prompting),
+            created_by=user, **config,
         )
         if copied.measurement_type in _SUB_ITEM_MEASUREMENT_TYPES:
-            _sync_target_sub_items(None, copied, copied.sub_items, user)
+            _sync_target_sub_items(SimpleNamespace(user=user), copied, copied.sub_items, user)
 
 
+@transaction.atomic
 def _clone_central_program(program_id: int, user) -> Program:
     """Deep-copies a Central Library program (+ targets) into the calling
     user's own organization. A target's optional `prompting_levels` becomes
@@ -3221,7 +3426,7 @@ def _clone_central_program(program_id: int, user) -> Program:
     is still missing, rather than creating a second, duplicate program.
     """
     try:
-        source = _central_qs().prefetch_related('targets').get(id=program_id)
+        source = _central_qs().select_for_update().prefetch_related('targets', 'settings', 'targets__settings').get(id=program_id)
     except CentralProgram.DoesNotExist:
         raise HttpError(404, 'Program not found')
 
@@ -3250,6 +3455,7 @@ def import_central_program(request, program_id: int):
     return 201, _serialize_org_program(dest, request, include_targets=True)
 
 
+@transaction.atomic
 def _clone_central_target_as_program(program_id: int, target_id: int, user) -> Program:
     """Copy a single target out of a Central Library program into the
     caller's Library. If this central program is already linked to one of
@@ -3260,7 +3466,7 @@ def _clone_central_target_as_program(program_id: int, target_id: int, user) -> P
     (name, category, image, etc.) so it starts out as a coherent program
     rather than an orphaned single target."""
     try:
-        source = _central_qs().get(id=program_id)
+        source = _central_qs().select_for_update().get(id=program_id)
     except CentralProgram.DoesNotExist:
         raise HttpError(404, 'Program not found')
     try:
@@ -3612,6 +3818,7 @@ def draft_program_with_ai(request, data: ProgramDraftRequest):
     areas = list(_settings_qs(TreatmentArea, request).filter(is_active=True).values_list('name', flat=True))
     tags = list(_settings_qs(ProgramTag, request).filter(is_active=True).values_list('name', flat=True))
     try:
+        ai_client.ensure_enabled_for_user(request.user)
         return generate_program_draft(data.description, areas, tags)
     except AIError as exc:
         raise HttpError(exc.status, str(exc)) from exc
@@ -3716,3 +3923,7 @@ def delete_data_field(request, pk: int):
     except ProgramDataField.DoesNotExist:
         raise HttpError(404, 'Not found')
     return 204, None
+
+# Platform settings use the same authenticated API surface as central programs.
+from apps.central_library.settings_api import router as central_settings_router
+router.add_router('', central_settings_router)

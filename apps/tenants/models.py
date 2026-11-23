@@ -9,13 +9,10 @@ class Organization(TenantMixin):
         ENTERPRISE = 'enterprise', 'Enterprise'
 
     class AutomaticLogoutMinutes(models.IntegerChoices):
-        TWO_MINUTES = 2, '2 minutes'
         FIVE_MINUTES = 5, '5 minutes'
+        TEN_MINUTES = 10, '10 minutes'
         FIFTEEN_MINUTES = 15, '15 minutes'
         THIRTY_MINUTES = 30, '30 minutes'
-        NINE_HOURS = 9 * 60, '9 hours'
-        TWENTY_FOUR_HOURS = 24 * 60, '24 hours'
-        ONE_WEEK = 7 * 24 * 60, '1 week'
 
     class IntegrationPlatform(models.TextChoices):
         THERAPY_PMS = 'therapy_pms', 'TherapyPMS'
@@ -27,11 +24,9 @@ class Organization(TenantMixin):
     automatic_logout_enabled = models.BooleanField(default=False)
     automatic_logout_minutes = models.PositiveIntegerField(
         choices=AutomaticLogoutMinutes.choices,
-        default=AutomaticLogoutMinutes.NINE_HOURS,
+        default=AutomaticLogoutMinutes.FIFTEEN_MINUTES,
     )
     pin_lock_allowed = models.BooleanField(default=False)
-    # Blank until the org actually connects (see tenants.api.connect_therapy_pms) —
-    # picking a platform in the UI doesn't set this by itself.
     integration_platform = models.CharField(
         max_length=30, choices=IntegrationPlatform.choices, blank=True, default='',
     )
@@ -78,6 +73,14 @@ class OrganizationTpmsAdminId(models.Model):
     stays unambiguous — a given TPMS practice can never resolve to two
     different DCM organizations.
     """
+    class FormBuilderMode(models.TextChoices):
+        NEW = 'new', 'New Form Builder only'
+        OLD = 'old', 'Old Form Builder only'
+        BOTH = 'both', 'Both form builders'
+
+    form_builder_mode = models.CharField(
+        max_length=4, choices=FormBuilderMode.choices, default=FormBuilderMode.NEW,
+    )
     organization = models.ForeignKey(
         Organization,
         on_delete=models.CASCADE,
@@ -87,6 +90,15 @@ class OrganizationTpmsAdminId(models.Model):
     facility_name = models.CharField(max_length=200, blank=True)
     email_notifications_enabled = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
+    ai_enabled = models.BooleanField(default=False)
+    integration_platform = models.CharField(max_length=30, blank=True, default='')
+    integration_email = models.EmailField(blank=True, default='')
+    integration_password_encrypted = models.TextField(blank=True, default='')
+    integration_admin_id = models.IntegerField(null=True, blank=True)
+    last_appointment_sync_at = models.DateTimeField(null=True, blank=True)
+    last_client_sync_at = models.DateTimeField(null=True, blank=True)
+    last_provider_sync_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

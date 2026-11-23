@@ -4,7 +4,8 @@ from ninja import Schema
 from pydantic import Field, field_validator
 
 from shared.schema_types import NameStr200, NonEmptyStr, SlugStr
-from .models import Program, Target, PromptingTemplate, ProgramDataField, Lesson
+from .models import Program, Target, PromptingTemplate, ProgramDataField, Lesson, SubTargetMeasurementType
+from .services import validate_auto_open_config
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +35,7 @@ def _require_phase_keys(phases: list[dict] | None) -> list[dict] | None:
     for p in phases:
         if not isinstance(p, dict) or not str(p.get('phase') or '').strip():
             raise ValueError('each phase must be an object with a non-empty "phase" key')
+        validate_auto_open_config(p)
     return phases
 
 
@@ -150,7 +152,27 @@ class PromptingTemplateUpdateRequest(Schema):
 # Programs
 # ---------------------------------------------------------------------------
 
-class TargetSummarySchema(Schema):
+class ProgramCodeSchema(Schema):
+    """Read-only code derived from the database-assigned identity."""
+    code: str
+
+    @staticmethod
+    def resolve_code(obj):
+        record_id = obj['id'] if isinstance(obj, dict) else obj.id
+        return f'PRG-{record_id:04d}'
+
+
+class TargetCodeSchema(Schema):
+    code: str
+
+    @staticmethod
+    def resolve_code(obj):
+        record_id = obj['id'] if isinstance(obj, dict) else obj.id
+        return f'TAR-{record_id:04d}'
+
+
+class TargetSummarySchema(TargetCodeSchema):
+    setting_ids: list[int] = []
     id: int
     name: str
     status: str
@@ -176,7 +198,7 @@ class ProgramMaterialSchema(Schema):
     created_at: datetime
 
 
-class ProgramSchema(Schema):
+class ProgramSchema(ProgramCodeSchema):
     id: int
     client_id: int | None = None
     is_locked: bool = False
@@ -205,7 +227,7 @@ class ProgramSchema(Schema):
     materials: list[ProgramMaterialSchema] = []
 
 
-class ProgramListSchema(Schema):
+class ProgramListSchema(ProgramCodeSchema):
     id: int
     client_id: int
     name: str
@@ -308,7 +330,8 @@ class ProgramSubmoduleRequest(Schema):
     display_order: int = Field(default=0, ge=0)
 
 
-class TargetSchema(Schema):
+class TargetSchema(TargetCodeSchema):
+    data_definition_locked: bool = False
     id: int
     program_id: int
     name: str
@@ -467,6 +490,7 @@ class LessonProgramSchema(Schema):
     program_id: int
     program_name: str
     display_order: int
+    is_pinned: bool = False
 
 
 class LessonSchema(Schema):
@@ -476,6 +500,8 @@ class LessonSchema(Schema):
     therapist_message: str = ''
     lesson_type: str
     is_active: bool
+    is_reusable: bool
+    is_default: bool
     programs: list[LessonProgramSchema] = []
     created_at: datetime
     updated_at: datetime
@@ -487,6 +513,8 @@ class LessonCreateRequest(Schema):
     therapist_message: str = ''
     lesson_type: Lesson.LessonType = Lesson.LessonType.OPEN
     program_ids: list[int] = []
+    pinned_program_ids: list[int] = []
+    is_default: bool = False
 
 
 class LessonUpdateRequest(Schema):
@@ -494,7 +522,9 @@ class LessonUpdateRequest(Schema):
     therapist_message: str | None = None
     lesson_type: Lesson.LessonType | None = None
     is_active: bool | None = None
+    is_default: bool | None = None
     program_ids: list[int] | None = None
+    pinned_program_ids: list[int] | None = None
 
 
 class AddProgramToLessonRequest(Schema):
@@ -506,7 +536,9 @@ class AddProgramToLessonRequest(Schema):
 # Org-level program templates (facility-wide library)
 # ---------------------------------------------------------------------------
 
-class OrgProgramSchema(Schema):
+class OrgProgramSchema(ProgramCodeSchema):
+    setting_ids: list[int] = []
+    configuration: dict[str, Any] = {}
     id: int
     is_template: bool
     is_locked: bool = False
@@ -653,7 +685,34 @@ class CentralProgramFolderRequest(Schema):
     display_order: int = Field(default=0, ge=0)
 
 
+class CentralProgramConfiguration(Schema):
+    model_config = {'extra': 'forbid'}
+    baseline_notes: str = Field(default='', max_length=50000)
+    instructions_html: str = Field(default='', max_length=50000)
+    professional_instructions_html: str = Field(default='', max_length=50000)
+    hidden_prompt_level_labels: list[str] = []
+    custom_field_values: dict[str, str | bool] = {}
+
+
+class CentralTargetConfiguration(Schema):
+    model_config = {'extra': 'forbid'}
+    mastery_mode: Target.MasteryMode = Target.MasteryMode.MANUAL
+    instructions_html: str = Field(default='', max_length=50000)
+    sub_item_progression: Target.SubItemProgression = Target.SubItemProgression.FORWARD
+    default_sub_measurement_type: SubTargetMeasurementType = SubTargetMeasurementType.DISCRETE_TRIAL
+    default_sub_measurement: str = ''
+    interval_seconds: int = Field(default=60, ge=1)
+    interval_sync_with_session: bool = False
+    interval_warn_before_end: bool = False
+    interval_pause_on_warning: bool = False
+    interval_warn_seconds_before: int = Field(default=10, ge=0)
+    interval_warning_sound: str = ''
+
+
 class CentralProgramRequest(Schema):
+    targets: list['CentralTargetRequest'] = Field(default_factory=list, max_length=500)
+    setting_ids: list[int] = []
+    configuration: CentralProgramConfiguration = Field(default_factory=CentralProgramConfiguration)
     name: NonEmptyStr
     category: str = 'skill_acquisition'
     phase: str = 'teaching'
@@ -668,6 +727,8 @@ class CentralProgramRequest(Schema):
 
 
 class CentralProgramUpdateRequest(Schema):
+    setting_ids: list[int] | None = None
+    configuration: CentralProgramConfiguration | None = None
     name: NonEmptyStr | None = None
     category: str | None = None
     phase: str | None = None
@@ -681,7 +742,9 @@ class CentralProgramUpdateRequest(Schema):
     display_order: int | None = Field(default=None, ge=0)
 
 
-class CentralTargetSchema(Schema):
+class CentralTargetSchema(TargetCodeSchema):
+    setting_ids: list[int] = []
+    configuration: dict[str, Any] = {}
     id: int
     program_id: int
     name: str
@@ -697,6 +760,8 @@ class CentralTargetSchema(Schema):
 
 
 class CentralTargetRequest(Schema):
+    setting_ids: list[int] = []
+    configuration: CentralTargetConfiguration = Field(default_factory=CentralTargetConfiguration)
     name: NonEmptyStr
     measurement_type: str = 'discrete_trial'
     measurement: str = ''
@@ -710,6 +775,8 @@ class CentralTargetRequest(Schema):
 
 
 class CentralTargetUpdateRequest(Schema):
+    setting_ids: list[int] | None = None
+    configuration: CentralTargetConfiguration | None = None
     name: NonEmptyStr | None = None
     measurement_type: str | None = None
     measurement: str | None = None
@@ -1074,3 +1141,5 @@ class ProgramDraftSchema(Schema):
 # The create requests above embed TargetCreateRequest, which is defined further down.
 ProgramCreateRequest.model_rebuild()
 OrgProgramCreateRequest.model_rebuild()
+
+CentralProgramRequest.model_rebuild()

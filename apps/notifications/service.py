@@ -14,11 +14,13 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 
-def _create(recipient_id: int, event_type: str, title: str, body: str = '', data: dict | None = None):
+def _create(recipient_id: int, event_type: str, title: str, body: str = '', data: dict | None = None, *, send_email: bool = True):
     try:
         from apps.accounts.models import User
         recipient = User.objects.get(id=recipient_id)
-        if _channel_enabled(recipient, event_type, 'web'):
+        web_enabled = _channel_enabled(recipient, event_type, 'web')
+        mobile_enabled = _channel_enabled(recipient, event_type, 'mobile')
+        if web_enabled:
             from .models import Notification
             Notification.objects.create(
                 recipient=recipient,
@@ -27,8 +29,10 @@ def _create(recipient_id: int, event_type: str, title: str, body: str = '', data
                 body=body,
                 data=data or {},
             )
-            _send_firebase_push(recipient, title, body, data or {})
-        if _channel_enabled(recipient, event_type, 'email'):
+        if web_enabled or mobile_enabled:
+            platforms = (['web'] if web_enabled else []) + (['android'] if mobile_enabled else [])
+            _send_firebase_push(recipient, title, body, data or {}, platforms=platforms)
+        if send_email and _channel_enabled(recipient, event_type, 'email'):
             _send_email(recipient.email, title, body, data or {})
     except Exception:
         logger.exception('Failed to create notification (event=%s recipient=%s)', event_type, recipient_id)
@@ -44,7 +48,7 @@ def _channel_enabled(recipient, event_type: str, channel: str) -> bool:
             return False
 
         def channel_value(obj):
-            return obj.email_enabled if channel == 'email' else obj.web_enabled
+            return getattr(obj, {'email': 'email_enabled', 'web': 'web_enabled', 'mobile': 'mobile_enabled'}[channel])
 
         policy = RoleNotificationPolicy.all_organizations.filter(
             organization_id=getattr(recipient, 'organization_id', None),
@@ -114,6 +118,168 @@ def _send_email(email: str, subject: str, body: str, data: dict | None = None):
         logger.exception('Failed to send notification email to %s', email)
 
 
+def send_password_set_invite(email: str, first_name: str, url: str, expires_at) -> None:
+    """Send the dedicated, branded password setup invitation email."""
+    if not email:
+        return
+    from django.utils import timezone
+
+    expiry = timezone.localtime(expires_at).strftime('%B %-d, %Y at %-I:%M %p %Z')
+    subject = 'Set up your Progressly account'
+    body = (
+        f"Hi {first_name or 'there'},\n\n"
+        'You have been invited to set up your Progressly account. Use the link below to choose your password. '
+        f'This link expires {expiry}.\n\n'
+        f'{url}\n\nIf you were not expecting this invitation, you can ignore this email.'
+    )
+    try:
+        html_body = render_to_string('notifications/password_set_invite.html', {
+            'first_name': first_name,
+            'setup_url': url,
+            'expiry': expiry,
+        })
+        message = EmailMultiAlternatives(
+            subject=subject,
+            body=body,
+            from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', None),
+            to=[email],
+        )
+        message.attach_alternative(html_body, 'text/html')
+        message.send(fail_silently=False)
+    except Exception:
+        logger.exception('Failed to send password setup invitation to %s', email)
+
+
+def send_password_reset_email(email: str, first_name: str, url: str, expires_at) -> None:
+    """Send the branded self-service password-reset email. Failure is
+    swallowed, same as send_password_set_invite above — the request endpoint
+    always returns a generic response regardless of whether sending
+    succeeded, so a client can't tell from this function's behavior whether
+    the address it submitted matched an account."""
+    if not email:
+        return
+    from django.utils import timezone
+
+    expiry = timezone.localtime(expires_at).strftime('%B %-d, %Y at %-I:%M %p %Z')
+    subject = 'Reset your Progressly password'
+    body = (
+        f"Hi {first_name or 'there'},\n\n"
+        'We received a request to reset your Progressly password. Use the link below to choose a new one. '
+        f'This link expires {expiry}.\n\n'
+        f'{url}\n\nIf you did not request this, you can ignore this email — your password will not be changed.'
+    )
+    try:
+        html_body = render_to_string('notifications/password_reset.html', {
+            'first_name': first_name,
+            'reset_url': url,
+            'expiry': expiry,
+        })
+        message = EmailMultiAlternatives(
+            subject=subject,
+            body=body,
+            from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', None),
+            to=[email],
+        )
+        message.attach_alternative(html_body, 'text/html')
+        message.send(fail_silently=False)
+    except Exception:
+        logger.exception('Failed to send password reset email to %s', email)
+
+
+def send_mfa_verification_code(email: str, first_name: str, code: str, expires_in_minutes: int) -> None:
+    """Send a branded email containing a one-time MFA verification code."""
+    if not email:
+        raise ValueError('Cannot send an MFA verification code without a recipient email address')
+    subject = 'Your Progressly verification code'
+    body = (
+        f"Hi {first_name or 'there'},\n\n"
+        f'Your verification code is {code}. It expires in {expires_in_minutes} minutes. '
+        'If you did not request this, you can ignore this email.'
+    )
+    try:
+        html_body = render_to_string('notifications/mfa_verification_code.html', {
+            'first_name': first_name,
+            'code': code,
+            'expires_in_minutes': expires_in_minutes,
+        })
+        message = EmailMultiAlternatives(
+            subject=subject,
+            body=body,
+            from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', None),
+            to=[email],
+        )
+        message.attach_alternative(html_body, 'text/html')
+        sent_count = message.send(fail_silently=False)
+        if sent_count != 1:
+            raise RuntimeError('Email backend did not send the MFA verification message')
+    except Exception:
+        logger.exception('Failed to send MFA verification email to %s', email)
+        raise
+
+
+_ROLE_LABEL = {
+    'staff': 'Staff (therapist)',
+    'supervisor': 'Supervisor',
+    'admin': 'Administrator',
+    'superadmin': 'Superadmin',
+}
+
+
+def send_assistant_ticket(user, transcript: list[dict], note: str = '') -> None:
+    """Email an unresolved help-chat conversation to the support inbox as a
+    branded ticket. Unlike _create()/_send_email() above, failures are NOT
+    swallowed — the caller (the /assistant/ticket endpoint) needs to tell
+    the user whether it actually sent."""
+    support_email = getattr(settings, 'SUPPORT_EMAIL', '')
+    if not support_email:
+        raise ValueError('SUPPORT_EMAIL is not configured.')
+
+    user_name = user.full_name or '(no name)'
+    org_name = getattr(getattr(user, 'organization', None), 'name', '') or ''
+    role_label = _ROLE_LABEL.get(user.role, user.role)
+    subject = f'[Support ticket] {user_name} — Progressly help chat'
+
+    turns = [
+        {
+            'speaker': 'User' if message.get('role') == 'user' else 'Assistant',
+            'is_user': message.get('role') == 'user',
+            'content': message.get('content', ''),
+        }
+        for message in transcript
+    ]
+
+    # Plain-text fallback for clients that don't render HTML.
+    text_lines = [f'{t["speaker"]}: {t["content"]}' for t in turns]
+    body = '\n\n'.join([
+        f'{user_name} <{user.email}>',
+        f'Role: {role_label}' + (f' · {org_name}' if org_name else ''),
+        *([f'Note: {note}'] if note else []),
+        '--- Conversation ---',
+        '\n'.join(text_lines),
+    ])
+
+    html_body = render_to_string('notifications/assistant_ticket.html', {
+        'subject': subject,
+        'user_name': user_name,
+        'user_email': user.email,
+        'role_label': role_label,
+        'org_name': org_name,
+        'note': note,
+        'transcript': turns,
+    })
+
+    message = EmailMultiAlternatives(
+        subject=subject,
+        body=body,
+        from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', None),
+        to=[support_email],
+    )
+    message.attach_alternative(html_body, 'text/html')
+    sent_count = message.send(fail_silently=False)
+    if sent_count != 1:
+        raise RuntimeError('Email backend did not send the support ticket message')
+
+
 def _firebase_app():
     if not getattr(settings, 'FIREBASE_PROJECT_ID', '') and not getattr(settings, 'FIREBASE_CREDENTIALS_JSON', ''):
         return None
@@ -145,7 +311,12 @@ def _firebase_app():
         return None
 
 
-def _send_firebase_push(recipient, title: str, body: str, data: dict):
+def _send_firebase_push(recipient, title: str, body: str, data: dict, *, platforms=None, event_type=None):
+    if event_type is not None:
+        platforms = [platform for platform, channel in [('web', 'web'), ('android', 'mobile')]
+                     if _channel_enabled(recipient, event_type, channel)]
+        if not platforms:
+            return
     app = _firebase_app()
     if app is None:
         return
@@ -159,6 +330,8 @@ def _send_firebase_push(recipient, title: str, body: str, data: dict):
 
     url = _notification_url(data)
     tokens = FirebaseMessagingToken.all_organizations.filter(recipient=recipient, is_active=True)
+    if platforms is not None:
+        tokens = tokens.filter(platform__in=platforms)
     for token in tokens:
         try:
             messaging.send(
@@ -197,8 +370,8 @@ def _client_display_name(client_id: int | None) -> str:
     if not client_id:
         return 'a client'
     try:
-        from apps.clients.models import Client
-        return Client.objects.get(id=client_id).full_name
+        client = _resolve_local_client(client_id)
+        return client.full_name if client else 'a client'
     except Exception:
         return 'a client'
 
@@ -283,6 +456,58 @@ def notify_session_rejected(session_run):
         data={'session_id': session_run.id, 'client_id': session_run.external_client_id,
               'reason': session_run.rejection_reason},
     )
+
+
+def notify_appointment_reminder(appointment):
+    """Notify the appointment's staff member shortly before it starts."""
+    if not appointment.staff_id:
+        return
+    client_name = _client_display_name(appointment.external_client_id)
+    start = timezone.localtime(appointment.start_time).strftime('%I:%M %p')
+    _create(
+        recipient_id=appointment.staff_id,
+        event_type='appointment_reminder',
+        title='Upcoming appointment',
+        send_email=False,
+        body=f'Your appointment with {client_name} starts at {start}.',
+        data={
+            'appointment_id': appointment.id,
+            'client_id': appointment.external_client_id,
+            'url': '/reporting/appointments',
+        },
+    )
+
+
+def notify_appointment_changed(appointment, changed_fields, previous_staff_id=None):
+    """Notify the old and new assigned staff member about schedule changes."""
+    from apps.accounts.models import User
+
+    recipient_ids = {uid for uid in (previous_staff_id, appointment.staff_id) if uid}
+    if not recipient_ids:
+        return
+    recipients = User.objects.filter(id__in=recipient_ids, organization_id=appointment.organization_id)
+    client_name = _client_display_name(appointment.external_client_id)
+    if appointment.status == 'cancelled':
+        title = 'Appointment cancelled'
+        body = f'The appointment with {client_name} has been cancelled.'
+    elif 'staff_id' in changed_fields:
+        title = 'Appointment assignment changed'
+        body = f'The staff assignment for your appointment with {client_name} has changed.'
+    else:
+        title = 'Appointment schedule changed'
+        body = f'The time or details for your appointment with {client_name} have changed.'
+    for recipient in recipients:
+        _create(
+            recipient_id=recipient.id,
+            event_type='appointment_changed',
+            title=title,
+            body=body,
+            data={
+                'appointment_id': appointment.id,
+                'client_id': appointment.external_client_id,
+                'url': '/reporting/appointments',
+            },
+        )
 
 
 def notify_session_attachment_added(media):

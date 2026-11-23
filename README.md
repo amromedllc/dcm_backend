@@ -86,6 +86,13 @@ Background tasks (like generating notes PDF exports and behavior analytics graph
 celery -A config worker --loglevel=info
 ```
 
+The backend and worker must use the same Redis instance and database. When
+running the backend on the host with the Docker Compose worker, the worker
+defaults to `redis://host.docker.internal:6379/0`. If the backend uses another
+Redis endpoint, set `DCM_WORKER_REDIS_URL` to its Docker-accessible equivalent
+before starting Compose. After a broker change, recreate the worker with
+`docker compose up -d --no-deps worker` from the repository root.
+
 ### Running Celery Beat (Periodic Tasks)
 ```bash
 celery -A config beat --loglevel=info
@@ -95,7 +102,54 @@ celery -A config beat --loglevel=info
 
 ## 🤝 TherapyPMS Integration
 
+Appointment pulls send boolean `zoom_link: true` to TherapyPMS and persist a
+returned HTTP(S) Zoom URL as `Appointment.telehealth_link` (also exposed in
+`AppointmentSchema`). Missing, empty, boolean, or invalid links are stored as an
+empty string. Later pulls replace or clear the saved link. The existing telehealth
+UI uses this field; new linked sessions default to service setting `Telehealth`
+when no explicit setting is supplied. Apply `dcm_sessions.0021` across tenant
+schemas and restart Celery before pulling appointments to populate existing rows.
+
 - **APIs and Login**: Real-time staff/admin logins are routed through legacy table lookups using bcrypt.
+
+Admin integrations are scoped to a mapped facility within the current organization.
+The integrations page has no facility selector. POST admin credentials to the
+connect endpoint; TherapyPMS's login response identifies the facility, and the
+response returns its connection settings (HTTP 200). The facility must already be
+mapped to this organization. Settings resolve the current user's TherapyPMS
+practice ID, a matching connection email, or the organization's sole facility.
+The page prioritizes the logged-in user’s mapped facility over a saved browser
+selection. Users without a mapped facility can retain the automatically detected
+facility in the browser session. It passes `facility_admin_id` to disconnect, pull,
+and history requests. An optional ID on connect is checked against the login response for
+older callers; it never overrides the returned TherapyPMS facility ID.
+
+After any successful user login (including MFA completion), the user’s connected facility
+automatically queues an appointment pull even without a previous manual pull or
+an employee or client ID on the account. This applies to admin, supervisor, staff,
+caregiver, and reporting roles. Normal login authorization remains required. The range covers one year of history and the next 90 days; later
+pulls include the facility checkpoint to fetch edits. An active facility job is
+reused. A running Celery worker is required. Connecting a facility during an
+existing session enables this on the next login; manual pulls remain available.
+
+Credentials are encrypted on `OrganizationTpmsAdminId`, and cached tokens include
+both organization and facility IDs. Each queued pull records `facility_admin_id`
+in its params, which the worker resolves within the job's organization. The worker
+rejects older jobs without a facility selection. Migration `0012` moves an existing
+organization connection to its matching facility. Apply it with
+`python manage.py migrate_schemas --shared`, then restart the Celery worker.
+
+To verify facility login and token refresh over real HTTP without contacting
+TherapyPMS, start the local fixture from this directory:
+
+```bash
+postman simulation run postman/simulations/therapypms-facilities.sim.yaml --port 4911
+DCM_TPMS_SIMULATION_URL=http://127.0.0.1:4911/therapypms python manage.py test apps.tenants.tests.test_facility_integrations
+```
+
+The fixture follows the repository's admin-login payload contract and uses fake
+credentials for two facilities. It is a local stand-in; live TherapyPMS verification
+still requires the facility's real credentials.
 
 
 ## 🧪 Running Tests
@@ -124,3 +178,45 @@ pytest -v
 - `apps/notes/` — Document editor, supervisor approval workflows, and PDF exports.
 - `apps/exports/` — Task runner bindings for CSV, Zip, and PDF exports.
 - `shared/` — Multitenancy middlewares (`TenantResolverMiddleware`), mixins, and storage utils.
+
+
+## Session service setting
+
+`POST /sessions` and `POST /group-sessions` accept `service_setting`: `Home`,
+`Office`, `School`, `Community`, `Other`, or `Telehealth`. Session responses
+return the saved value. Manual sessions use the same field. Each new trial
+inherits its session's setting, including batch-synced trials, and trial
+responses return it. Program Category is independent of this field.
+
+Apply migration `dcm_sessions.0019_session_service_setting` before deploying.
+Existing sessions and trials retain an empty setting; older API clients may
+omit the field. The web creation dialogs require an explicit selection.
+
+Before submitting a Home, Office, School, or Community session, send
+`service_address` with `street`, optional `unit`, `city`, two-letter US `state`,
+`zip_code` (five digits or ZIP+4), and `country: "US"`. Both
+`POST /sessions/{id}/submit` and batch sync with `submit_after_sync: true`
+enforce this requirement. The address is saved on the session and returned
+as `service_address`. Telehealth is online, and Other needs no address.
+Legacy sessions without a setting can still be submitted without an address.
+Apply migration `dcm_sessions.0020_sessionrun_service_address` before deploying.
+
+## Web offline recording event IDs
+
+`POST /sessions/{id}/trials` now accepts an optional nonempty
+`client_event_id` (up to 64 characters), returned in trial responses and lists.
+For the same session, retries with the same ID and immutable payload return the
+original trial. Reusing that ID for different data or colliding with an existing
+trial number returns 409, without overwriting the recorded entry. Existing
+recording permissions, completed-session edit reasons, and manual time-window
+rules still apply. Behavior and ABC endpoints already support this ID.
+
+Migration `dcm_sessions.0018_trialevent_client_event_id_and_more` adds the nullable
+field and conditional uniqueness constraint. Older clients can omit the field;
+the mobile batch-sync endpoint keeps its existing natural-key deduplication for
+legacy trials and supports event IDs when present.
+
+The web client durably queues open-session creates/deletes, retries the existing
+per-event endpoints with the original IDs, and requires confirmation before
+submitting. It does not depend on closed-browser background sync. See the web
+README for local simulation and recovery tests.

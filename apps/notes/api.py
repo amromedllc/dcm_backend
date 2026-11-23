@@ -1,5 +1,6 @@
 import hashlib
 from datetime import date
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from ninja import Router
@@ -8,6 +9,7 @@ from ninja.errors import HttpError
 from apps.accounts.auth import partner_auth
 from apps.accounts.permissions import require_permission
 from apps.clients.models import Client
+from apps.clients.id_aliases import client_identifier_aliases
 from .models import LessonNote, NoteTemplate, NoteLayoutSettings, NoteSignature, NoteAssignment
 from .schemas import (
     LessonNoteSchema, LessonNoteListSchema, NoteCreateRequest, NoteUpdateRequest,
@@ -18,6 +20,7 @@ from .schemas import (
     ReviewQueueItem,
     NoteAssignmentSchema, NoteAssignmentCreateRequest,
 )
+from shared import ai_client
 from shared.ai_client import AIError
 from .template_draft import generate_template_draft
 from .services import submit_note, approve_note, reject_note, resolve_template_tokens, apply_session_autofill
@@ -93,6 +96,7 @@ def _serialize_note(note: LessonNote) -> dict:
                 'signer_name': sig.signer_name,
                 'signer_role': sig.signer_role,
                 'signature_type': sig.signature_type,
+                'signature_data': sig.signature_data,
                 'signed_at': sig.signed_at,
             }
             for sig in note.signatures.all()
@@ -122,17 +126,32 @@ def create_note_template(request, data: NoteTemplateCreateRequest):
 
 @router.post('/templates/notes/ai-draft', response=NoteTemplateDraftSchema)
 def draft_note_template_with_ai(request, data: NoteTemplateDraftRequest):
-    """Draft a note template from a library program. Nothing is saved: the template form
-    fills in and the person reviews it. Only library programs are accepted, so no client
-    information can reach the model."""
+    """Draft a note template from one of a client's actual assigned programs
+    (not a generic library program), so the drafted fields match what's really
+    being tracked for that client. Nothing is saved: the template form fills
+    in and the person reviews it before saving.
+
+    Note: unlike a library program, a client-assigned program's name/objective/
+    target names can be customized per client, so that text does reach the AI
+    model here — a deliberate tradeoff for drafts that actually match the
+    client's program, not a generic one.
+    """
     _require_template_manager(request, 'create')
-    from apps.programs.api import _org_qs
+    from apps.programs.api import _accessible_external_client_ids
     from apps.programs.models import Program
+    if data.client_id not in _accessible_external_client_ids(request):
+        raise HttpError(403, 'Client not accessible')
     try:
-        program = _org_qs(request).prefetch_related('targets').get(id=data.program_id)
+        program = (
+            Program.objects
+            .filter(external_client_id__in=client_identifier_aliases(data.client_id))
+            .prefetch_related('targets')
+            .get(id=data.program_id)
+        )
     except Program.DoesNotExist:
         raise HttpError(404, 'Program not found')
     try:
+        ai_client.ensure_enabled_for_user(request.user)
         return generate_template_draft(program, data.instruction)
     except AIError as exc:
         raise HttpError(exc.status, str(exc)) from exc
@@ -168,6 +187,15 @@ def delete_note_template(request, template_id: int):
     except NoteTemplate.DoesNotExist:
         raise HttpError(404, 'Template not found')
     return 204, None
+
+@router.get('/templates/custom', response=list[NoteTemplateSchema])
+def list_custom_templates(request):
+    """New-form-builder custom templates created by superadmin. Old-form-builder
+    templates are a separate source (TherapyPMS, via
+    /integrations/old-form-builder/assigned-notes) — they carry their own ready
+    URL and are not NoteTemplate rows, so they are not mixed in here."""
+    _require_template_read(request)
+    return list(NoteTemplate.objects.filter(is_active=True, template_type='custom'))
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +250,12 @@ def list_notes(
     date_to: date | None = None,
 ):
     _require_notes_read(request)
-    qs = LessonNote.objects.all()
+    # Exclude bare tracking rows _get_or_create_note creates the first time a
+    # staff member starts a DocuSeal/Old-Form-Builder session note — they have
+    # no template, no DocuSeal template, and no authored body, so they aren't
+    # a real note and shouldn't show up as a generic "Note / Draft" entry
+    # alongside ones the staff member actually wrote.
+    qs = LessonNote.objects.exclude(template_id__isnull=True, docuseal_template_id__isnull=True, body={})
 
     if request.user.role == 'staff':
         qs = qs.filter(staff_id=request.user.id)
@@ -230,7 +263,7 @@ def list_notes(
         qs = qs.filter(staff_id=staff_id)
 
     if client_id:
-        qs = qs.filter(external_client_id=client_id)
+        qs = qs.filter(external_client_id__in=client_identifier_aliases(client_id))
     if status:
         qs = qs.filter(status=status)
     if session_run_id:
@@ -282,6 +315,7 @@ def preview_note_tokens(request, template_id: int, client_id: int, note_date: da
 
 
 @router.post('/notes', response={201: LessonNoteSchema})
+@transaction.atomic
 def create_note(request, data: NoteCreateRequest):
     require_permission(request, 'notes_create')
     payload = data.dict()
@@ -451,7 +485,7 @@ def review_queue(
         .order_by('submitted_at')
     )
     if client_id:
-        qs = qs.filter(external_client_id=client_id)
+        qs = qs.filter(external_client_id__in=client_identifier_aliases(client_id))
     if date_from:
         qs = qs.filter(note_date__gte=date_from)
     if date_to:

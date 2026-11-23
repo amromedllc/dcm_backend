@@ -189,6 +189,35 @@ def create_session_note_submission(user: User, template_id: int, external_id: st
     }
 
 
+def fetch_submitter_completed_at(user: User, submitter_id: int):
+    """Fallback for environments where DocuSeal's form.completed webhook can't
+    reach this install (e.g. a local dev instance with no public callback
+    URL) — polls the submitter directly instead of waiting on the webhook.
+    Returns a datetime, or None if still incomplete / the lookup failed.
+    """
+    token = _fetch_docuseal_access_token(user)
+    if not token:
+        return None
+
+    try:
+        response = requests.get(
+            f'{settings.DOCUSEAL_BASE_URL}/api/submitters/{submitter_id}',
+            headers={'X-Auth-Token': token},
+            timeout=10,
+        )
+        response.raise_for_status()
+    except requests.RequestException:
+        logger.exception('Failed to fetch DocuSeal submitter %s for %s', submitter_id, user.email)
+        return None
+
+    completed_at = response.json().get('completed_at')
+    if not completed_at:
+        return None
+
+    from django.utils.dateparse import parse_datetime
+    return parse_datetime(completed_at)
+
+
 def verify_webhook_signature(request) -> bool:
     secret = request.headers.get('X-Dcm-Webhook-Secret') or ''
     return bool(settings.DOCUSEAL_WEBHOOK_SECRET) and hmac.compare_digest(secret, settings.DOCUSEAL_WEBHOOK_SECRET)

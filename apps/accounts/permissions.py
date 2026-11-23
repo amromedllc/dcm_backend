@@ -45,6 +45,9 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'client_overview': True,
         'client_sessions': True,
         'client_notes': True,
+        'client_documents': True,
+        'client_documents_manage': True,
+        'client_documents_archive': True,
         'client_programs': True,
         'client_programs_create': True,
         'client_programs_edit': True,
@@ -79,8 +82,12 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'notes_delete': True,
         'note_submit': True,
         'note_approve': True,
+        # Activities
+        'activities_voice_to_text': False,
         # Review queue
         'review_queue_view': True,
+        'supervision_view': True,
+        'supervision_manage': True,
         # Behavior Intervention Plans
         'bip_view': True,
         'bip_create': True,
@@ -159,6 +166,9 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'client_overview': True,
         'client_sessions': True,
         'client_notes': True,
+        'client_documents': True,
+        'client_documents_manage': True,
+        'client_documents_archive': True,
         'client_programs': True,
         'client_programs_create': True,
         'client_programs_edit': True,
@@ -193,8 +203,12 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'notes_delete': True,
         'note_submit': True,
         'note_approve': True,
+        # Activities
+        'activities_voice_to_text': False,
         # Review queue
         'review_queue_view': True,
+        'supervision_view': True,
+        'supervision_manage': True,
         # Behavior Intervention Plans
         'bip_view': True,
         'bip_create': True,
@@ -273,6 +287,9 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'client_overview': True,
         'client_sessions': True,
         'client_notes': True,
+        'client_documents': True,
+        'client_documents_manage': False,
+        'client_documents_archive': False,
         'client_programs': True,
         'client_programs_create': True,
         'client_programs_edit': True,
@@ -307,8 +324,12 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'notes_delete': False,
         'note_submit': True,
         'note_approve': False,
+        # Activities
+        'activities_voice_to_text': False,
         # Review queue
         'review_queue_view': False,
+        'supervision_view': True,
+        'supervision_manage': False,
         # Behavior Intervention Plans
         'bip_view': True,
         'bip_create': False,
@@ -426,6 +447,78 @@ def _apply_role_guarantees(role: str, permissions: dict[str, bool]) -> dict[str,
     return permissions
 
 
+SUPERADMIN_DELEGATABLE_PERMISSIONS: dict[str, str] = {
+    'manage_knowledge_base': 'Manage Knowledge Base',
+    'manage_changelog': 'Manage Changelog',
+    'manage_organizations': 'Create / Onboard Organizations',
+    'manage_features': 'Manage Features',
+    'manage_facility_integrations': 'Manage Facility Integrations',
+    'manage_users': 'Manage Users',
+    'manage_api_keys': 'Manage API Keys',
+    'manage_central_programs': 'Manage Central Programs',
+}
+
+
+def user_has_delegated_superadmin_permission(user: User, permission: str) -> bool:
+    if getattr(user, 'role', None) != User.Role.SALES:
+        return False
+    if permission not in SUPERADMIN_DELEGATABLE_PERMISSIONS:
+        return False
+    granted = getattr(user, 'superadmin_delegated_permissions', None) or {}
+    return bool(granted.get(permission))
+
+
+def user_has_any_delegated_permission(user: User) -> bool:
+    """True if a 'sales' role account has been granted any of
+    SUPERADMIN_DELEGATABLE_PERMISSIONS — used to let a platform-side account
+    (e.g. a sales-team login) authenticate without belonging to a specific
+    organization, the same way a real superuser does (see accounts.api.login
+    / _platform_local_auth)."""
+    if getattr(user, 'role', None) != User.Role.SALES:
+        return False
+    granted = getattr(user, 'superadmin_delegated_permissions', None) or {}
+    return any(bool(granted.get(key)) for key in SUPERADMIN_DELEGATABLE_PERMISSIONS)
+
+
+def require_superadmin_or_delegated(request, permission: str) -> None:
+    """Allow a real superuser, or a user who was explicitly granted this one
+    delegated permission. Never widen this to accept any granted permission
+    for any check — callers must pass the specific key they are gating."""
+    user = request.user
+    if getattr(user, 'is_superuser', False):
+        return
+    if user_has_delegated_superadmin_permission(user, permission):
+        return
+    raise HttpError(403, 'Superadmin access required')
+
+
+def require_superadmin_or_any_delegated(request, permissions: tuple[str, ...]) -> None:
+    """Like require_superadmin_or_delegated, but passes if the caller holds
+    ANY one of several keys — for an endpoint shared by more than one
+    superadmin page (e.g. the organization list read by both the Features
+    and Organizations & Facilities pages)."""
+    user = request.user
+    if getattr(user, 'is_superuser', False):
+        return
+    if any(user_has_delegated_superadmin_permission(user, permission) for permission in permissions):
+        return
+    raise HttpError(403, 'Superadmin access required')
+
+
+def require_not_targeting_sales_unless_superuser(request, role: str | None) -> None:
+    """A delegated (non-superuser) 'manage_users' grant may create/edit
+    admin/supervisor/staff/reporting/caregiver accounts, but never a 'sales'
+    account — letting a delegated sales user onboard or edit other sales
+    accounts would be a path to permissions spreading without a real
+    superadmin ever approving it. Only a real superuser may touch a 'sales'
+    row (create, edit role onto/off of it, deactivate it)."""
+    if role != User.Role.SALES:
+        return
+    if getattr(request.user, 'is_superuser', False):
+        return
+    raise HttpError(403, 'Only a superadmin may manage a Sales account')
+
+
 def user_has_permission(user: User, organization, permission: str) -> bool:
     return get_user_permissions(user, organization).get(permission, False)
 
@@ -433,4 +526,12 @@ def user_has_permission(user: User, organization, permission: str) -> bool:
 def require_permission(request, permission: str) -> None:
     organization = resolve_permission_organization(request)
     if not user_has_permission(request.user, organization, permission):
+        raise HttpError(403, 'Insufficient permissions')
+
+
+def require_any_permission(request, permissions: tuple[str, ...]) -> None:
+    """Authorize a shared read used by several pages using one effective role map."""
+    organization = resolve_permission_organization(request)
+    effective = get_user_permissions(request.user, organization)
+    if not any(effective.get(permission, False) for permission in permissions):
         raise HttpError(403, 'Insufficient permissions')

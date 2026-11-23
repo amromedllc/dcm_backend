@@ -11,7 +11,7 @@ from apps.accounts.models import RolePermission, User
 from apps.audit.models import AuditLog
 from apps.sessions import api as sessions_api
 from apps.sessions.models import SessionRun, TrialEvent
-from apps.sessions.schemas import TrialEventCreateRequest
+from apps.sessions.schemas import TrialEventCreateRequest, SessionSyncPayload
 from apps.tenants.models import Organization
 from shared.tenancy import tenant_context
 
@@ -82,7 +82,7 @@ class ClosedSessionEditTests(TestCase):
         self.assertIn('Added trial 1', logs[0].changes['change'])
         self.assertIn('Deleted trial 1', logs[1].changes['change'])
 
-    def test_editor_without_approval_authority_sends_approved_session_back_for_review(self):
+    def test_staff_with_edit_permission_cannot_change_approved_data(self):
         RolePermission.objects.update_or_create(
             organization=self.org, role=User.Role.STAFF,
             defaults={'permissions': {'sessions_edit_data': True, 'session_approve': False}},
@@ -93,20 +93,36 @@ class ClosedSessionEditTests(TestCase):
             session.reviewed_by = self.supervisor
             session.reviewed_at = timezone.now()
             session.save()
-            sessions_api.add_trial(self._request(self.staff), session.id, self._trial_payload(), reason='Fix')
+            with self.assertRaises(HttpError) as raised:
+                sessions_api.add_trial(self._request(self.staff), session.id, self._trial_payload(), reason='Fix')
+            self.assertEqual(raised.exception.status_code, 409)
             session.refresh_from_db()
-            log = AuditLog.objects.get(object_id=str(session.id))
-        self.assertEqual(session.status, SessionRun.Status.SUBMITTED)
-        self.assertIsNone(session.reviewed_by_id)
-        self.assertEqual((log.changes['status_before'], log.changes['status_after']), ('approved', 'submitted'))
+            self.assertEqual(session.status, SessionRun.Status.APPROVED)
+            self.assertEqual(session.reviewed_by_id, self.supervisor.id)
+            self.assertIsNotNone(session.reviewed_at)
+            self.assertFalse(TrialEvent.objects.filter(session_run=session).exists())
+            self.assertFalse(AuditLog.objects.filter(object_id=str(session.id)).exists())
 
-    def test_admin_edit_keeps_an_approved_session_approved(self):
+    def test_supervisor_and_admin_cannot_add_or_delete_approved_recording_data(self):
         ctx = self._ctx()
         with ctx[0], ctx[1]:
             session = self._session(SessionRun.Status.APPROVED)
-            sessions_api.add_trial(self._request(self.admin), session.id, self._trial_payload(), reason='Fix')
+            trial = TrialEvent.objects.create(session_run=session, **self._trial_payload().dict())
+            for user in (self.supervisor, self.admin):
+                for action in (
+                    lambda request: sessions_api.add_trial(request, session.id, self._trial_payload(), reason='Fix'),
+                    lambda request: sessions_api.delete_trial(request, session.id, trial.id, reason='Fix'),
+                    lambda request: sessions_api.add_behavior(request, session.id, None, reason='Fix'),
+                    lambda request: sessions_api.delete_behavior(request, session.id, 999, reason='Fix'),
+                    lambda request: sessions_api.add_abc(request, session.id, None, reason='Fix'),
+                    lambda request: sessions_api.delete_abc(request, session.id, 999, reason='Fix'),
+                ):
+                    with self.subTest(role=user.role, action=action), self.assertRaises(HttpError) as raised:
+                        action(self._request(user))
+                    self.assertEqual(raised.exception.status_code, 409)
+            self.assertTrue(TrialEvent.objects.filter(pk=trial.pk).exists())
             session.refresh_from_db()
-        self.assertEqual(session.status, SessionRun.Status.APPROVED)
+            self.assertEqual(session.status, SessionRun.Status.APPROVED)
 
     def test_open_sessions_need_no_reason_and_write_no_audit(self):
         ctx = self._ctx()
@@ -115,6 +131,18 @@ class ClosedSessionEditTests(TestCase):
             sessions_api.add_trial(self._request(self.staff), session.id, self._trial_payload())
             self.assertEqual(TrialEvent.objects.filter(session_run=session).count(), 1)
             self.assertEqual(AuditLog.objects.count(), 0)
+
+    def test_offline_sync_cannot_change_approved_data(self):
+        ctx = self._ctx()
+        with ctx[0], ctx[1]:
+            session = self._session(SessionRun.Status.APPROVED)
+            for user in (self.staff, self.supervisor, self.admin):
+                with self.subTest(role=user.role), self.assertRaises(HttpError) as raised:
+                    sessions_api.sync_session(self._request(user), session.id, SessionSyncPayload(trials=[self._trial_payload()]))
+                self.assertEqual(raised.exception.status_code, 409)
+            self.assertFalse(TrialEvent.objects.filter(session_run=session).exists())
+            session.refresh_from_db()
+            self.assertEqual(session.status, SessionRun.Status.APPROVED)
 
 
 class EditImpactTests(TestCase):

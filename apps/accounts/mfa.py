@@ -21,6 +21,7 @@ import pyotp
 import qrcode
 from cryptography.fernet import Fernet, InvalidToken
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 from ninja.errors import HttpError
 
@@ -81,7 +82,7 @@ def _generate_email_otp() -> str:
 def send_email_otp(user: User) -> None:
     """(Re)send a one-time code to the user's account email, subject to a
     resend cooldown so a client can't be used to spam the mailbox."""
-    from apps.notifications.service import _send_email
+    from apps.notifications.service import send_mfa_verification_code
 
     row = UserMFA.objects.filter(user=user).first()
     if row is None or row.method != UserMFA.Method.EMAIL:
@@ -97,13 +98,20 @@ def send_email_otp(user: User) -> None:
     row.otp_last_sent_at = now
     row.save(update_fields=['otp_code_hash', 'otp_expires_at', 'otp_last_sent_at'])
 
-    _send_email(
-        user.email,
-        'Your Progressly verification code',
-        f'Your verification code is {code}. It expires in {EMAIL_OTP_TTL_MINUTES} minutes. '
-        'If you did not request this, you can ignore this email.',
-        {},
-    )
+    try:
+        send_mfa_verification_code(
+            user.email,
+            user.first_name,
+            code,
+            EMAIL_OTP_TTL_MINUTES,
+        )
+    except Exception as exc:
+        # Let the user retry immediately if SMTP could not deliver the code.
+        row.otp_code_hash = None
+        row.otp_expires_at = None
+        row.otp_last_sent_at = None
+        row.save(update_fields=['otp_code_hash', 'otp_expires_at', 'otp_last_sent_at'])
+        raise HttpError(503, 'We could not send your verification code. Please try again shortly or contact support.') from exc
 
 
 def start_setup(user: User, method: str = UserMFA.Method.TOTP) -> dict[str, Any]:
@@ -189,19 +197,24 @@ def _check_totp_code(mfa: UserMFA, code: str, *, activate: bool, now) -> None:
 def check_code(user: User, code: str, *, activate: bool = False) -> None:
     """Validate a 6-digit code or raise HttpError. Locks the account's MFA
     after repeated failures and rejects re-use of an already-accepted code."""
-    mfa = UserMFA.objects.filter(user=user).first()
-    if mfa is None or (not mfa.is_active and not activate):
-        raise HttpError(400, 'MFA is not set up for this account')
-
-    now = timezone.now()
-    if mfa.locked_until and mfa.locked_until > now:
-        raise HttpError(429, 'Too many incorrect codes. Try again in a few minutes.')
-
-    code = (code or '').strip().replace(' ', '')
-    if mfa.method == UserMFA.Method.EMAIL:
-        _check_email_code(mfa, code, activate=activate, now=now)
-    else:
-        _check_totp_code(mfa, code, activate=activate, now=now)
+    error = None
+    with transaction.atomic():
+        factor = UserMFA.objects.select_for_update().filter(user=user).first()
+        if factor is None or (not factor.is_active and not activate):
+            raise HttpError(400, 'MFA is not set up for this account')
+        now = timezone.now()
+        if factor.locked_until and factor.locked_until > now:
+            raise HttpError(429, 'Too many incorrect codes. Try again in a few minutes.')
+        code = (code or '').strip().replace(' ', '')
+        try:
+            if factor.method == UserMFA.Method.EMAIL:
+                _check_email_code(factor, code, activate=activate, now=now)
+            else:
+                _check_totp_code(factor, code, activate=activate, now=now)
+        except HttpError as exc:
+            error = exc
+    if error:
+        raise error
 
 
 def create_mfa_token(user: User, tenant_id: int) -> str:

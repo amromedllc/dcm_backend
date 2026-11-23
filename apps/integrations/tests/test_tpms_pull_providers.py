@@ -77,3 +77,33 @@ class PullProvidersTests(TestCase):
             self.assertEqual(result.updated, 0)
             self.assertEqual(result.skipped, 1)
             self.assertEqual(Provider.objects.filter(external_employee_id=42).count(), 1)
+
+    def test_provider_type_takes_precedence_over_employee_type(self):
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            for provider_type, employee_type, expected in (
+                ('Supervisor', 'RBT', User.Role.SUPERVISOR),
+                ('Staff', 'BCBA', User.Role.STAFF),
+                (' supervisor ', 'RBT', User.Role.SUPERVISOR),
+                ('Other', 'BCBA', User.Role.STAFF),
+            ):
+                with self.subTest(provider_type=provider_type):
+                    row = self._row(provider_type=provider_type, employee_type=employee_type)
+                    with mock.patch('apps.integrations.tpms_pull.admin_list_providers', return_value=[row]):
+                        pull_providers(self.org)
+                    self.assertEqual(User.objects.get(external_employee_id=42).role, expected)
+                    self.assertEqual(Provider.objects.get(external_employee_id=42).role, expected)
+
+    def test_role_changes_sync_to_existing_user_and_provider_without_duplicates(self):
+        with schema_context(self.org.schema_name), tenant_context(self.org.pk):
+            for provider_type in ('Staff', 'Supervisor', 'Staff'):
+                with self.subTest(provider_type=provider_type):
+                    row = self._row(provider_type=provider_type)
+                    with mock.patch('apps.integrations.tpms_pull.admin_list_providers', return_value=[row]):
+                        result = pull_providers(self.org)
+                        unchanged = pull_providers(self.org)
+                    self.assertEqual(User.objects.get(external_employee_id=42).role, provider_type.lower())
+                    self.assertEqual(Provider.objects.get(external_employee_id=42).role, provider_type.lower())
+                    self.assertEqual(result.created + result.updated, 1)
+                    self.assertEqual(unchanged.skipped, 1)
+            self.assertEqual(User.objects.filter(external_employee_id=42).count(), 1)
+            self.assertEqual(Provider.objects.filter(external_employee_id=42).count(), 1)

@@ -15,7 +15,7 @@ from django.urls import path, reverse
 from django.db import transaction
 from unfold.admin import ModelAdmin, TabularInline
 from .models import (
-    CentralProgram, CentralTarget, CentralProgramFolder,
+    CentralProgram, CentralTarget, CentralProgramFolder, CentralProgramSetting,
     KnowledgeBaseModule, KnowledgeBaseTopic, KnowledgeBaseImport, KnowledgeBaseMedia,
 )
 from django.utils.safestring import mark_safe
@@ -759,3 +759,16 @@ class KnowledgeBaseMediaAdmin(_SuperuserOnlyAdminMixin, ModelAdmin):
 
     def has_add_permission(self, request, obj=None):
         return False
+
+
+@admin.register(CentralProgramSetting)
+class CentralProgramSettingAdmin(_SuperuserOnlyAdminMixin, ModelAdmin):
+    list_display = ['name', 'kind', 'is_active']
+    list_filter = ['kind', 'is_active']
+    search_fields = ['name']
+    readonly_fields = ['created_at', 'updated_at']
+
+    def save_model(self, request, obj, form, change):
+        from .settings_service import normalize_configuration
+        obj.configuration = normalize_configuration(obj.kind, obj.name, obj.configuration)
+        super().save_model(request, obj, form, change)

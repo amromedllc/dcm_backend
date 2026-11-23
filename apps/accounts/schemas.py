@@ -74,7 +74,7 @@ class MfaStatusSchema(Schema):
 
 
 class MfaRemoveRequest(Schema):
-    password: str
+    password: str = ''
 
 
 class RefreshRequest(Schema):
@@ -99,7 +99,9 @@ class UserSchema(Schema):
     external_employee_id: int | None
     mfa_required: bool = False
     mfa_enabled: bool = False
+    avatar_url: str | None = None
     created_at: datetime
+    superadmin_delegated_permissions: dict[str, bool] = {}
 
 
 class CaregiverClientSchema(Schema):
@@ -115,15 +117,30 @@ class CurrentUserSchema(UserSchema):
     pin_lock_enabled: bool = False
     has_pin: bool = False
     pin_length: int | None = None
+    impersonating_admin_id: int | None = None
+    impersonation_log_id: int | None = None
+    impersonating_admin_name: str | None = None
+    impersonation_started_at: datetime | None = None
 
 
 class SetPinRequest(Schema):
     pin: str
     current_pin: str | None = None
+    password: str | None = None
 
 
 class VerifyPinRequest(Schema):
     pin: str
+
+
+class PinUnlockRequest(Schema):
+    pin: str
+    refresh_token: str
+
+
+class PinUnlockResponse(Schema):
+    access_token: str
+    refresh_token: str
 
 
 class PinStatusResponse(Schema):
@@ -133,11 +150,21 @@ class PinStatusResponse(Schema):
     pin_length: int | None = None
 
 
-class TogglePinLockRequest(Schema):
+class PinProtectionRequest(Schema):
+    current_pin: str | None = None
+    password: str | None = None
+
+
+class TogglePinLockRequest(PinProtectionRequest):
     enabled: bool
 
 
 class AccountTimezoneOptionSchema(Schema):
+    value: str
+    label: str
+
+
+class AccountLanguageOptionSchema(Schema):
     value: str
     label: str
 
@@ -147,6 +174,25 @@ class AccountProfileSchema(Schema):
     email: str
     timezone: str | None = None
     timezone_options: list[AccountTimezoneOptionSchema] = []
+    language: str | None = None
+    language_options: list[AccountLanguageOptionSchema] = []
+    avatar_url: str | None = None
+
+
+class AccountSignatureSchema(Schema):
+    signature_data: str = ''
+
+
+class UpdateAccountSignatureRequest(Schema):
+    signature_data: str = Field(max_length=400_000)
+
+
+class UpdateAccountTimezoneRequest(Schema):
+    timezone: str | None = None
+
+
+class UpdateAccountLanguageRequest(Schema):
+    language: str | None = None
 
 
 class UserCreateRequest(Schema):
@@ -194,6 +240,26 @@ class PasswordSetLinkSubmitRequest(Schema):
     password_confirm: str
 
 
+class ForgotPasswordRequest(Schema):
+    email: EmailStr
+
+
+class ForgotPasswordResponse(Schema):
+    detail: str
+
+
+class PasswordResetLinkInfoResponse(Schema):
+    first_name: str
+    email_masked: str
+    expires_at: datetime
+
+
+class PasswordResetConfirmRequest(Schema):
+    token: str
+    password: str = Field(min_length=8)
+    password_confirm: str
+
+
 class StaffSchema(Schema):
     id: int
     admin_id: int | None
@@ -213,3 +279,11 @@ class StaffSchema(Schema):
     mfa_enabled: bool = False
     password_link_status: str = 'not_invited'
     password_link_expires_at: datetime | None = None
+
+
+class StepUpRequest(Schema):
+    path: str
+    method: str
+    digest: str
+    password: str | None = None
+    code: str | None = None

@@ -1,17 +1,30 @@
+import base64
+import binascii
 import hashlib
+import io
 import logging
+import secrets
 from datetime import datetime, timedelta
+from urllib.parse import urlencode
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 import jwt
-from ninja import Router, Body
+from ninja import Router, Body, File
+from ninja.files import UploadedFile
 from django.conf import settings
 from django.contrib.auth import authenticate
+from django.http import HttpResponseRedirect
 from django.utils import timezone
+
+from shared.uploads import validate_image_upload
 
 logger = logging.getLogger(__name__)
 from ninja.errors import HttpError
 from django.db import transaction
 from django.db.models import Q
 
+from .security_audit import audit_security
+from . import step_up
+from .pin_security import verify_pin_attempt, set_account_pin, update_pin_protection
 from . import mfa
 from .models import PasswordSetLink, User, UserMFA
 from .auth import (
@@ -25,8 +38,22 @@ from .auth import (
     user_facility_is_active,
 )
 from .permissions import get_user_permissions, require_permission, resolve_permission_organization
+from .models import PasswordResetLink, PasswordSetLink, User, UserMFA
+from .auth import (
+    create_access_token, create_refresh_token, decode_token, is_token_blocked, session_start_from_payload, consume_refresh_token,
+    jwt_auth, jwt_auth_any_role, token_tenant_mismatch,
+)
+from .permissions import (
+    get_user_permissions,
+    require_permission,
+    resolve_permission_organization,
+    user_has_any_delegated_permission,
+)
+
+
 from .schemas import (
     LoginRequest,
+    StepUpRequest,
     LoginResponse,
     MfaAccountSetupStartRequest,
     MfaCodeRequest,
@@ -40,6 +67,7 @@ from .schemas import (
     RefreshRequest,
     AccessTokenResponse,
     AccountProfileSchema,
+    AccountSignatureSchema,
     UserSchema,
     CurrentUserSchema,
     UserCreateRequest,
@@ -49,11 +77,21 @@ from .schemas import (
     PasswordSetLinkGenerateResponse,
     PasswordSetLinkInfoResponse,
     PasswordSetLinkSubmitRequest,
+    ForgotPasswordRequest,
+    ForgotPasswordResponse,
+    PasswordResetLinkInfoResponse,
+    PasswordResetConfirmRequest,
     StaffSchema,
     PinStatusResponse,
     SetPinRequest,
     TogglePinLockRequest,
+    PinProtectionRequest,
+    UpdateAccountLanguageRequest,
+    UpdateAccountSignatureRequest,
+    UpdateAccountTimezoneRequest,
     VerifyPinRequest,
+    PinUnlockRequest,
+    PinUnlockResponse,
 )
 from apps.clients.models import Client
 from apps.integrations.tpms_auth_client import (
@@ -71,6 +109,13 @@ from apps.integrations.tpms_auth_client import (
 
 _CLIENT_ACCOUNT_TYPES = {'client', 'patient'}
 
+# Self-service password-reset link: how long a requested link stays valid,
+# and the minimum gap between two requests for the same account (mirrors
+# apps.accounts.mfa.EMAIL_OTP_RESEND_COOLDOWN_SECONDS) so the request
+# endpoint can't be used to spam a mailbox.
+PASSWORD_RESET_LINK_TTL = timedelta(hours=1)
+PASSWORD_RESET_RESEND_COOLDOWN_SECONDS = 60
+
 router = Router()
 
 
@@ -84,9 +129,12 @@ def _issue_tokens(user: User, tenant_id: int) -> TokenResponse:
     # through this one function. Downstream: the provider admin screen's
     # "Active" status is keyed off last_login being non-null.
     User.objects.filter(pk=user.pk).update(last_login=timezone.now())
+
+    session_start = timezone.now().timestamp()
+    session_id = secrets.token_hex(16)
     return TokenResponse(
-        access_token=create_access_token(user, tenant_id),
-        refresh_token=create_refresh_token(user, tenant_id),
+        access_token=create_access_token(user, tenant_id, session_started_at=session_start, session_id=session_id, idle_started_at=session_start),
+        refresh_token=create_refresh_token(user, tenant_id, session_started_at=session_start, session_id=session_id, idle_started_at=session_start),
         user_id=user.id,
         email=user.email,
         role=user.role,
@@ -94,7 +142,49 @@ def _issue_tokens(user: User, tenant_id: int) -> TokenResponse:
     )
 
 
+def _queue_login_appointment_sync(user: User, tenant_id: int) -> None:
+    if user.external_admin_id is None:
+        logger.info(
+            'appointment_auto_sync login_not_eligible org=%s user=%s role=%s reason=missing_facility',
+            tenant_id, user.pk, user.role,
+        )
+        return
+    logger.info(
+        'appointment_auto_sync login_eligible org=%s user=%s role=%s facility=%s',
+        tenant_id, user.pk, user.role, user.external_admin_id,
+    )
+    try:
+        from apps.integrations.tasks import queue_login_appointment_sync
+        job = queue_login_appointment_sync(tenant_id, user.external_admin_id)
+        if job is None:
+            logger.info(
+                'appointment_auto_sync not_queued org=%s user=%s facility=%s reason=facility_not_connected',
+                tenant_id, user.pk, user.external_admin_id,
+            )
+        else:
+            logger.info(
+                'appointment_auto_sync queue_check_complete org=%s user=%s facility=%s job=%s status=%s',
+                tenant_id, user.pk, user.external_admin_id, job.pk, job.status,
+            )
+    except Exception:
+        logger.exception(
+            'appointment_auto_sync queue_error org=%s user=%s facility=%s',
+            tenant_id, user.pk, user.external_admin_id,
+        )
+
+    try:
+        from apps.integrations.tasks import queue_login_client_sync, queue_login_provider_sync
+        queue_login_client_sync(tenant_id, user.external_admin_id)
+        queue_login_provider_sync(tenant_id, user.external_admin_id)
+    except Exception:
+        logger.exception(
+            'roster_auto_sync queue_error org=%s user=%s facility=%s',
+            tenant_id, user.pk, user.external_admin_id,
+        )
+
+
 @router.post('/login', response=LoginResponse, auth=None)
+@audit_security('auth.login')
 def login(request, data: LoginRequest):
     """
     Staff/provider accounts authenticate locally against their DCM password
@@ -117,11 +207,11 @@ def login(request, data: LoginRequest):
 
     local_user = User.objects.filter(email__iexact=data.email).exclude(role=User.Role.CAREGIVER).first()
     if local_user is not None:
-        if local_user.is_superuser:
-            superuser_tokens = _superadmin_local_auth(request, tenant, data.email, data.password)
-            if superuser_tokens is None:
+        if local_user.is_superuser or user_has_any_delegated_permission(local_user):
+            platform_tokens = _platform_local_auth(request, tenant, data.email, data.password)
+            if platform_tokens is None:
                 raise HttpError(401, 'Invalid email or password')
-            return _mfa_gate(tenant, superuser_tokens)
+            return _mfa_gate(tenant, platform_tokens)
         return _mfa_gate(tenant, _staff_local_auth(tenant, local_user, data.password))
 
     try:
@@ -143,6 +233,7 @@ def _mfa_gate(tenant, tokens: TokenResponse):
     through /mfa/verify or the /mfa/setup/* endpoints."""
     user = User.objects.select_related('mfa').get(id=tokens.user_id)
     if not mfa.needs_mfa(user):
+        _queue_login_appointment_sync(user, tenant.pk)
         return tokens
     setup_required = not user.mfa_enabled
     method = None
@@ -166,12 +257,137 @@ def _mfa_gate(tenant, tokens: TokenResponse):
     )
 
 
+def _safe_sso_redirect_target(redirecturl: str) -> str:
+    if not redirecturl or not redirecturl.startswith('/') or redirecturl.startswith('//'):
+        return '/'
+    return redirecturl
+
+
+def _sso_error_redirect(reason: str) -> HttpResponseRedirect:
+    base = getattr(settings, 'FRONTEND_BASE_URL', 'https://app.progressly.io').rstrip('/')
+    return HttpResponseRedirect(f'{base}/login?error={reason}')
+
+
+def _sso_success_redirect(tokens: LoginResponse, redirecturl: str, tenant_id: int) -> HttpResponseRedirect:
+    """Exchange a one-use handoff; bearer credentials never enter browser URLs."""
+    import json
+    from .auth import _redis
+    from redis.exceptions import RedisError
+    base = getattr(settings, 'FRONTEND_BASE_URL', 'https://app.progressly.io').rstrip('/')
+    code = secrets.token_urlsafe(32)
+    try:
+        _redis().setex(f'dcm:sso:handoff:{code}', 60, json.dumps({
+            'organization_id': tenant_id, 'tokens': {**tokens.dict(),
+            'redirect_target': _safe_sso_redirect_target(redirecturl)},
+        }))
+    except RedisError:
+        raise HttpError(503, 'Could not securely complete sign-in. Please retry.')
+    return HttpResponseRedirect(f'{base}/sso-callback#{urlencode({"code": code})}')
+
+
+@router.post('/sso/exchange', response=dict, auth=None)
+def exchange_sso_handoff(request, data: dict = Body(...)):
+    import json
+    from .auth import _redis
+    from redis.exceptions import RedisError
+    code = data.get('code', '')
+    if not isinstance(code, str) or not 32 <= len(code) <= 64:
+        raise HttpError(401, 'Sign-in handoff expired. Please try again.')
+    try:
+        value = _redis().getdel(f'dcm:sso:handoff:{code}')
+    except RedisError:
+        raise HttpError(503, 'Could not securely complete sign-in. Please retry.')
+    if not value:
+        raise HttpError(401, 'Sign-in handoff expired. Please try again.')
+    handoff = json.loads(value)
+    tenant = getattr(request, 'tenant', None)
+    if tenant is None or tenant.pk != handoff['organization_id']:
+        raise HttpError(401, 'Sign-in handoff is not valid for this facility.')
+    return handoff['tokens']
+
+
+@router.get('/sso/login', auth=None)
+@audit_security('auth.sso')
+def sso_login(request, token: str, redirecturl: str = '/'):
+    """
+    SSO hand-off from TherapyPMS: TPMS has already authenticated this admin/
+    supervisor/staff user and redirects the browser here with a short-lived
+    JWT signed with TPMS_SSO_SECRET_KEY — a secret shared only for this
+    handshake, deliberately never DCM's own JWT_SECRET_KEY (which signs DCM's
+    session tokens).
+
+    This only logs in a DCM User that already exists (synced via
+    apps.integrations.tpms_pull) — unlike _tpms_caregiver_auth, it never
+    provisions one. Any failure redirects to /login with an ?error= code
+    rather than raising, since the caller is a browser mid-redirect, not an
+    API client.
+
+    `tpms_user_id` in the token is optional — when TPMS includes it, it must
+    match this DCM user's external_employee_id, tightening the match beyond
+    email + admin_id alone (two employees at the same practice could
+    otherwise cross-match on a typo'd or stale email).
+    """
+    tenant = getattr(request, 'tenant', None)
+    if tenant is None:
+        return _sso_error_redirect('invalid_tenant')
+
+    secret = getattr(settings, 'TPMS_SSO_SECRET_KEY', '')
+    if not secret:
+        logger.error('SSO login attempted but TPMS_SSO_SECRET_KEY is not configured')
+        return _sso_error_redirect('sso_not_configured')
+
+    try:
+        payload = jwt.decode(token, secret, algorithms=['HS256'])
+    except jwt.ExpiredSignatureError:
+        return _sso_error_redirect('expired_token')
+    except jwt.InvalidTokenError:
+        return _sso_error_redirect('invalid_token')
+
+    email = payload.get('email')
+    admin_id = payload.get('adminid') or payload.get('user_id')
+    if not email or admin_id is None:
+        return _sso_error_redirect('invalid_token')
+    try:
+        admin_id = int(admin_id)
+    except (TypeError, ValueError):
+        return _sso_error_redirect('invalid_token')
+
+    employee_id = payload.get('tpms_user_id')
+    if employee_id is not None:
+        try:
+            employee_id = int(employee_id)
+        except (TypeError, ValueError):
+            return _sso_error_redirect('invalid_token')
+
+    tenant_admin_ids = set(tenant.tpms_admin_ids.values_list('admin_id', flat=True))
+    if admin_id not in tenant_admin_ids:
+        return _sso_error_redirect('user_not_found')
+
+    user_qs = User.objects.exclude(role=User.Role.CAREGIVER).filter(
+        email__iexact=email, external_admin_id=admin_id, is_active=True,
+    )
+    if employee_id is not None:
+        user_qs = user_qs.filter(external_employee_id=employee_id)
+    user = user_qs.first()
+    if user is None:
+        return _sso_error_redirect('user_not_found')
+
+    tokens = _mfa_gate(tenant, _issue_tokens(user, tenant.pk))
+    request._security_actor_id = user.pk
+    request._security_sso_outcome = 'challenge' if getattr(tokens, 'mfa_required', False) else 'success'
+    return _sso_success_redirect(tokens, redirecturl, tenant.pk)
+
+
 @router.post('/mfa/verify', response=TokenResponse, auth=None)
+@audit_security('auth.mfa_verify')
 def mfa_verify(request, data: MfaTokenCodeRequest):
     tenant = getattr(request, 'tenant', None)
     user, org_id = mfa.user_from_mfa_token(data.mfa_token, getattr(tenant, 'pk', None))
+    request._security_actor_id = user.pk
     mfa.check_code(user, data.code)
-    return _issue_tokens(user, org_id)
+    tokens = _issue_tokens(user, org_id)
+    _queue_login_appointment_sync(user, org_id)
+    return tokens
 
 
 @router.post('/mfa/resend', response={204: None}, auth=None)
@@ -190,11 +406,15 @@ def mfa_login_setup_start(request, data: MfaSetupStartRequest):
 
 
 @router.post('/mfa/setup/confirm', response=TokenResponse, auth=None)
+@audit_security('auth.mfa_setup_confirm')
 def mfa_login_setup_confirm(request, data: MfaTokenCodeRequest):
     tenant = getattr(request, 'tenant', None)
     user, org_id = mfa.user_from_mfa_token(data.mfa_token, getattr(tenant, 'pk', None))
+    request._security_actor_id = user.pk
     mfa.check_code(user, data.code, activate=True)
-    return _issue_tokens(user, org_id)
+    tokens = _issue_tokens(user, org_id)
+    _queue_login_appointment_sync(user, org_id)
+    return tokens
 
 
 def _mfa_status(user: User) -> MfaStatusSchema:
@@ -205,9 +425,21 @@ def _mfa_status(user: User) -> MfaStatusSchema:
 
 @router.get('/features', auth=jwt_auth_any_role)
 def get_features(request):
-    """Which optional features are switched on for this deployment (used to show or hide them in the web app)."""
+    """Which optional features are switched on for this deployment and this user's TPMS
+    facility (used to show or hide them in the web app)."""
     from shared import ai_client
-    return {'ai_enabled': ai_client.is_enabled()}
+    return {'ai_enabled': ai_client.is_enabled(request.user)}
+
+
+@router.get('/account/step-up', response=dict, auth=jwt_auth_any_role)
+def get_step_up_requirements(request):
+    return step_up.requirements(request)
+
+
+@router.post('/account/step-up', response=dict, auth=jwt_auth_any_role)
+@audit_security('auth.step_up')
+def verify_step_up(request, data: StepUpRequest):
+    return step_up.verify(request, data)
 
 
 @router.get('/account/mfa', response=MfaStatusSchema, auth=jwt_auth_any_role)
@@ -254,22 +486,17 @@ def get_my_pin_status(request):
 
 
 @router.post('/account/pin', response=PinStatusResponse, auth=jwt_auth_any_role)
+@audit_security('pin.set')
 def set_my_pin(request, data: SetPinRequest):
     tenant = getattr(request, 'tenant', None)
     if not (tenant and getattr(tenant, 'pin_lock_allowed', False)):
         raise HttpError(400, 'PIN lock is not allowed by your organization.')
 
     pin = data.pin.strip()
-    if not (pin.isdigit() and len(pin) in (4, 6)):
-        raise HttpError(400, 'PIN must be exactly 4 or 6 digits.')
+    if not (pin.isascii() and pin.isdigit() and len(pin) == 4):
+        raise HttpError(400, 'PIN must be exactly 4 digits.')
 
-    user = request.user
-    if user.has_pin and data.current_pin is not None:
-        if not user.check_pin(data.current_pin.strip()):
-            raise HttpError(403, 'Current PIN is incorrect.')
-
-    user.set_pin(pin)
-    user.save(update_fields=['pin_hash', 'pin_length', 'pin_lock_enabled', 'pin_failed_attempts', 'pin_locked_until'])
+    user = set_account_pin(request.user.pk, pin, current_pin=data.current_pin, password=data.password, request=request)
     return PinStatusResponse(
         pin_lock_allowed=True,
         pin_lock_enabled=True,
@@ -279,17 +506,14 @@ def set_my_pin(request, data: SetPinRequest):
 
 
 @router.post('/account/pin/toggle', response=PinStatusResponse, auth=jwt_auth_any_role)
+@audit_security('pin.toggle')
 def toggle_my_pin_lock(request, data: TogglePinLockRequest):
     tenant = getattr(request, 'tenant', None)
     if data.enabled and not (tenant and getattr(tenant, 'pin_lock_allowed', False)):
         raise HttpError(400, 'PIN lock is not allowed by your organization.')
 
-    user = request.user
-    if data.enabled and not user.has_pin:
-        raise HttpError(400, 'You must set a PIN before enabling PIN lock.')
-
-    user.pin_lock_enabled = data.enabled
-    user.save(update_fields=['pin_lock_enabled'])
+    user = update_pin_protection(request.user.pk, enabled=data.enabled,
+                                 current_pin=data.current_pin, password=data.password, request=request)
     return PinStatusResponse(
         pin_lock_allowed=bool(tenant and getattr(tenant, 'pin_lock_allowed', False)),
         pin_lock_enabled=user.pin_lock_enabled,
@@ -299,36 +523,97 @@ def toggle_my_pin_lock(request, data: TogglePinLockRequest):
 
 
 @router.delete('/account/pin', response={204: None}, auth=jwt_auth_any_role)
-def remove_my_pin(request):
-    user = request.user
-    user.clear_pin()
-    user.save(update_fields=['pin_hash', 'pin_length', 'pin_lock_enabled', 'pin_failed_attempts', 'pin_locked_until'])
+@audit_security('pin.remove')
+def remove_my_pin(request, data: PinProtectionRequest = Body(None)):
+    data = data or PinProtectionRequest()
+    update_pin_protection(request.user.pk, remove=True,
+                          current_pin=data.current_pin, password=data.password, request=request)
     return 204, None
 
 
 @router.post('/pin/verify', response=dict, auth=jwt_auth_any_role)
+@audit_security('pin.verify')
 def verify_my_pin(request, data: VerifyPinRequest):
-    user = request.user
-    if not user.has_pin:
-        raise HttpError(400, 'No PIN is set for this account.')
-
-    now = timezone.now()
-    if user.pin_locked_until and user.pin_locked_until > now:
-        raise HttpError(429, 'Too many incorrect attempts. Try again in a few minutes.')
-
-    pin = data.pin.strip()
-    if not user.check_pin(pin):
-        user.pin_failed_attempts += 1
-        if user.pin_failed_attempts >= mfa.MAX_FAILED_ATTEMPTS:
-            user.pin_locked_until = now + timedelta(minutes=mfa.LOCKOUT_MINUTES)
-            user.pin_failed_attempts = 0
-        user.save(update_fields=['pin_failed_attempts', 'pin_locked_until'])
-        raise HttpError(400, 'Incorrect PIN.')
-
-    user.pin_failed_attempts = 0
-    user.pin_locked_until = None
-    user.save(update_fields=['pin_failed_attempts', 'pin_locked_until'])
+    verify_pin_attempt(request.user.pk, data.pin, request=request)
     return {'valid': True}
+
+
+@router.post('/pin/unlock', response=PinUnlockResponse, auth=None)
+@audit_security('pin.unlock')
+def unlock_with_pin(request, data: PinUnlockRequest):
+    """Re-authenticate a PIN-locked app after its short-lived tokens expire."""
+    try:
+        payload = jwt.decode(
+            data.refresh_token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
+            options={'verify_exp': False, 'require': ['exp', 'iat', 'sub', 'org_id', 'jti']},
+        )
+        session_started_at = session_start_from_payload(payload)
+    except jwt.InvalidTokenError:
+        raise HttpError(401, 'Session expired. Please sign in again.')
+
+    if payload.get('type') != 'refresh' or not isinstance(payload.get('exp'), (int, float)):
+        raise HttpError(401, 'Session expired. Please sign in again.')
+    if not payload.get('org_id') or token_tenant_mismatch(payload, request):
+        raise HttpError(401, 'Session expired. Please sign in again.')
+    from redis.exceptions import RedisError
+    try:
+        blocked = is_token_blocked(payload)
+    except RedisError:
+        logger.exception('PIN token revocation check unavailable')
+        raise HttpError(503, 'Could not securely unlock the session. Please retry.')
+    if blocked:
+        raise HttpError(401, 'Session expired. Please sign in again.')
+
+    try:
+        user = User.objects.get(id=int(payload['sub']), is_active=True)
+    except (User.DoesNotExist, KeyError, TypeError, ValueError):
+        raise HttpError(401, 'Session expired. Please sign in again.')
+
+    request._security_actor_id = user.pk
+    tenant = getattr(request, 'tenant', None)
+    if not (
+        tenant
+        and tenant.pin_lock_allowed
+        and user.pin_lock_enabled
+        and user.has_pin
+    ):
+        raise HttpError(401, 'PIN unlock is not available for this session.')
+
+    user = verify_pin_attempt(user.pk, data.pin, require_enabled=True, request=request)
+    tenant_id = payload.get('org_id')
+    # Prepare replacement credentials first; do not consume the old token if
+    # signing or loading the replacement's configuration fails.
+    # A new idle-session identity keeps the old locked credentials locked.
+    session_id = secrets.token_hex(16)
+    idle_started_at = timezone.now().timestamp()
+    response = PinUnlockResponse(
+        access_token=create_access_token(
+            user, tenant_id, session_started_at=session_started_at,
+            session_id=payload.get('sid') if payload.get('impersonating_admin_id') else session_id,
+            idle_started_at=idle_started_at,
+            impersonating_admin_id=payload.get('impersonating_admin_id'),
+            impersonation_log_id=payload.get('impersonation_log_id'),
+        ),
+        refresh_token=create_refresh_token(
+            user, tenant_id, session_started_at=session_started_at,
+            session_id=payload.get('sid') if payload.get('impersonating_admin_id') else session_id,
+            idle_started_at=idle_started_at,
+            impersonating_admin_id=payload.get('impersonating_admin_id'),
+            impersonation_log_id=payload.get('impersonation_log_id'),
+        ),
+    )
+    try:
+        consumed = consume_refresh_token(payload)
+    except RedisError:
+        logger.exception('PIN refresh-token rotation unavailable')
+        raise HttpError(503, 'Could not securely unlock the session. Please retry.')
+    except jwt.InvalidTokenError:
+        raise HttpError(401, 'Session expired. Please sign in again.')
+    if not consumed:
+        raise HttpError(401, 'This session token was already used. Please sign in again.')
+    return response
 
 
 def _verify_actor_password(user: User, password: str) -> bool:
@@ -336,26 +621,35 @@ def _verify_actor_password(user: User, password: str) -> bool:
 
 
 @router.post('/users/{user_id}/mfa/remove', response={204: None}, auth=jwt_auth)
+@audit_security('auth.mfa_remove')
 def remove_user_mfa(request, user_id: int, data: MfaRemoveRequest):
     require_permission(request, 'admin_users_edit')
+    step_up.require_step_up(request)
     try:
         user = User.objects.get(_same_practice_q(request.user), id=user_id)
     except User.DoesNotExist:
         raise HttpError(404, 'User not found')
-    if not _verify_actor_password(request.user, data.password):
-        raise HttpError(403, 'Incorrect password')
     UserMFA.objects.filter(user=user).delete()
     return 204, None
 
 
-def _superadmin_local_auth(request, tenant, email: str, password: str) -> TokenResponse | None:
-    """Allow platform superusers into the web app with their Django password.
+def _platform_local_auth(request, tenant, email: str, password: str) -> TokenResponse | None:
+    """Allow platform-side accounts into the web app with their Django
+    password, without needing to belong to the tenant they're logging into:
+    real superusers, and non-superusers holding any
+    superadmin_delegated_permissions grant (e.g. a sales-team login scoped to
+    Knowledge Base / Changelog / Organization creation — see
+    accounts.permissions.user_has_any_delegated_permission). A delegated
+    grant never widens past the specific permissions it names; this only
+    changes *where* the account is allowed to log in from.
 
     Regular users must still authenticate through TherapyPMS; this fallback is
     only for platform-owned superadmin tools that used to require /admin.
     """
     user = authenticate(request, username=email, password=password)
-    if user is None or not user.is_active or not user.is_superuser:
+    if user is None or not user.is_active:
+        return None
+    if not user.is_superuser and not user_has_any_delegated_permission(user):
         return None
     if tenant is not None and user.organization_id is None:
         user.organization = tenant
@@ -489,6 +783,7 @@ def _tpms_caregiver_auth(request, tenant, email: str, payload: dict) -> TokenRes
 
 
 @router.post('/logout', auth=jwt_auth_any_role, response={204: None})
+@audit_security('auth.logout')
 def logout(request):
     """Revoke the current access token immediately. Token is blocklisted in Redis until expiry."""
     from .auth import blocklist_token
@@ -499,6 +794,7 @@ def logout(request):
 
 
 @router.post('/logout-all', auth=jwt_auth_any_role, response={204: None})
+@audit_security('auth.logout_all')
 def logout_all(request):
     """
     Revoke all active tokens for this user by rotating their token secret seed.
@@ -514,6 +810,13 @@ def logout_all(request):
 
 
 
+@router.post('/session/activity', auth=jwt_auth_any_role, response={204: None})
+def record_session_activity(request):
+    from .session_security import enforce_session_activity
+    enforce_session_activity(request._jwt_payload, request.tenant, touch=True)
+    return 204, None
+
+
 @router.post('/refresh', response=AccessTokenResponse, auth=None)
 def refresh_token(request, data: RefreshRequest):
     try:
@@ -522,6 +825,10 @@ def refresh_token(request, data: RefreshRequest):
             raise HttpError(401, 'Invalid token type')
         if token_tenant_mismatch(payload, request):
             raise HttpError(401, 'Invalid or expired token')
+        if is_token_blocked(payload):
+            raise HttpError(401, 'Invalid or expired token')
+        from .session_security import enforce_session_activity
+        enforce_session_activity(payload, getattr(request, 'tenant', None))
         user = User.objects.get(id=int(payload['sub']), is_active=True)
         if not user_facility_is_active(user, int(payload['org_id'])):
             raise HttpError(403, INACTIVE_FACILITY_MESSAGE)
@@ -529,15 +836,29 @@ def refresh_token(request, data: RefreshRequest):
         # request.tenant again — so a refresh can never move a session to a
         # different tenant even if somehow presented elsewhere (defense in
         # depth; token_tenant_mismatch above already blocks that case).
-        return AccessTokenResponse(access_token=create_access_token(user, payload['org_id']))
+        return AccessTokenResponse(access_token=create_access_token(
+            user, payload['org_id'], session_started_at=session_start_from_payload(payload),
+            session_id=payload.get('sid'), idle_started_at=payload.get('idle_started_at'),
+            impersonating_admin_id=payload.get('impersonating_admin_id'),
+            impersonation_log_id=payload.get('impersonation_log_id')))
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, User.DoesNotExist, KeyError):
         raise HttpError(401, 'Invalid or expired token')
+
+
+def _user_avatar_url(request, user: User) -> str | None:
+    if not user.avatar:
+        return None
+    try:
+        return request.build_absolute_uri(user.avatar.url)
+    except ValueError:
+        return None
 
 
 @router.get('/me', response=CurrentUserSchema, auth=jwt_auth_any_role)
 def me(request):
     user = request.user
     tenant = getattr(request, 'tenant', None)
+    payload = getattr(request, '_jwt_payload', {})
     user.automatic_logout_minutes = (
         tenant.automatic_logout_minutes
         if tenant is not None and tenant.automatic_logout_enabled
@@ -546,6 +867,30 @@ def me(request):
     user.pin_lock_allowed = bool(tenant and getattr(tenant, 'pin_lock_allowed', False))
     user.pin_lock_enabled = bool(getattr(user, 'pin_lock_enabled', False))
     user.pin_length = getattr(user, 'pin_length', None)
+    user.avatar_url = _user_avatar_url(request, user)
+    impersonating_admin_id = payload.get('impersonating_admin_id') or None
+    impersonation_log_id = payload.get('impersonation_log_id') or None
+    user.impersonating_admin_id = impersonating_admin_id
+    user.impersonation_log_id = impersonation_log_id
+    user.impersonating_admin_name = None
+    user.impersonation_started_at = None
+    if impersonating_admin_id and impersonation_log_id:
+        from .models import ImpersonationLog
+        log = (
+            ImpersonationLog.objects
+            .select_related('admin')
+            .filter(
+                id=impersonation_log_id,
+                session_id=payload.get('sid'),
+                admin_id=impersonating_admin_id,
+                target_user_id=user.id,
+                status=ImpersonationLog.Status.ACTIVE,
+            )
+            .first()
+        )
+        if log:
+            user.impersonating_admin_name = log.admin.full_name
+            user.impersonation_started_at = log.started_at
     if user.is_caregiver:
         # Caregiver access is identity-scoped, not permission-key-scoped —
         # no RolePermission lookup, just the linked client's display info.
@@ -642,13 +987,65 @@ def _timezone_options(payload: dict) -> list[dict[str, str]]:
     return options
 
 
+_IANA_ZONE_PREFIXES = (
+    'Africa/', 'America/', 'Antarctica/', 'Arctic/', 'Asia/', 'Atlantic/',
+    'Australia/', 'Europe/', 'Indian/', 'Pacific/', 'UTC',
+)
+
+
+def _common_timezone_options() -> list[dict[str, str]]:
+    """IANA zone names worth offering in the picker — real places, not the
+    legacy Etc/GMT+N or fixed-offset aliases zoneinfo also lists."""
+    now = timezone.now()
+    options = []
+    for name in sorted(available_timezones()):
+        if not name.startswith(_IANA_ZONE_PREFIXES):
+            continue
+        try:
+            offset = now.astimezone(ZoneInfo(name)).strftime('%z')
+        except ZoneInfoNotFoundError:
+            continue
+        offset_label = f'GMT{offset[:3]}:{offset[3:]}' if offset else 'GMT'
+        options.append({'value': name, 'label': f"{name.replace('_', ' ')} ({offset_label})"})
+    return options
+
+
+def _is_valid_timezone(name: str) -> bool:
+    try:
+        ZoneInfo(name)
+        return True
+    except (ZoneInfoNotFoundError, ValueError):
+        return False
+
+
+# The app's UI strings are English-only today — this just records a
+# preference for later use, it doesn't translate anything yet.
+_LANGUAGE_OPTIONS = [
+    {'value': 'en-US', 'label': 'English (US)'},
+    {'value': 'en-GB', 'label': 'English (UK)'},
+    {'value': 'es', 'label': 'Español'},
+    {'value': 'fr', 'label': 'Français'},
+    {'value': 'pt-BR', 'label': 'Português (Brasil)'},
+    {'value': 'de', 'label': 'Deutsch'},
+    {'value': 'zh-CN', 'label': '中文 (简体)'},
+    {'value': 'vi', 'label': 'Tiếng Việt'},
+    {'value': 'tl', 'label': 'Tagalog'},
+    {'value': 'ar', 'label': 'العربية'},
+]
+_VALID_LANGUAGE_CODES = {option['value'] for option in _LANGUAGE_OPTIONS}
+
+
+def _is_valid_language(code: str) -> bool:
+    return code in _VALID_LANGUAGE_CODES
+
+
 @router.get('/account/profile', response=AccountProfileSchema, auth=jwt_auth_any_role)
 def account_profile(request):
     user = request.user
     display_name = user.full_name
     email = user.email
-    current_timezone = None
-    timezone_options = []
+    current_timezone = user.timezone
+    timezone_options = _common_timezone_options()
     access_token = get_tpms_access_token(user.id)
 
     if access_token:
@@ -672,7 +1069,9 @@ def account_profile(request):
                 or display_name
             )
             email = _tpms_value(personal_info, 'employee_email', 'email', 'login_email', 'loginEmail') or email
-            current_timezone = _tpms_value(
+            # A timezone the user already saved in DCM (user.timezone) wins — TPMS's
+            # value is only a suggested default for a user who hasn't picked one yet.
+            current_timezone = current_timezone or _tpms_value(
                 personal_info,
                 'employee_timezone',
                 'timezone',
@@ -693,7 +1092,11 @@ def account_profile(request):
                 'selectedTimezone',
                 'value',
             ) or None
-            timezone_options = _timezone_options(timezone_payload)
+            existing_values = {option['value'] for option in timezone_options}
+            timezone_options = timezone_options + [
+                option for option in _timezone_options(timezone_payload)
+                if option['value'] not in existing_values
+            ]
         except TpmsAuthError as exc:
             if exc.status_code in {401, 403}:
                 raise HttpError(401, 'TherapyPMS session expired. Please log in again.') from exc
@@ -707,7 +1110,102 @@ def account_profile(request):
         'email': email,
         'timezone': current_timezone,
         'timezone_options': timezone_options,
+        'language': user.language,
+        'language_options': _LANGUAGE_OPTIONS,
+        'avatar_url': _user_avatar_url(request, user),
     }
+
+
+@router.patch('/account/timezone', response=AccountProfileSchema, auth=jwt_auth_any_role)
+def update_account_timezone(request, data: UpdateAccountTimezoneRequest):
+    """Persists the user's display timezone (does not touch TPMS). A null
+    value clears it, reverting display to the device's timezone."""
+    if data.timezone and not _is_valid_timezone(data.timezone):
+        raise HttpError(422, 'Unrecognized timezone')
+
+    User.objects.filter(pk=request.user.pk).update(timezone=data.timezone or None)
+    request.user.timezone = data.timezone or None
+    return account_profile(request)
+
+
+@router.patch('/account/language', response=AccountProfileSchema, auth=jwt_auth_any_role)
+def update_account_language(request, data: UpdateAccountLanguageRequest):
+    """Persists the user's language preference. The app's UI is English-only
+    today, so this records the choice for later use without translating
+    anything yet. A null value clears it back to the app default."""
+    if data.language and not _is_valid_language(data.language):
+        raise HttpError(422, 'Unrecognized language')
+
+    User.objects.filter(pk=request.user.pk).update(language=data.language or None)
+    request.user.language = data.language or None
+    return account_profile(request)
+
+
+def _validate_signature_data(signature_data: str) -> bytes:
+    prefix = 'data:image/png;base64,'
+    if not signature_data.startswith(prefix):
+        raise HttpError(400, 'Signature must be a PNG image.')
+    from PIL import Image, UnidentifiedImageError
+    try:
+        image_bytes = base64.b64decode(signature_data[len(prefix):], validate=True)
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            if image.format != 'PNG' or image.width > 2000 or image.height > 700:
+                raise HttpError(400, 'Signature image dimensions or format are not supported.')
+            image.verify()
+    except HttpError:
+        raise
+    except (binascii.Error, UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError):
+        raise HttpError(400, 'Signature must be a valid PNG image.')
+    if not image_bytes or len(image_bytes) > 300_000:
+        raise HttpError(400, 'Signature image must be smaller than 300 KB.')
+    return image_bytes
+
+
+@router.get('/account/signature', response=AccountSignatureSchema, auth=jwt_auth_any_role)
+def account_signature(request):
+    """Returns the current user's private saved signature."""
+    return {'signature_data': request.user.signature_data}
+
+
+@router.put('/account/signature', response=AccountSignatureSchema, auth=jwt_auth_any_role)
+def save_account_signature(request, data: UpdateAccountSignatureRequest):
+    """Stores a validated signature image for this user only."""
+    _validate_signature_data(data.signature_data)
+    User.objects.filter(pk=request.user.pk).update(signature_data=data.signature_data)
+    request.user.signature_data = data.signature_data
+    return {'signature_data': request.user.signature_data}
+
+
+@router.delete('/account/signature', response=AccountSignatureSchema, auth=jwt_auth_any_role)
+def delete_account_signature(request):
+    """Removes the current user's saved signature; existing signed-note snapshots remain."""
+    User.objects.filter(pk=request.user.pk).update(signature_data='')
+    request.user.signature_data = ''
+    return {'signature_data': ''}
+
+
+@router.post('/account/avatar', response=AccountProfileSchema, auth=jwt_auth_any_role)
+def upload_account_avatar(request, file: UploadedFile = File(...)):
+    """Uploads/replaces the user's own profile picture."""
+    validate_image_upload(file)
+    user = request.user
+    old_avatar = user.avatar
+    user.avatar = file
+    user.save(update_fields=['avatar', 'updated_at'])
+    if old_avatar:
+        old_avatar.delete(save=False)
+    return account_profile(request)
+
+
+@router.delete('/account/avatar', response=AccountProfileSchema, auth=jwt_auth_any_role)
+def delete_account_avatar(request):
+    """Removes the user's profile picture, reverting to the initials avatar."""
+    user = request.user
+    if user.avatar:
+        user.avatar.delete(save=False)
+        user.avatar = None
+        user.save(update_fields=['avatar', 'updated_at'])
+    return account_profile(request)
 
 
 def _same_practice_q(user: User, prefix: str = '') -> Q:
@@ -841,11 +1339,13 @@ def _list_native_staffs(request, include_inactive: bool) -> list[StaffSchema]:
 
 
 @router.post('/users/{user_id}/password-link', response=PasswordSetLinkGenerateResponse, auth=jwt_auth)
+@audit_security('auth.password_link')
 def generate_password_set_link(request, user_id: int, data: PasswordSetLinkGenerateRequest):
     """Admin-generated one-time link so a synced provider can set their DCM
     login password, instead of relying on TherapyPMS's /ios/login. See
     PasswordSetLink for why generating a new link expires any prior one."""
     require_permission(request, 'admin_users_edit')
+    step_up.require_step_up(request)
     try:
         user = User.objects.get(_same_practice_q(request.user), id=user_id)
     except User.DoesNotExist:
@@ -858,6 +1358,8 @@ def generate_password_set_link(request, user_id: int, data: PasswordSetLinkGener
     link, raw_token = PasswordSetLink.generate(user, created_by=request.user, expires_at=data.expires_at)
     base_url = getattr(settings, 'FRONTEND_BASE_URL', '').rstrip('/')
     url = f'{base_url}/set-password?token={raw_token}'
+    from apps.notifications.service import send_password_set_invite
+    send_password_set_invite(user.email, user.first_name, url, link.expires_at)
     return PasswordSetLinkGenerateResponse(url=url, expires_at=link.expires_at)
 
 
@@ -912,6 +1414,84 @@ def get_password_set_link(request, token: str):
     )
 
 
+@router.post('/password-reset/request', response=ForgotPasswordResponse, auth=None)
+def request_password_reset(request, data: ForgotPasswordRequest):
+    """Public, self-service counterpart to generate_password_set_link above
+    — the "forgot password" link on the login page. Always returns the same
+    generic message regardless of whether the email matches an account, so
+    this can't be used to enumerate registered emails. Caregiver/client-
+    portal accounts are excluded, same as login() above — they authenticate
+    through TherapyPMS, not a DCM password."""
+    generic = ForgotPasswordResponse(
+        detail='If an account exists for that email, a password reset link has been sent.'
+    )
+
+    user = User.objects.filter(email__iexact=data.email, is_active=True).exclude(role=User.Role.CAREGIVER).first()
+    if user is None:
+        return generic
+
+    recent = PasswordResetLink.objects.filter(user=user).order_by('-created_at').first()
+    if recent and (timezone.now() - recent.created_at).total_seconds() < PASSWORD_RESET_RESEND_COOLDOWN_SECONDS:
+        return generic
+
+    link, raw_token = PasswordResetLink.generate(user, expires_at=timezone.now() + PASSWORD_RESET_LINK_TTL)
+    base_url = getattr(settings, 'FRONTEND_BASE_URL', '').rstrip('/')
+    url = f'{base_url}/reset-password?token={raw_token}'
+    from apps.notifications.service import send_password_reset_email
+    send_password_reset_email(user.email, user.first_name, url, link.expires_at)
+    return generic
+
+
+@router.post('/password-reset/confirm', response=LoginResponse, auth=None)
+def confirm_password_reset(request, data: PasswordResetConfirmRequest):
+    """Registered before GET /password-reset/{token} below — same route-
+    ordering reason as submit_password_set_link vs. get_password_set_link
+    above (the {token} converter would otherwise swallow "confirm")."""
+    tenant = getattr(request, 'tenant', None)
+    if tenant is None:
+        raise HttpError(401, 'Invalid or expired link')
+    if data.password != data.password_confirm:
+        raise HttpError(400, 'Passwords do not match')
+
+    if not data.token.startswith('pwr_'):
+        raise HttpError(404, 'This link is invalid or has expired')
+    token_hash = hashlib.sha256(data.token.encode()).hexdigest()
+
+    with transaction.atomic():
+        # select_for_update + a fresh used_at/expires_at check inside the
+        # transaction, not just PasswordResetLink.verify() up front — so two
+        # concurrent requests for the same token can't both pass the check
+        # and both consume it.
+        link = (
+            PasswordResetLink.objects.select_for_update()
+            .select_related('user')
+            .filter(token_hash=token_hash)
+            .first()
+        )
+        if link is None or link.used_at is not None or link.expires_at < timezone.now():
+            raise HttpError(404, 'This link is invalid or has expired')
+
+        user = link.user
+        user.set_password(data.password)
+        user.save(update_fields=['password'])
+        link.used_at = timezone.now()
+        link.save(update_fields=['used_at'])
+
+    return _mfa_gate(tenant, _issue_tokens(user, tenant.pk))
+
+
+@router.get('/password-reset/{token}', response=PasswordResetLinkInfoResponse, auth=None)
+def get_password_reset_link(request, token: str):
+    link = PasswordResetLink.verify(token)
+    if link is None:
+        raise HttpError(404, 'This link is invalid or has expired')
+    return PasswordResetLinkInfoResponse(
+        first_name=link.user.first_name,
+        email_masked=mfa.mask_email(link.user.email),
+        expires_at=link.expires_at,
+    )
+
+
 _ROLE_RANK = {
     User.Role.REPORTING: 0,
     User.Role.STAFF: 0,
@@ -926,8 +1506,10 @@ def _assert_can_assign_role(request, target_role: str) -> None:
 
 
 @router.post('/users', response={201: UserSchema, 400: ErrorResponse}, auth=jwt_auth)
+@audit_security('auth.account_create')
 def create_user(request, data: UserCreateRequest):
     require_permission(request, 'admin_users_edit')
+    step_up.require_step_up(request)
     if data.role == User.Role.CAREGIVER:
         return 400, ErrorResponse(detail='Caregiver accounts are provisioned by portal login only')
     _assert_can_assign_role(request, data.role)
@@ -945,8 +1527,11 @@ def create_user(request, data: UserCreateRequest):
 
 
 @router.patch('/users/{user_id}', response=UserSchema, auth=jwt_auth)
+@audit_security('auth.account_update')
 def update_user(request, user_id: int, data: UserUpdateRequest):
     require_permission(request, 'admin_users_edit')
+    if any(getattr(data, field) is not None for field in ('role', 'is_active', 'mfa_required')):
+        step_up.require_step_up(request)
     try:
         user = User.objects.get(_same_practice_q(request.user), id=user_id)
     except User.DoesNotExist:
@@ -1003,13 +1588,14 @@ def get_role_permissions(request):
 
 
 @router.put('/admin/role-permissions', auth=jwt_auth)
+@audit_security('auth.permissions_change')
 def save_role_permissions(request, body: dict = Body(...)):
     """Save the permission matrix for the login facility.
-
     Body: {role: {perm_key: bool}}. Persists one RolePermission row per role
     under the Organization resolved from the logged-in user's JWT/tenant.
     """
     require_permission(request, 'admin_privileges')
+    step_up.require_step_up(request)
     from .models import RolePermission
     from .permissions import PERMISSION_DEFAULTS, _apply_role_guarantees
 

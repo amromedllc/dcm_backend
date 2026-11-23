@@ -235,6 +235,7 @@ class Target(TenantAwareModel):
         DISCRETE_TRIAL  = 'discrete_trial',  'Discrete Trial'
         DURATION        = 'duration',        'Duration'
         RATE            = 'rate',            'Rate'
+        SCATTERPLOT     = 'scatterplot',     'Scatterplot'
         TASK_ANALYSIS   = 'task_analysis',   'Task Analysis'
         SET_OF_TARGETS  = 'set_of_targets',  'Set of Targets'
         SHAPING         = 'shaping',         'Shaping'
@@ -434,6 +435,7 @@ _NO_COMPUTED_MEASUREMENT: list[str] = []  # event-log types: no automatic metric
 
 MEASUREMENTS_BY_TARGET_TYPE: dict[str, list[str]] = {
     Target.MeasurementType.DISCRETE_TRIAL: _ACCURACY_MEASUREMENTS,
+    Target.MeasurementType.SCATTERPLOT: [Target.Measurement.FREQUENCY],
     Target.MeasurementType.DURATION: [
         Target.Measurement.PERCENT_CORRECT,
         Target.Measurement.FREQUENCY,
@@ -476,6 +478,7 @@ MEASUREMENTS_BY_TARGET_TYPE: dict[str, list[str]] = {
 
 DEFAULT_MEASUREMENT_BY_TARGET_TYPE: dict[str, str] = {
     Target.MeasurementType.DISCRETE_TRIAL: Target.Measurement.PERCENT_CORRECT,
+    Target.MeasurementType.SCATTERPLOT: Target.Measurement.FREQUENCY,
     Target.MeasurementType.DURATION: Target.Measurement.TOTAL_OBSERVED_DURATION,
     Target.MeasurementType.RATE: Target.Measurement.RATE_PER_MINUTE,
     Target.MeasurementType.TASK_ANALYSIS: Target.Measurement.PERCENT_CORRECT,
@@ -880,10 +883,16 @@ class Lesson(TenantAwareModel):
     therapist_message = models.TextField(blank=True)
     lesson_type = models.CharField(max_length=25, choices=LessonType.choices, default=LessonType.OPEN)
     is_active = models.BooleanField(default=True)
+    is_reusable = models.BooleanField(default=False)
+    is_default = models.BooleanField(default=False)
 
     class Meta:
         app_label = 'programs'
         ordering = ['name']
+        constraints = [
+            models.UniqueConstraint(fields=['organization', 'external_client_id'], condition=models.Q(is_default=True), name='unique_default_session_setup_per_client'),
+            models.CheckConstraint(condition=models.Q(is_default=False) | models.Q(is_reusable=True, is_active=True), name='default_session_setup_active_reusable'),
+        ]
 
     @property
     def client_id(self):
@@ -930,6 +939,7 @@ class LessonProgram(OrganizationScopedMixin):
     lesson = models.ForeignKey(Lesson, on_delete=models.CASCADE, related_name='lesson_programs')
     program = models.ForeignKey(Program, on_delete=models.CASCADE, related_name='lesson_programs')
     display_order = models.PositiveIntegerField(default=0)
+    is_pinned = models.BooleanField(default=False)
 
     # lesson is the owning parent; program is cross-checked against it so a
     # lesson can never pull in another organization's program.

@@ -1,8 +1,13 @@
 import secrets
 import hashlib
+import uuid
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
 from django.utils import timezone
+
+
+def _user_avatar_upload_path(instance, filename):
+    return f'avatars/{instance.id}/{uuid.uuid4().hex}/{filename}'
 
 
 class UserManager(BaseUserManager):
@@ -29,6 +34,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         STAFF = 'staff', 'RBT / Staff'
         CAREGIVER = 'caregiver', 'Caregiver'
         REPORTING = 'reporting', 'Reporting / Audit'
+        SALES = 'sales', 'Sales'
 
     email = models.EmailField(unique=True)
     first_name = models.CharField(max_length=100)
@@ -59,6 +65,14 @@ class User(AbstractBaseUser, PermissionsMixin):
         blank=True,
         related_name='users',
     )
+    timezone = models.CharField(max_length=64, null=True, blank=True)
+    # BCP 47 locale tag (e.g. "en-US"), chosen in Account Settings. Null means
+    # "use the app's default" — the UI itself is English-only today, so this
+    # only records the preference for later use, it doesn't translate anything yet.
+    language = models.CharField(max_length=16, null=True, blank=True)
+    avatar = models.ImageField(upload_to=_user_avatar_upload_path, max_length=500, blank=True, null=True)
+    signature_data = models.TextField(blank=True, default='')
+    superadmin_delegated_permissions = models.JSONField(default=dict, db_default={}, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -103,6 +117,13 @@ class User(AbstractBaseUser, PermissionsMixin):
         self.pin_lock_enabled = True
         self.pin_failed_attempts = 0
         self.pin_locked_until = None
+
+    def save(self, *args, **kwargs):
+        # Delegated grants are always a mapping; treat explicit None from any
+        # account-provisioning path the same as an omitted value.
+        if self.superadmin_delegated_permissions is None:
+            self.superadmin_delegated_permissions = {}
+        return super().save(*args, **kwargs)
 
     def check_pin(self, pin: str) -> bool:
         from django.contrib.auth.hashers import check_password
@@ -317,6 +338,105 @@ class PasswordSetLink(models.Model):
 
     def __str__(self) -> str:
         return f'PasswordSetLink for {self.user_id} ({self.token_prefix}...)'
+
+
+class PasswordResetLink(models.Model):
+    """
+    One-time, expiring link a user requests for themself after forgetting
+    their password — the self-service counterpart to PasswordSetLink above
+    (which only an admin can generate, for someone else). Same hash-and-
+    prefix storage shape and same "requesting a new one expires any prior
+    unused one" behavior; the distinct 'pwr_' token prefix (vs. PasswordSetLink's
+    'pwl_') keeps the two kinds of token from ever being interchangeable.
+    """
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='password_reset_links')
+    token_prefix = models.CharField(max_length=8, db_index=True)
+    token_hash = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        app_label = 'accounts'
+        ordering = ['-created_at']
+
+    @classmethod
+    def generate(cls, user: User, *, expires_at) -> tuple['PasswordResetLink', str]:
+        cls.objects.filter(user=user, used_at__isnull=True, expires_at__gt=timezone.now()).update(
+            expires_at=timezone.now()
+        )
+
+        raw_token = f'pwr_{secrets.token_urlsafe(32)}'
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        instance = cls.objects.create(
+            user=user,
+            token_prefix=raw_token[:8],
+            token_hash=token_hash,
+            expires_at=expires_at,
+        )
+        return instance, raw_token
+
+    @classmethod
+    def verify(cls, raw_token: str) -> 'PasswordResetLink | None':
+        if not raw_token.startswith('pwr_'):
+            return None
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        try:
+            link = cls.objects.select_related('user').get(
+                token_prefix=raw_token[:8],
+                token_hash=token_hash,
+            )
+        except cls.DoesNotExist:
+            return None
+
+        if link.used_at is not None or link.expires_at < timezone.now():
+            return None
+        return link
+
+    def __str__(self) -> str:
+        return f'PasswordResetLink for {self.user_id} ({self.token_prefix}...)'
+
+
+class ImpersonationLog(models.Model):
+    """
+    Audit record for every superadmin impersonation session.
+    One row is created when impersonation starts; ended_at/status are updated
+    when it ends. session_id ties the log to the impersonation JWT's 'sid' claim
+    so expiry can be detected even if stop-impersonation is never called.
+    """
+    class Status(models.TextChoices):
+        ACTIVE = 'active', 'Active'
+        ENDED = 'ended', 'Ended'
+        EXPIRED = 'expired', 'Expired'
+
+    admin = models.ForeignKey(
+        'accounts.User',
+        on_delete=models.PROTECT,
+        related_name='impersonation_sessions_initiated',
+    )
+    target_user = models.ForeignKey(
+        'accounts.User',
+        on_delete=models.PROTECT,
+        related_name='impersonation_sessions_received',
+    )
+    started_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    session_id = models.CharField(max_length=64, db_index=True)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+        db_index=True,
+    )
+    reason = models.TextField(blank=True, default='')
+
+    class Meta:
+        app_label = 'accounts'
+        ordering = ['-started_at']
+
+    def __str__(self) -> str:
+        return f'Impersonation by {self.admin_id} of {self.target_user_id} ({self.status})'
 
 
 class RolePermission(models.Model):

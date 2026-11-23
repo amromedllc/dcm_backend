@@ -76,6 +76,50 @@ class SuperadminPracticeEmailApiTests(TestCase):
         self.assertIs(result['email_notifications_enabled'], True)
         self.assertIs(self.mapping.email_notifications_enabled, True)
 
+    def test_facilities_default_to_ai_disabled(self):
+        rows = list_superadmin_practice_email_settings(FakeRequest(self.superadmin))
+        self.assertIs(rows[0]['tpms_admin_ids'][0]['ai_enabled'], False)
+
+    def test_superadmin_can_toggle_ai_for_a_facility(self):
+        result = update_superadmin_practice_email_setting(
+            FakeRequest(self.superadmin),
+            self.mapping.id,
+            TpmsAdminEmailSettingUpdate(ai_enabled=True),
+        )
+        self.mapping.refresh_from_db()
+        self.assertIs(result['ai_enabled'], True)
+        self.assertIs(self.mapping.ai_enabled, True)
+        # Email flag is untouched by an AI-only update.
+        self.assertIs(self.mapping.email_notifications_enabled, False)
+
+        result = update_superadmin_practice_email_setting(
+            FakeRequest(self.superadmin),
+            self.mapping.id,
+            TpmsAdminEmailSettingUpdate(ai_enabled=False),
+        )
+        self.mapping.refresh_from_db()
+        self.assertIs(result['ai_enabled'], False)
+        self.assertIs(self.mapping.ai_enabled, False)
+
+    def test_regular_admin_cannot_toggle_ai_for_a_facility(self):
+        with self.assertRaises(HttpError) as ctx:
+            update_superadmin_practice_email_setting(
+                FakeRequest(self.admin),
+                self.mapping.id,
+                TpmsAdminEmailSettingUpdate(ai_enabled=True),
+            )
+        self.assertEqual(ctx.exception.status_code, 403)
+        self.mapping.refresh_from_db()
+        self.assertIs(self.mapping.ai_enabled, False)
+
+    def test_superadmin_can_create_facility_with_ai_enabled(self):
+        status, created = create_superadmin_tpms_admin_id(
+            FakeRequest(self.superadmin),
+            TpmsAdminIdCreate(organization_id=self.org.id, admin_id=555, facility_name='AI Clinic', ai_enabled=True),
+        )
+        self.assertEqual(status, 201)
+        self.assertIs(created['ai_enabled'], True)
+
     def test_regular_admin_cannot_update_practice_email_setting(self):
         with self.assertRaises(HttpError) as ctx:
             update_superadmin_practice_email_setting(

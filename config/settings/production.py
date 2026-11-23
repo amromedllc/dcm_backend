@@ -1,5 +1,6 @@
 import environ
 from pathlib import Path
+from celery.schedules import crontab
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
@@ -144,20 +145,33 @@ JWT_SECRET_KEY = env('JWT_SECRET_KEY', default=SECRET_KEY)
 JWT_ALGORITHM = 'HS256'
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES = env.int('JWT_ACCESS_TOKEN_EXPIRE_MINUTES', default=15)
 JWT_REFRESH_TOKEN_EXPIRE_DAYS = env.int('JWT_REFRESH_TOKEN_EXPIRE_DAYS', default=7)
+AUTH_SESSION_MAX_HOURS = env.int('AUTH_SESSION_MAX_HOURS', default=8)
+if AUTH_SESSION_MAX_HOURS <= 0:
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured('AUTH_SESSION_MAX_HOURS must be positive')
 
 # TherapyPMS HTTP API (auth — encrypt → login; no direct DB password checks)
 TPMS_API_BASE_URL = env('TPMS_API_BASE_URL', default='https://app.therapypms.com')
 TPMS_API_TIMEOUT_SECONDS = env.int('TPMS_API_TIMEOUT_SECONDS', default=20)
+# Shared with TPMS's Progressly assigned-session-note endpoint. Server-only.
+TPMS_PROGRESSLY_SHARED_SECRET = env('TPMS_PROGRESSLY_SHARED_SECRET', default='')
+
+# Shared secret for verifying inbound SSO hand-off JWTs from TherapyPMS (see
+# apps.accounts.api.sso_login). Deliberately distinct from JWT_SECRET_KEY,
+# which signs DCM's own session tokens — TPMS only ever needs to know this one.
+TPMS_SSO_SECRET_KEY = env('TPMS_SSO_SECRET_KEY', default='')
 
 # AI drafting (assessment builder). Any OpenAI-compatible chat-completions service works;
 # the defaults point at NVIDIA's free developer API (key from build.nvidia.com).
 # AI is used only when AI_ENABLED is true AND AI_API_KEY is set.
 AI_API_BASE_URL = env('AI_API_BASE_URL', default='https://integrate.api.nvidia.com/v1')
 # Master switch. When False, AI is refused by the server and its buttons are hidden in the web app.
-AI_ENABLED = env.bool('AI_ENABLED', default=False)
+AI_ENABLED = env.bool('AI_ENABLED', default=True)
 AI_API_KEY = env('AI_API_KEY', default='')
 AI_MODEL = env('AI_MODEL', default='nvidia/nemotron-3-super-120b-a12b')
 AI_TIMEOUT_SECONDS = env.int('AI_TIMEOUT_SECONDS', default=60)
+
+SUPPORT_EMAIL = env('SUPPORT_EMAIL', default='')
 
 DOCUSEAL_BASE_URL = env('DOCUSEAL_BASE_URL')
 DOCUSEAL_SSO_SECRET = env('DOCUSEAL_SSO_SECRET')
@@ -178,6 +192,12 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = 'UTC'
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes max per task
+CELERY_BEAT_SCHEDULE = {
+    'upcoming-appointment-reminders': {
+        'task': 'apps.notifications.tasks.send_upcoming_appointment_reminders',
+        'schedule': crontab(minute='*/5'),
+    },
+}
 
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
@@ -203,6 +223,13 @@ if USE_S3:
     AWS_S3_REGION_NAME = env('AWS_S3_REGION_NAME', default='us-east-1')
     AWS_S3_FILE_OVERWRITE = False
     AWS_DEFAULT_ACL = 'private'
+
+# Client documents never use the publicly served MEDIA_ROOT or media URLs.
+CLIENT_DOCUMENT_ROOT = BASE_DIR / 'private_documents'
+STORAGES['client_documents'] = {
+    'BACKEND': ('apps.clients.document_s3_storage.PrivateDocumentS3Storage' if USE_S3
+                else 'apps.clients.document_storage.PrivateDocumentStorage'),
+}
 
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'UTC'
@@ -230,7 +257,8 @@ EMAIL_HOST_USER = env('EMAIL_HOST_USER', default='')
 EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD', default='')
 EMAIL_USE_TLS = env.bool('EMAIL_USE_TLS', default=True)
 EMAIL_USE_SSL = env.bool('EMAIL_USE_SSL', default=False)
-DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default=EMAIL_HOST_USER or 'notifications@progressly.io')
+EMAIL_TIMEOUT = env.int('EMAIL_TIMEOUT', default=15)
+DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='notifications@progressly.io')
 SERVER_EMAIL = env('SERVER_EMAIL', default=DEFAULT_FROM_EMAIL)
 EMAIL_BACKEND = env(
     'EMAIL_BACKEND',
@@ -311,6 +339,15 @@ else:
             'level': 'INFO',
         },
     }
+
+# Audit extras must survive formatting in both development and production.
+LOGGING.setdefault('formatters', {})['audit_json'] = {'()': 'shared.audit.AuditJSONFormatter'}
+LOGGING['handlers']['audit_console'] = {
+    'class': 'logging.StreamHandler', 'formatter': 'audit_json',
+}
+LOGGING.setdefault('loggers', {})['dcm.audit'] = {
+    'handlers': ['audit_console'], 'level': 'INFO', 'propagate': False,
+}
 
 UNFOLD = {
     'SITE_TITLE': 'DCM Admin',

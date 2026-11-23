@@ -4,13 +4,55 @@ from django_tenants.utils import schema_context
 from apps.accounts.models import User
 from apps.clients.models import Client
 from apps.programs.models import Program, Target, TargetStatusChange, WorkflowTemplate
-from apps.programs.services import _advance_if_criteria_met
+from apps.programs.services import _advance_if_criteria_met, _transition_target
 from apps.sessions.models import SessionRun, TrialEvent
 from apps.tenants.models import Domain, Organization
 from shared.tenancy import tenant_context
 
 
 class MasteryWorkflowBehaviorTests(TestCase):
+    def test_auto_open_order_capacity_audit_and_mastery_only_trigger(self):
+        for direction, expected in [('first', ['Waiting 0']), ('last', ['Waiting 2']),
+                                    ('all', ['Waiting 0', 'Waiting 1', 'Waiting 2'])]:
+            with self.subTest(direction=direction), schema_context(self.org.schema_name), tenant_context(self.org.pk):
+                workflow = self._workflow()
+                workflow.phases[-1].update({
+                    'auto_open_waiting': True, 'auto_open_status': 'acquisition',
+                    'auto_open_max_targets': 2, 'auto_open_direction': direction,
+                })
+                workflow.save()
+                program = Program.objects.create(
+                    external_client_id=int(self.client_row.external_id), name=direction,
+                    workflow_template=workflow, created_by=self.admin,
+                )
+                source = Target.objects.create(program=program, name='Source', status='acquisition')
+                Target.objects.create(program=program, name='Already open', status='acquisition')
+                waiting = [Target.objects.create(
+                    program=program, name=f'Waiting {i}', status='waiting', display_order=i,
+                ) for i in range(3)]
+                other_program = Program.objects.create(
+                    external_client_id=int(self.client_row.external_id), name='Other program',
+                )
+                untouched = Target.objects.create(program=other_program, name='Other', status='waiting')
+                session = self._session_with_trials(source, 1, 1, 12)
+                _transition_target(source, 'mastered', session.id)
+                opened = list(program.targets.filter(id__in=[t.pk for t in waiting], status='acquisition')
+                              .order_by('display_order').values_list('name', flat=True))
+                self.assertEqual(opened, expected)
+                self.assertEqual(TargetStatusChange.objects.filter(
+                    target_id__in=[t.pk for t in waiting], from_status='waiting',
+                    to_status='acquisition', session_run_id=session.id,
+                    trigger=TargetStatusChange.Trigger.AUTO_MASTERY,
+                ).count(), len(expected))
+                # Free capacity before maintenance so an unwanted second batch
+                # cannot be hidden by the open-target cap.
+                program.targets.filter(name__in=expected + ['Already open']).update(status='closed')
+                _transition_target(source, 'maintenance', session.id)
+                _transition_target(source, 'closed', session.id)
+                self.assertFalse(program.targets.filter(status='acquisition').exists())
+                untouched.refresh_from_db()
+                self.assertEqual(untouched.status, 'waiting')
+
     def setUp(self):
         self.org = Organization.objects.create(
             name='Workflow Org', slug='workflow-org', schema_name='workflow_org',

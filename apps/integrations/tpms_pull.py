@@ -15,6 +15,8 @@ from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
 from django.db import transaction
+from django.core.exceptions import ValidationError
+from django.core.validators import URLValidator
 from django.utils import timezone
 from ninja.errors import HttpError
 
@@ -34,10 +36,42 @@ from apps.integrations.tpms_auth_client import (
 )
 from apps.integrations.tpms_credentials import decrypt_password, decrypt_ssn, encrypt_password, encrypt_ssn
 from apps.sessions.models import Appointment
-from apps.tenants.models import Organization
+from apps.tenants.models import Organization, OrganizationTpmsAdminId
 from shared.tenancy import current_org_id_or_none
 
 logger = logging.getLogger(__name__)
+
+
+class FacilityConnection:
+    """Use facility-owned credentials while retaining the parent org's data scope."""
+    _credential_fields = {
+        'integration_platform', 'integration_email',
+        'integration_password_encrypted', 'integration_admin_id', 'updated_at',
+    }
+
+    def __init__(self, org: Organization, facility: OrganizationTpmsAdminId):
+        if facility.organization_id != org.pk:
+            raise ValueError('Facility belongs to another organization')
+        self.org = org
+        self.facility = facility
+
+    def __getattr__(self, name):
+        return getattr(self.facility if name in self._credential_fields else self.org, name)
+
+    def __setattr__(self, name, value):
+        if name in self._credential_fields:
+            setattr(self.facility, name, value)
+        else:
+            object.__setattr__(self, name, value)
+
+    def save(self, *, update_fields):
+        self.facility.save(update_fields=update_fields)
+
+
+def _admin_token_scope(org):
+    if isinstance(org, FacilityConnection):
+        return f'{org.id}:facility:{org.facility.admin_id}'
+    return org.id
 
 
 @dataclass
@@ -45,6 +79,7 @@ class PullResult:
     created: int = 0
     updated: int = 0
     skipped: int = 0
+    cancelled: int = 0
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -52,6 +87,7 @@ class PullResult:
             'created': self.created,
             'updated': self.updated,
             'skipped': self.skipped,
+            'cancelled': self.cancelled,
             'errors': self.errors[:20],
         }
 
@@ -168,6 +204,8 @@ def _require_connected_org(org: Organization) -> None:
 
 
 def _org_practice_ids(org: Organization) -> set[int]:
+    if isinstance(org, FacilityConnection):
+        return {org.facility.admin_id}
     return set(org.tpms_admin_ids.values_list('admin_id', flat=True))
 
 
@@ -176,9 +214,14 @@ def bind_therapy_pms_connection(org: Organization, email: str, password: str) ->
 
     Returns the bound TPMS admin_id.
     """
+    session = _authenticate_admin_session(email, password)
+    return _bind_admin_session(org, email, password, session)
+
+
+def _authenticate_admin_session(email: str, password: str):
     try:
         payload = authenticate_admin_raw(email, password)
-        session = normalize_admin_login_payload(email, payload)
+        return normalize_admin_login_payload(email, payload)
     except TpmsAuthError as exc:
         raise HttpError(
             400,
@@ -186,6 +229,20 @@ def bind_therapy_pms_connection(org: Organization, email: str, password: str) ->
             'If the problem persists, please contact TherapyPMS support.',
         ) from exc
 
+
+def connect_facility_from_login(org: Organization, email: str, password: str, expected_admin_id: int | None = None):
+    session = _authenticate_admin_session(email, password)
+    if expected_admin_id is not None and expected_admin_id != session.admin_id:
+        raise HttpError(400, 'These TherapyPMS credentials belong to a different facility.')
+    facility = org.tpms_admin_ids.filter(admin_id=session.admin_id).first()
+    if facility is None:
+        raise HttpError(400, 'The facility returned by TherapyPMS is not mapped to this organization. Ask a Progressly superadmin to map it.')
+    connection = FacilityConnection(org, facility)
+    _bind_admin_session(connection, email, password, session)
+    return connection
+
+
+def _bind_admin_session(org, email: str, password: str, session) -> int:
     mapped = _org_practice_ids(org)
     if not mapped:
         raise HttpError(
@@ -213,12 +270,12 @@ def bind_therapy_pms_connection(org: Organization, email: str, password: str) ->
             'updated_at',
         ],
     )
-    store_org_tpms_admin_token(org.id, session.access_token)
+    store_org_tpms_admin_token(_admin_token_scope(org), session.access_token)
     return session.admin_id
 
 
 def clear_therapy_pms_connection(org: Organization) -> None:
-    clear_org_tpms_admin_token(org.id)
+    clear_org_tpms_admin_token(_admin_token_scope(org))
     org.integration_platform = ''
     org.integration_email = ''
     org.integration_password_encrypted = ''
@@ -237,7 +294,7 @@ def clear_therapy_pms_connection(org: Organization) -> None:
 def _admin_access_token(org: Organization) -> str:
     """Return a usable admin Bearer token, refreshing via stored credentials if needed."""
     _require_connected_org(org)
-    cached = get_org_tpms_admin_token(org.id)
+    cached = get_org_tpms_admin_token(_admin_token_scope(org))
     if cached:
         return cached
 
@@ -246,7 +303,7 @@ def _admin_access_token(org: Organization) -> str:
         payload = authenticate_admin_raw(org.integration_email, password)
         session = normalize_admin_login_payload(org.integration_email, payload)
     except TpmsAuthError as exc:
-        clear_org_tpms_admin_token(org.id)
+        clear_org_tpms_admin_token(_admin_token_scope(org))
         raise HttpError(
             400,
             'Could not refresh TherapyPMS credentials. Please reconnect.',
@@ -260,7 +317,7 @@ def _admin_access_token(org: Organization) -> str:
             'TherapyPMS credentials now resolve to a different practice. Please reconnect.',
         )
 
-    store_org_tpms_admin_token(org.id, session.access_token)
+    store_org_tpms_admin_token(_admin_token_scope(org), session.access_token)
     return session.access_token
 
 
@@ -270,7 +327,7 @@ def _with_admin_token(org: Organization, call):
         return call(token)
     except TpmsAuthError as exc:
         if exc.status_code in {401, 403}:
-            clear_org_tpms_admin_token(org.id)
+            clear_org_tpms_admin_token(_admin_token_scope(org))
             token = _admin_access_token(org)
             try:
                 return call(token)
@@ -398,6 +455,8 @@ def pull_clients(org: Organization) -> PullResult:
             Client.objects.bulk_create(to_create, batch_size=200)
         if to_update:
             Client.objects.bulk_update(to_update, list(update_attrs), batch_size=200)
+        from apps.clients.status_history import record_client_statuses
+        record_client_statuses([client.pk for client in to_create + to_update])
 
     return result
 
@@ -429,6 +488,12 @@ def _map_admin_provider(row: dict[str, Any], *, practice_admin_id: int, org_id: 
     employee_type = str(employee_type) if employee_type is not None else None
     is_admin = str(_dig(row, 'is_admin', 'isAdmin') or '').lower() in {'1', 'true', 'yes'}
     role = _tpms_role_for_employee_type(employee_type, is_admin=is_admin)
+    if 'provider_type' in row:
+        role = (
+            User.Role.SUPERVISOR
+            if str(row['provider_type']).strip().lower() == 'supervisor'
+            else User.Role.STAFF
+        )
 
     active_raw = _dig(row, 'is_active', 'is_staff_active', 'active', 'account_status')
     if active_raw is None:
@@ -527,13 +592,14 @@ def pull_providers(org: Organization) -> PullResult:
                     external_admin_id=practice_admin_id,
                     external_employee_id=employee_id,
                     organization_id=org_id,
+                    superadmin_delegated_permissions={},
                 )
                 user.set_unusable_password()
                 user.save()
                 user_changed = True
             else:
                 update_fields: list[str] = []
-                for attr in ('first_name', 'last_name', 'role', 'is_active'):
+                for attr in ('first_name', 'last_name', 'is_active', 'role'):
                     if getattr(user, attr) != fields[attr]:
                         setattr(user, attr, fields[attr])
                         update_fields.append(attr)
@@ -604,6 +670,22 @@ def pull_providers(org: Organization) -> PullResult:
 # ---------------------------------------------------------------------------
 # Appointments
 # ---------------------------------------------------------------------------
+
+def _appointment_telehealth_link(row: dict[str, Any]) -> str:
+    for key in ('zoom_link', 'telehealth_link'):
+        value = row.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        value = value.strip()
+        if len(value) > 2048:
+            continue
+        try:
+            URLValidator(schemes=['https', 'http'])(value)
+        except ValidationError:
+            continue
+        return value
+    return ''
+
 
 def _map_admin_appointment(
     row: dict[str, Any],
@@ -685,6 +767,7 @@ def _map_admin_appointment(
         'start_time': start,
         'end_time': end,
         'service_type': service,
+        'telehealth_link': _appointment_telehealth_link(row),
         'notes': notes,
         'status': status,
         'source': Appointment.Source.SYNCED,
@@ -725,13 +808,15 @@ def pull_appointments(
     to_date: date,
     patient_ids: list[int] | None = None,
     staff_ids: list[int] | None = None,
+    updated_after: str | None = None,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> PullResult:
     """Pulls appointments for [from_date, to_date] one calendar month at a
     time via _pull_appointments_window, aggregating the results. Chunking
     makes a years-long backfill tractable (each TPMS request covers at most
     one month) and gives on_progress something meaningful to report when
-    this runs as a long Celery task."""
+    this runs as a long Celery task. When updated_after is set, each window
+    also fetches changed rows and merges them by TherapyPMS appointment ID."""
     if to_date < from_date:
         raise HttpError(400, 'to_date must be on or after from_date')
 
@@ -744,10 +829,12 @@ def pull_appointments(
             to_date=window_end,
             patient_ids=patient_ids,
             staff_ids=staff_ids,
+            updated_after=updated_after,
         )
         total.created += chunk.created
         total.updated += chunk.updated
         total.skipped += chunk.skipped
+        total.cancelled += chunk.cancelled
         total.errors.extend(chunk.errors)
         if on_progress:
             on_progress(i, len(windows))
@@ -761,6 +848,7 @@ def _pull_appointments_window(
     to_date: date,
     patient_ids: list[int] | None = None,
     staff_ids: list[int] | None = None,
+    updated_after: str | None = None,
 ) -> PullResult:
     result = PullResult()
     practice_admin_id = org.integration_admin_id
@@ -770,16 +858,31 @@ def _pull_appointments_window(
     if to_date < from_date:
         raise HttpError(400, 'to_date must be on or after from_date')
 
-    def _fetch(token: str):
+    def _fetch(token: str, *, updates_only: bool = False):
         return admin_list_appointments(
             token,
             from_date=from_date.isoformat(),
             to_date=to_date.isoformat(),
             patient_ids=patient_ids,
             staff_ids=staff_ids,
+            updated_after=updated_after if updates_only else None,
         )
 
     rows = _with_admin_token(org, _fetch)
+    if updated_after:
+        update_rows = _with_admin_token(org, lambda token: _fetch(token, updates_only=True))
+        rows_by_id: dict[str, dict[str, Any]] = {}
+        rows_without_id: list[Any] = []
+        for row in [*rows, *update_rows]:
+            if not isinstance(row, dict):
+                rows_without_id.append(row)
+                continue
+            external_id = _dig(row, 'id', 'appointment_id', 'session_id')
+            if external_id is None:
+                rows_without_id.append(row)
+                continue
+            rows_by_id[str(external_id)] = row
+        rows = [*rows_by_id.values(), *rows_without_id]
 
     # Only link staff that belong to this org + practice.
     staff_by_employee = {
@@ -824,6 +927,24 @@ def _pull_appointments_window(
             pass
         mapped.append(fields)
 
+    # `rows` always includes the plain from_date/to_date fetch (see `_fetch`
+    # default updates_only=False) even when updated_after also merges in a
+    # narrower updates-only fetch, so this is the full still-exists set for
+    # the window — anything previously synced but absent here was deleted
+    # or cancelled upstream and TPMS simply stopped returning it.
+    fetched_ext_ids = {m['external_id'] for m in mapped}
+    stale_qs = Appointment.objects.filter(
+        source=Appointment.Source.SYNCED,
+        status=Appointment.Status.SCHEDULED,
+        start_time__date__gte=from_date,
+        start_time__date__lte=to_date,
+    ).exclude(external_id__in=fetched_ext_ids)
+    if patient_ids:
+        stale_qs = stale_qs.filter(external_client_id__in=patient_ids)
+    if staff_ids:
+        stale_qs = stale_qs.filter(staff_id__in=staff_ids)
+    result.cancelled += stale_qs.update(status=Appointment.Status.CANCELLED)
+
     if not mapped:
         return result
 
@@ -835,13 +956,14 @@ def _pull_appointments_window(
 
     update_attrs = (
         'external_client_id', 'staff_id', 'start_time', 'end_time',
-        'service_type', 'notes', 'status', 'synced_at',
+        'service_type', 'telehealth_link', 'notes', 'status', 'synced_at',
         'session_title', 'external_admin_id', 'billable', 'authorization_id',
         'payor_id', 'time_duration', 'cpt_code', 'external_created_at',
         'external_updated_at', 'start_time_local_raw', 'end_time_local_raw',
     )
     to_create: list[Appointment] = []
     to_update: list[Appointment] = []
+    appointment_notifications: list[tuple[Appointment, set[str], int | None]] = []
 
     for fields in mapped:
         ext_id = fields['external_id']
@@ -859,14 +981,22 @@ def _pull_appointments_window(
                 result.skipped += 1
                 continue
             changed = False
+            changed_fields: set[str] = set()
+            previous_staff_id = current.staff_id
             for attr in update_attrs:
                 value = fields.get(attr)
+                if getattr(current, attr) != value and attr in ('start_time', 'end_time', 'staff_id', 'status'):
+                    changed_fields.add(attr)
+                    if attr == 'start_time' and value and value > timezone.now():
+                        current.reminder_sent_at = None
                 if getattr(current, attr) != value:
                     setattr(current, attr, value)
                     changed = True
             if changed:
                 to_update.append(current)
                 result.updated += 1
+                if changed_fields:
+                    appointment_notifications.append((current, changed_fields, previous_staff_id))
             else:
                 result.skipped += 1
 
@@ -876,8 +1006,17 @@ def _pull_appointments_window(
         if to_update:
             Appointment.objects.bulk_update(
                 to_update,
-                list(update_attrs),
+                list(update_attrs) + ['reminder_sent_at'],
                 batch_size=200,
+            )
+
+    if appointment_notifications:
+        from apps.notifications.service import notify_appointment_changed
+        for appointment, changed_fields, previous_staff_id in appointment_notifications:
+            notify_appointment_changed(
+                appointment,
+                changed_fields,
+                previous_staff_id=previous_staff_id,
             )
 
     return result

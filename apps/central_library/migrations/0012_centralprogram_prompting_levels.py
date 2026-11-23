@@ -8,6 +8,7 @@ class Migration(migrations.Migration):
     dependencies = [
         ('central_library', '0011_alter_centralprogram_category'),
     ]
+    dependencies = [('central_library', '0011_alter_centralprogram_category')]
 
     operations = [
         migrations.AddField(

@@ -7,6 +7,7 @@ fall back to a label/value list."""
 from __future__ import annotations
 
 import io
+import base64
 import re
 from pathlib import Path
 from html.parser import HTMLParser
@@ -174,6 +175,25 @@ def html_blocks(html: str, tokens: dict) -> list[tuple]:
     parser.feed(html)
     parser.close()
     return parser.blocks
+
+
+def _signature_image_flowable(signature_data: str, max_width: float, max_height: float = 28):
+    """Create a small embedded image for PNG data-URL signatures, if present."""
+    prefix = 'data:image/png;base64,'
+    if not signature_data or not signature_data.startswith(prefix):
+        return None
+    try:
+        from reportlab.platypus import Image as ReportLabImage
+        image_bytes = base64.b64decode(signature_data[len(prefix):], validate=True)
+        from PIL import Image as PILImage
+        with PILImage.open(io.BytesIO(image_bytes)) as image:
+            if image.format != 'PNG' or image.width <= 0 or image.height <= 0:
+                return None
+            width, height = image.size
+            ratio = min(max_width / width, max_height / height)
+        return ReportLabImage(io.BytesIO(image_bytes), width=width * ratio, height=height * ratio)
+    except Exception:
+        return None
 
 
 def _client_details(note) -> tuple[str, str]:
@@ -371,15 +391,19 @@ def render_note_pdf(note) -> bytes:
         for sig in signatures:
             local = timezone.localtime(sig.signed_at)
             role = f' · {escape(sig.signer_role)}' if sig.signer_role else ''
-            boxes.append([
-                Paragraph(f'<font name="{italic}" size="14">{escape(sig.signer_name)}</font>', normal),
-                Paragraph(f'{escape(sig.get_signature_type_display())}{role}', small),
-                Paragraph(f'Signed electronically {local:%b %d, %Y at %I:%M %p}', small),
+            signature_name = Paragraph(f'<font name="{italic}" size="14">{escape(sig.signer_name)}</font>', normal)
+            image = _signature_image_flowable(sig.signature_data, doc_width / 2 - 2 * pad)
+            signer_rows = [[image]] if image else []
+            signer_rows.extend([
+                [signature_name],
+                [Paragraph(f'{escape(sig.get_signature_type_display())}{role}', small)],
+                [Paragraph(f'Signed electronically {local:%b %d, %Y at %I:%M %p}', small)],
             ])
+            boxes.append(signer_rows)
         # each signer is its own bordered card
         cards = []
         for b in boxes:
-            card = Table([[b[0]], [b[1]], [b[2]]], colWidths=[doc_width / 2 - 8])
+            card = Table(b, colWidths=[doc_width / 2 - 8])
             card.setStyle(TableStyle([
                 ('BOX', (0, 0), (-1, -1), 0.8, hexc(RULE)), ('ROUNDEDCORNERS', [6, 6, 6, 6]),
                 ('BACKGROUND', (0, 0), (-1, -1), hexc(PANEL)),

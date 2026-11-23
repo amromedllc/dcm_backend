@@ -1,6 +1,15 @@
 from datetime import date as Date, datetime
-from typing import Any
+from typing import Any, Literal
 from ninja import Schema
+from pydantic import Field
+
+
+class ObservationWindowSchema(Schema):
+    session_id: int
+    daily: float | None
+    weekly: float | None
+    monthly: float | None
+    session: float | None
 
 
 class TrialDataPointSchema(Schema):
@@ -16,7 +25,14 @@ class TrialDataPointSchema(Schema):
     total_trials: int
     correct_count: int
     pct_correct: float
+    measurement: str = 'percent_correct'
+    duration_count: int = 0
+    total_duration_seconds: float = 0
+    min_duration_seconds: float | None = None
+    max_duration_seconds: float | None = None
     duration_seconds: float
+    observation_seconds: float | None = None
+    observation_windows: list[ObservationWindowSchema] = Field(default_factory=list)
     prompt_level_sum: float = 0.0
     prompt_level_count: int = 0
 
@@ -35,7 +51,10 @@ class BehaviorDataPointSchema(Schema):
     max_duration_seconds: float = 0.0
     avg_duration_seconds: float = 0.0
     measurement: str = ''
-    measurement_value: float = 0.0
+    duration_count: int = 0
+    observation_seconds: float | None = None
+    observation_windows: list[ObservationWindowSchema] = Field(default_factory=list)
+    measurement_value: float | None = None
     measurement_label: str = 'Frequency'
     measurement_unit: str = 'count'
 
@@ -255,6 +274,7 @@ class DurationOccurrenceSchema(Schema):
     target_name: str
     index: int
     duration_seconds: int
+    meets_criteria: bool | None = None
 
 
 class AssessmentSkillSummarySchema(Schema):
@@ -281,3 +301,22 @@ class AssessmentAreaSummarySchema(Schema):
 class AssessmentProgramSummarySchema(Schema):
     program_id: int
     areas: list[AssessmentAreaSummarySchema]
+
+
+class ScatterplotCellSchema(Schema):
+    weekday: int  # Monday=0, Sunday=6
+    minute_of_day: int
+    count: int | None
+    observation_state: Literal['unobserved', 'partial', 'observed']
+    observed_seconds: float
+    expected_seconds: float
+
+
+class ScatterplotSchema(Schema):
+    date_from: Date
+    date_to: Date
+    timezone: str
+    bin_minutes: int
+    total_occurrences: int
+    total_observed_seconds: float
+    cells: list[ScatterplotCellSchema]

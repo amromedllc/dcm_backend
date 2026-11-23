@@ -1,6 +1,7 @@
 from datetime import date, datetime, time, timedelta
 import logging
 
+from django.db import IntegrityError, transaction
 from django.db.models import Count
 from django.utils import timezone
 from ninja import Router, Form, File
@@ -8,15 +9,16 @@ from ninja.files import UploadedFile
 from ninja.errors import HttpError
 
 from apps.accounts.auth import partner_auth
-from apps.accounts.permissions import require_permission, resolve_permission_organization, user_has_permission
+from apps.accounts.permissions import require_any_permission, require_permission
+from apps.clients.id_aliases import client_identifier_aliases
 from apps.programs.measurements import (
     aggregate_measurement, MEASUREMENT_LABELS,
     DURATION_MEASUREMENTS, RATE_MEASUREMENTS, BEHAVIOR_STYLE_MEASUREMENTS,
 )
 from shared.uploads import validate_media_upload
 from .models import (
-    Appointment, SessionRun, TrialEvent, BehaviorEvent, ABCEvent,
-    ABCCategory, ABCItem, SessionMedia, SessionMediaComment,
+    Appointment, SessionRun, GroupSession, TrialEvent, BehaviorEvent, ABCEvent,
+    ABCCategory, ABCItem, SessionMedia, SessionMediaComment, SessionSupervisionNote,
 )
 from .schemas import (
     SessionEditImpactSchema,
@@ -24,6 +26,7 @@ from .schemas import (
     AssignProgramsRequest, AssignedProgramSchema,
     SessionRunSchema, SessionStartRequest, SessionSubmitRequest, SessionRejectRequest,
     SessionLinkAppointmentRequest,
+    GroupSessionSchema, GroupSessionStartRequest,
     SessionSubmitResponse, TargetAdvancedSchema, TargetFadedSchema,
     TrialEventSchema, TrialEventCreateRequest,
     BehaviorEventSchema, BehaviorEventCreateRequest,
@@ -34,10 +37,23 @@ from .schemas import (
     TrialSummaryItem,
     SessionMediaSchema, SessionMediaUpdateRequest,
     SessionMediaCommentSchema, SessionMediaCommentCreateRequest,
+    SessionSupervisionNoteSchema, SessionSupervisionNoteCreateRequest,
 )
-from .services import build_program_snapshot, submit_session, approve_session, reject_session
+from .services import build_program_snapshot, resolve_session_lesson, submit_session, approve_session, reject_session
 
 router = Router(auth=partner_auth)
+
+
+_SESSION_READ_CONTEXTS = (
+    'sessions_view', 'client_sessions', 'client_history', 'client_notes',
+    'notes_view', 'notes_create', 'notes_edit', 'review_queue_view',
+    'session_start', 'sessions_manual_entry', 'session_approve',
+    'sessions_edit', 'sessions_delete', 'sessions_edit_data',
+)
+
+
+def _require_session_read(request):
+    require_any_permission(request, _SESSION_READ_CONTEXTS)
 
 
 def _require_session_start(request) -> None:
@@ -62,9 +78,13 @@ def _session_for_data_change(request, session_id: int, reason: str = ''):
 
     Open sessions follow the recording privileges (session_start, or
     sessions_manual_entry for manual ones). A session that is already
-    submitted, approved or rejected can only be changed by someone with
-    sessions_edit_data, who must give a reason. Returns (session, closed)."""
+    submitted or rejected can only be changed by someone with
+    sessions_edit_data, who must give a reason. Approved data is locked.
+    Returns (session, closed)."""
     session = _get_session_or_404(session_id, request)
+    session = SessionRun.objects.select_for_update().get(pk=session.pk)
+    if session.status == SessionRun.Status.APPROVED:
+        raise HttpError(409, 'Approved session data is locked and cannot be edited.')
     if session.status == SessionRun.Status.OPEN:
         require_permission(
             request,
@@ -78,22 +98,12 @@ def _session_for_data_change(request, session_id: int, reason: str = ''):
 
 
 def _record_closed_session_edit(request, session: SessionRun, change: str, reason: str) -> None:
-    """Audit-log a change to a completed session. A change by someone who
-    cannot approve sessions sends it back for review (approved -> submitted).
+    """Audit-log a correction to a submitted or rejected session.
     Automatic target advancement and prompt fading are NOT re-run."""
     from apps.audit.models import AuditLog
     from shared.tenancy import current_org_id_or_none
 
     status_before = session.status
-    if (
-        session.status == SessionRun.Status.APPROVED
-        and not user_has_permission(request.user, resolve_permission_organization(request), 'session_approve')
-    ):
-        session.status = SessionRun.Status.SUBMITTED
-        session.reviewed_by = None
-        session.reviewed_at = None
-        session.save(update_fields=['status', 'reviewed_by', 'reviewed_at'])
-
     AuditLog.objects.create(
         organization_id=current_org_id_or_none() or session.organization_id,
         actor_id=request.user.id,
@@ -195,6 +205,7 @@ def _get_session_or_404(session_id: int, request) -> SessionRun:
     since every caller of this helper — get/delete session, trials,
     behaviors, abc, submit, sync — otherwise had no ownership check at all.
     """
+    _require_session_read(request)
     qs = SessionRun.objects.select_related('staff').filter(
         external_client_id__in=_accessible_external_client_ids(request),
     ).order_by('-started_at')
@@ -301,10 +312,10 @@ def _build_trial_summary(session_run: SessionRun) -> list[TrialSummaryItem]:
         rows = list(
             BehaviorEvent.objects
             .filter(session_run=session_run, target_id__in=behavior_targets)
-            .values('target_id', 'target_name', 'frequency_count', 'duration_seconds')
+            .values('target_id', 'target_name', 'frequency_count', 'duration_seconds', 'occurred_at', 'observation_ended_at')
         )
         result += _behavior_summary_items(
-            rows, behavior_targets, _session_window_seconds(session_run),
+            rows, behavior_targets, _session_window_seconds(session_run), session_run,
         )
     return result
 
@@ -345,7 +356,7 @@ def _trial_summaries_for_sessions(sessions: list[SessionRun]) -> dict[int, list[
         for row in (
             BehaviorEvent.objects
             .filter(session_run_id__in=session_ids, target_id__in=all_behavior_target_ids)
-            .values('session_run_id', 'target_id', 'target_name', 'frequency_count', 'duration_seconds')
+            .values('session_run_id', 'target_id', 'target_name', 'frequency_count', 'duration_seconds', 'occurred_at', 'observation_ended_at')
         ):
             behavior_rows_by_session.setdefault(row['session_run_id'], []).append(row)
 
@@ -370,6 +381,7 @@ def _trial_summaries_for_sessions(sessions: list[SessionRun]) -> dict[int, list[
                 behavior_rows_by_session.get(session.id, []),
                 behavior_targets,
                 _session_window_seconds(session),
+                session,
             )
         result[session.id] = items
     return result
@@ -386,11 +398,12 @@ def _max_score_for_target(snapshot: dict, target_id: int) -> int | None:
     return None
 
 
-_BEHAVIOR_TARGET_TYPES = {'duration', 'rate', 'frequency'}
+_BEHAVIOR_TARGET_TYPES = {'duration', 'rate', 'frequency', 'scatterplot'}
 _DEFAULT_MEASUREMENT_FOR_TYPE = {
     'duration': 'total_observed_duration',
     'rate': 'rate_per_minute',
     'frequency': 'frequency',
+    'scatterplot': 'frequency',
 }
 
 
@@ -420,11 +433,14 @@ def _session_window_seconds(session_run: SessionRun) -> float | None:
 
 def _behavior_summary_items(
     rows: list[dict], target_measurement: dict[int, str], window_seconds: float | None,
+    session=None,
 ) -> list[TrialSummaryItem]:
     """rows: BehaviorEvent .values('target_id','target_name','frequency_count','duration_seconds')
     already scoped to one session and to target_measurement's keys."""
     grouped: dict[int, dict] = {}
     for r in rows:
+        if r.get('observation_ended_at') is not None and target_measurement.get(r['target_id']) not in RATE_MEASUREMENTS:
+            continue
         g = grouped.setdefault(r['target_id'], {'name': r['target_name'], 'count': 0, 'durations': []})
         g['count'] += r['frequency_count']
         if r['duration_seconds'] is not None:
@@ -438,9 +454,12 @@ def _behavior_summary_items(
         if measurement in DURATION_MEASUREMENTS:
             value = aggregate_measurement(measurement, durations=g['durations'])
         elif measurement in RATE_MEASUREMENTS:
+            from apps.programs.measurements import session_rate_statistics
+            count, seconds = session_rate_statistics(session, target_id, [r for r in rows if r['target_id'] == target_id]) if session else (g['count'], window_seconds)
             value = aggregate_measurement(
-                measurement, event_count=g['count'], seconds_elapsed=window_seconds,
+                measurement, event_count=count, seconds_elapsed=seconds,
             )
+            g['count'] = count
         else:
             value = float(g['count'])
         items.append(TrialSummaryItem(
@@ -497,6 +516,8 @@ def _serialize_session(
         'message_to_therapist': session.message_to_therapist,
         'status': session.status,
         'entry_method': session.entry_method,
+        'service_setting': session.service_setting,
+        'service_address': session.service_address,
         'started_at': session.started_at,
         'start_latitude': session.start_latitude,
         'start_longitude': session.start_longitude,
@@ -506,7 +527,7 @@ def _serialize_session(
         'rejection_reason': session.rejection_reason,
         'program_snapshot': session.program_snapshot,
         'trial_summary': trial_summary if trial_summary is not None else _build_trial_summary(session),
-        'behavior_event_count': behavior_event_count if behavior_event_count is not None else session.behavior_events.count(),
+        'behavior_event_count': behavior_event_count if behavior_event_count is not None else session.behavior_events.filter(observation_ended_at__isnull=True).count(),
         'abc_event_count': abc_event_count if abc_event_count is not None else session.abc_events.count(),
         'created_at': session.created_at,
     }
@@ -540,6 +561,7 @@ def list_provider_appointments(
     """Return appointments for a provider from DCM's own synced data
     (Integrations → Pull Appointments), matched via Appointment.staff's
     external_employee_id — no live TherapyPMS call."""
+    _require_session_read(request)
     qs = _appt_qs().filter(staff__external_employee_id=external_employee_id)
     if status:
         qs = qs.filter(status=status)
@@ -550,6 +572,7 @@ def list_provider_appointments(
 def my_schedule(request, date: str | None = None):
     """Return appointments for the logged-in staff member on a given date
     (defaults to today), from DCM's own synced data."""
+    _require_session_read(request)
     from datetime import date as dt_date
 
     target_date = date or dt_date.today().isoformat()
@@ -583,6 +606,7 @@ def _get_appointment_or_404(request, appt_id: int) -> Appointment:
     any staff user could read another staff member's appointment (client,
     notes, schedule) purely by guessing/incrementing an id.
     """
+    _require_session_read(request)
     qs = _appt_qs().filter(external_client_id__in=_accessible_external_client_ids(request))
     if request.user.role == 'staff':
         qs = qs.filter(staff_id=request.user.id)
@@ -600,9 +624,15 @@ def list_appointments(
     date: str | None = None,
     status: str | None = None,
 ):
+    _require_session_read(request)
     qs = _appt_qs().filter(external_client_id__in=_accessible_external_client_ids(request))
     if client_id:
-        qs = qs.filter(external_client_id=client_id)
+        qs = qs.filter(
+            external_client_id__in=(
+                _accessible_external_client_ids(request)
+                & client_identifier_aliases(client_id)
+            )
+        )
     if staff_id:
         qs = qs.filter(staff_id=staff_id)
     if date:
@@ -660,6 +690,7 @@ def get_appointment_programs(request, appt_id: int):
 
 
 @router.post('/appointments/{appt_id}/programs', response=AppointmentSchema)
+@transaction.atomic
 def assign_appointment_programs(request, appt_id: int, data: AssignProgramsRequest):
     """
     Supervisor assigns which programs to run in this appointment.
@@ -713,23 +744,33 @@ def assign_appointment_programs(request, appt_id: int, data: AssignProgramsReque
         )
 
     from apps.programs.models import Lesson, LessonProgram
+    from apps.programs.api import _validate_lesson_program_ids
+    if data.client_id is not None and appt.external_client_id not in client_identifier_aliases(data.client_id):
+        raise HttpError(404, 'Appointment not found for this client')
+    if not data.clear_assignment:
+        _validate_lesson_program_ids(request, appt.external_client_id, data.program_ids)
     from django.db import transaction
 
     with transaction.atomic():
+        appt = Appointment.objects.select_for_update().get(pk=appt.pk)
+        if appt.lesson_id:
+            appt.lesson = Lesson.objects.select_for_update().get(pk=appt.lesson_id)
         if data.clear_assignment:
             if appt.lesson_id:
                 lesson = appt.lesson
                 appt.lesson = None
                 appt.save(update_fields=['lesson'])
-                lesson.delete()
+                if not lesson.is_reusable and not lesson.appointments.exists():
+                    lesson.delete()
             return _appt_qs().get(id=appt.id)
 
-        if appt.lesson_id:
+        if appt.lesson_id and not appt.lesson.is_reusable and not appt.lesson.appointments.exclude(pk=appt.pk).exists():
             lesson = appt.lesson
         else:
             lesson = Lesson.objects.create(
                 external_client_id=data.client_id or appt.external_client_id,
                 name=appt.start_time.strftime('Session %b %d, %Y'),
+                lesson_type=Lesson.LessonType.APPOINTMENT_LINKED,
                 created_by=request.user,
             )
             appt.lesson_id = lesson.id
@@ -756,9 +797,17 @@ def update_appointment(request, appt_id: int, data: AppointmentUpdateRequest):
         )
     except Appointment.DoesNotExist:
         raise HttpError(404, 'Appointment not found')
-    for field, value in data.dict(exclude_none=True).items():
+    updates = data.dict(exclude_none=True)
+    changed_fields = {field for field, value in updates.items() if getattr(appt, field) != value}
+    previous_staff_id = appt.staff_id
+    for field, value in updates.items():
         setattr(appt, field, value)
+    if 'start_time' in changed_fields and appt.start_time > timezone.now():
+        appt.reminder_sent_at = None
     appt.save()
+    if changed_fields & {'start_time', 'end_time', 'staff_id', 'status'}:
+        from apps.notifications.service import notify_appointment_changed
+        notify_appointment_changed(appt, changed_fields, previous_staff_id=previous_staff_id)
     return appt
 
 
@@ -783,6 +832,7 @@ def _canonical_external_client_id(client_id: int) -> int:
 
 
 @router.post('/sessions', response={201: SessionRunSchema})
+@transaction.atomic
 def start_session(request, data: SessionStartRequest):
     """
     Creates a new SessionRun and immediately captures the program snapshot.
@@ -798,21 +848,33 @@ def start_session(request, data: SessionStartRequest):
     manual_started = manual_ended = None
     if data.manual:
         require_permission(request, 'sessions_manual_entry')
-        manual_started, manual_ended = _validate_manual_window(data.started_at, data.ended_at)
     else:
         _require_session_start(request)
+    require_permission(request, 'sessions_create')
+    if data.manual:
+        manual_started, manual_ended = _validate_manual_window(data.started_at, data.ended_at)
     if data.client_id not in _accessible_external_client_ids(request):
+        raise HttpError(404, 'Client not found')
+    # Serialize default changes with start so one recording captures one setup version.
+    from apps.clients.models import Client
+    clients = Client.objects.select_for_update()
+    locked_client = clients.filter(id=data.client_id).first() or clients.filter(external_id=str(data.client_id)).first()
+    if locked_client is None:
         raise HttpError(404, 'Client not found')
     external_lookup = str(data.external_appointment_id or '').strip()
     appt = (
         Appointment.objects.filter(external_id=external_lookup).select_related('lesson').first()
         if external_lookup else _find_appointment(data.appointment_id)
     ) if (data.appointment_id or external_lookup) else None
-    lesson_id = data.lesson_id or (appt.lesson_id if appt else None)
-    lesson_obj = appt.lesson if appt and appt.lesson_id else None
-    if lesson_id and lesson_obj is None:
+    if appt and (appt.external_client_id not in client_identifier_aliases(data.client_id) or (request.user.role == 'staff' and appt.staff_id != request.user.id)):
+        raise HttpError(404, 'Appointment not found for this client')
+    lesson_obj = resolve_session_lesson(
+        data.client_id, explicit_lesson_id=data.lesson_id, appointment=appt, use_default=not data.manual,
+    )
+    if lesson_obj:
         from apps.programs.models import Lesson
-        lesson_obj = Lesson.objects.filter(id=lesson_id, is_active=True).first()
+        lesson_obj = Lesson.objects.select_for_update().get(pk=lesson_obj.pk)
+    lesson_id = lesson_obj.id if lesson_obj else None
     external_appointment_id = data.appointment_id
     if external_lookup and external_lookup.isdigit():
         external_appointment_id = int(external_lookup)
@@ -821,10 +883,14 @@ def start_session(request, data: SessionStartRequest):
     snapshot = build_program_snapshot(
         client_id=data.client_id,
         lesson_id=lesson_id,
-        restrict_to_lesson=bool(data.appointment_id),
+        rate_observation_mode=data.rate_observation_mode,
+        restrict_to_lesson=False,
     )
+    if lesson_obj and not snapshot['programs']:
+        raise HttpError(400, 'This session setup has no runnable programs. Update its programs before starting.')
     session = SessionRun.objects.create(
         external_client_id=_canonical_external_client_id(data.client_id),
+        service_setting=data.service_setting or ('Telehealth' if appt and appt.telehealth_link else ''),
         staff=request.user,
         external_appointment_id=external_appointment_id,
         lesson_id=lesson_id,
@@ -843,6 +909,98 @@ def start_session(request, data: SessionStartRequest):
     return 201, _serialize_session(session)
 
 
+# ---------------------------------------------------------------------------
+# Group / co-treatment sessions (e.g. CPT 97154) — a thin shell over several
+# ordinary per-client SessionRuns, so recording/approval/reporting/billing
+# for each client works exactly as it does for a solo session. See
+# GroupSession's docstring.
+# ---------------------------------------------------------------------------
+
+def _serialize_group_session(group: GroupSession, session_runs: list[SessionRun]) -> dict:
+    staff = group.staff
+    staff_name = f'{staff.first_name} {staff.last_name}'.strip() if staff else None
+    return {
+        'id': group.id,
+        'staff_id': group.staff_id,
+        'staff_name': staff_name or (staff.email if staff else None),
+        'title': group.title,
+        'started_at': group.started_at,
+        'ended_at': group.ended_at,
+        'session_runs': [_serialize_session(sr) for sr in session_runs],
+    }
+
+
+@router.post('/group-sessions', response={201: GroupSessionSchema})
+def start_group_session(request, data: GroupSessionStartRequest):
+    """Creates a GroupSession shell plus one normal SessionRun per client in
+    data.clients — each gets its own program_snapshot, narrowed to that
+    client's chosen program_ids if given, otherwise all of their assigned
+    active programs (same default as a solo walk-in session)."""
+    _require_session_start(request)
+    require_permission(request, 'sessions_create')
+    selections = data.clients
+    client_ids = [c.client_id for c in selections]
+    if len(client_ids) < 2:
+        raise HttpError(400, 'A group session needs at least 2 clients.')
+    if len(set(client_ids)) != len(client_ids):
+        raise HttpError(400, 'Duplicate client in group roster.')
+    accessible = _accessible_external_client_ids(request)
+    for client_id in client_ids:
+        if client_id not in accessible:
+            raise HttpError(404, f'Client {client_id} not found')
+
+    from django.db import transaction
+    with transaction.atomic():
+        group = GroupSession.objects.create(
+            staff=request.user,
+            title=data.title,
+            created_by=request.user,
+        )
+        session_runs = []
+        for selection in selections:
+            snapshot = build_program_snapshot(
+                client_id=selection.client_id,
+                lesson_id=None,
+                rate_observation_mode=data.rate_observation_mode,
+                restrict_to_lesson=False,
+                program_ids=selection.program_ids or None,
+            )
+            session_runs.append(SessionRun.objects.create(
+                external_client_id=_canonical_external_client_id(selection.client_id),
+                service_setting=data.service_setting,
+                staff=request.user,
+                group_session=group,
+                program_snapshot=snapshot,
+                start_latitude=data.latitude,
+                start_longitude=data.longitude,
+                created_by=request.user,
+            ))
+    return 201, _serialize_group_session(group, session_runs)
+
+
+@router.get('/group-sessions/{group_id}', response=GroupSessionSchema)
+def get_group_session(request, group_id: int):
+    group = GroupSession.objects.filter(id=group_id).first()
+    if group is None:
+        raise HttpError(404, 'Group session not found')
+    session_runs = list(group.session_runs.select_related('staff').all())
+    accessible = _accessible_external_client_ids(request)
+    if any(sr.external_client_id not in accessible for sr in session_runs):
+        raise HttpError(404, 'Group session not found')
+    return _serialize_group_session(group, session_runs)
+
+
+@router.get('/group-sessions', response=list[GroupSessionSchema])
+def list_group_sessions(request, date: str | None = None):
+    require_permission(request, 'sessions_view')
+    qs = GroupSession.objects.filter(staff=request.user).prefetch_related('session_runs__staff')
+    if date:
+        day = datetime.strptime(date, '%Y-%m-%d').date()
+        qs = qs.filter(started_at__date=day)
+    groups = list(qs[:50])
+    return [_serialize_group_session(g, list(g.session_runs.all())) for g in groups]
+
+
 @router.get('/sessions', response=list[SessionRunSchema])
 def list_sessions(
     request,
@@ -852,6 +1010,7 @@ def list_sessions(
     date_from: date | None = None,
     date_to: date | None = None,
 ):
+    _require_session_read(request)
     def day_bound(day: date, value: time):
         dt = datetime.combine(day, value)
         return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
@@ -891,7 +1050,7 @@ def list_sessions(
     session_ids = [s.id for s in sessions]
     trial_summaries = _trial_summaries_for_sessions(sessions)
     behavior_counts = dict(
-        BehaviorEvent.objects.filter(session_run_id__in=session_ids)
+        BehaviorEvent.objects.filter(session_run_id__in=session_ids, observation_ended_at__isnull=True)
         .values('session_run_id').annotate(c=Count('id')).values_list('session_run_id', 'c')
     )
     abc_counts = dict(
@@ -915,6 +1074,47 @@ def list_sessions(
 def get_session(request, session_id: int):
     session = _get_session_or_404(session_id, request)
     return _serialize_session(session)
+
+
+@router.get('/sessions/{session_id}/supervision-notes', response=list[SessionSupervisionNoteSchema])
+def list_supervision_notes(request, session_id: int):
+    session = _get_session_or_404(session_id, request)
+    return [
+        SessionSupervisionNoteSchema(
+            id=note.id,
+            session_run_id=note.session_run_id,
+            body=note.body,
+            note_type=note.note_type,
+            author=note.created_by.full_name or note.created_by.email if note.created_by_id else None,
+            created_at=note.created_at,
+        )
+        for note in session.supervision_notes.select_related('created_by')
+    ]
+
+
+@router.post('/sessions/{session_id}/supervision-notes', response={201: SessionSupervisionNoteSchema})
+def create_supervision_note(request, session_id: int, data: SessionSupervisionNoteCreateRequest):
+    require_permission(request, 'session_approve')
+    session = _get_session_or_404(session_id, request)
+    if session.status != SessionRun.Status.OPEN:
+        raise HttpError(409, 'Supervision notes can only be added while the session is live')
+    body = data.body.strip()
+    if not body:
+        raise HttpError(400, 'Supervision note cannot be empty')
+    note = SessionSupervisionNote.objects.create(
+        session_run=session,
+        body=body,
+        note_type=data.note_type,
+        created_by=request.user,
+    )
+    return 201, SessionSupervisionNoteSchema(
+        id=note.id,
+        session_run_id=note.session_run_id,
+        body=note.body,
+        note_type=note.note_type,
+        author=request.user.full_name or request.user.email,
+        created_at=note.created_at,
+    )
 
 
 @router.post('/sessions/{session_id}/link-appointment', response=SessionRunSchema)
@@ -952,10 +1152,17 @@ def link_session_appointment(request, session_id: int, data: SessionLinkAppointm
 @router.delete('/sessions/{session_id}', response={204: None})
 def delete_session(request, session_id: int):
     """Discard an open session that has no recorded data yet."""
+    require_permission(request, 'sessions_delete')
     session = _require_recording_access(request, session_id)
     if session.status != SessionRun.Status.OPEN:
         raise HttpError(409, 'Only open sessions can be deleted')
+    group_session_id = session.group_session_id
     session.delete()
+    # Discarding the last client's session out of a group leaves an empty,
+    # pointless shell behind otherwise — clean it up rather than cluttering
+    # the group sessions list with 0-client groups.
+    if group_session_id and not SessionRun.objects.filter(group_session_id=group_session_id).exists():
+        GroupSession.objects.filter(id=group_session_id).delete()
     return 204, None
 
 
@@ -969,18 +1176,37 @@ def list_trials(request, session_id: int):
     return list(TrialEvent.objects.filter(session_run_id=session_id))
 
 
+def _get_or_create_trial(session_id, payload):
+    client_id = payload.get('client_event_id')
+    if not client_id:
+        return TrialEvent.objects.create(session_run_id=session_id, **payload), True
+    values = dict(payload)
+    values.pop('client_event_id')
+    try:
+        with transaction.atomic():
+            trial, created = TrialEvent.objects.get_or_create(
+                session_run_id=session_id, client_event_id=client_id, defaults=values)
+    except IntegrityError as exc:
+        raise HttpError(409, 'This trial number is already recorded. Review the session before retrying this entry.') from exc
+    if not created and any(getattr(trial, field) != value for field, value in values.items()):
+        raise HttpError(409, 'This event ID was already used with different trial data. The original entry was preserved.')
+    return trial, created
+
+
 @router.post('/sessions/{session_id}/trials', response={201: TrialEventSchema})
+@transaction.atomic
 def add_trial(request, session_id: int, data: TrialEventCreateRequest, reason: str = ''):
     session, closed = _session_for_data_change(request, session_id, reason)
     payload = data.dict()
     payload['recorded_at'] = _clamp_to_manual_window(session, payload['recorded_at'])
-    trial = TrialEvent.objects.create(session_run_id=session_id, **payload)
-    if closed:
+    trial, created = _get_or_create_trial(session_id, payload)
+    if closed and created:
         _record_closed_session_edit(request, session, f"Added trial {payload['trial_number']} for {payload['target_name']}", reason)
     return 201, trial
 
 
 @router.delete('/sessions/{session_id}/trials/{trial_id}', response={204: None})
+@transaction.atomic
 def delete_trial(request, session_id: int, trial_id: int, reason: str = ''):
     session, closed = _session_for_data_change(request, session_id, reason)
     try:
@@ -998,24 +1224,36 @@ def delete_trial(request, session_id: int, trial_id: int, reason: str = ''):
 # Behavior events
 # ---------------------------------------------------------------------------
 
+def _validate_scatterplot_observation(session: SessionRun, data: BehaviorEventCreateRequest) -> None:
+    if data.observation_ended_at is None:
+        return
+    target = next((target for program in session.program_snapshot.get('programs', [])
+                   for target in program.get('targets', []) if target.get('id') == data.target_id), None)
+    if not target or target.get('measurement_type') not in {'scatterplot', 'rate'}:
+        raise HttpError(400, 'Observed periods require a scatterplot or rate target in this session snapshot')
+    if target.get('measurement_type') == 'rate' and target.get('measurement', 'rate_per_minute') not in RATE_MEASUREMENTS:
+        raise HttpError(400, 'Rate observation periods require Rate / minute or Rate / hour measurement')
+    end = data.observation_ended_at
+    limit = session.ended_at or getattr(session, 'submitted_at', None) or getattr(session, 'reviewed_at', None) or timezone.now()
+    if data.occurred_at < session.started_at or end > limit or end > timezone.now():
+        raise HttpError(400, 'Observed period must be inside the session window and cannot end in the future')
+
+
 def _get_or_create_behavior(session_id: int, data: BehaviorEventCreateRequest) -> tuple[BehaviorEvent, bool]:
-    """
-    Upserts on (session, client_event_id) when the mobile offline queue sends
-    one — closes the crash window where a sync call reaches the server but
-    the app dies before the local row can be flagged synced, which would
-    otherwise resend and duplicate on retry (unlike trials, behavior events
-    have no natural (target, trial_number) key to dedupe on). Falls back to
-    a plain create when no client_event_id is sent (e.g. from the web app,
-    which has no offline queue and nothing to dedupe against).
-    """
+    """Stable IDs deduplicate both occurrences and explicit observed periods."""
+    if data.observation_ended_at is not None:
+        _validate_scatterplot_observation(SessionRun.objects.get(pk=session_id), data)
     payload = data.dict()
     client_event_id = payload.pop('client_event_id', None)
     if client_event_id:
-        return BehaviorEvent.objects.get_or_create(
-            session_run_id=session_id,
-            client_event_id=client_event_id,
-            defaults=payload,
+        event, created = BehaviorEvent.objects.get_or_create(
+            session_run_id=session_id, client_event_id=client_event_id, defaults=payload,
         )
+        # Never silently acknowledge a different observed interval on a reused ID.
+        if not created and (data.observation_ended_at is not None or event.observation_ended_at is not None):
+            if any(getattr(event, key) != value for key, value in payload.items()):
+                raise HttpError(409, 'Conflicting observation for this client_event_id')
+        return event, created
     return BehaviorEvent.objects.create(session_run_id=session_id, **payload), True
 
 
@@ -1026,23 +1264,26 @@ def list_behaviors(request, session_id: int):
 
 
 @router.post('/sessions/{session_id}/behaviors', response={201: BehaviorEventSchema})
+@transaction.atomic
 def add_behavior(request, session_id: int, data: BehaviorEventCreateRequest, reason: str = ''):
     session, closed = _session_for_data_change(request, session_id, reason)
-    data.occurred_at = _clamp_to_manual_window(session, data.occurred_at)
+    if data.observation_ended_at is None:
+        data.occurred_at = _clamp_to_manual_window(session, data.occurred_at)
     event, created = _get_or_create_behavior(session_id, data)
     if closed and created:
-        _record_closed_session_edit(request, session, f'Added behavior event for {event.target_name}', reason)
+        _record_closed_session_edit(request, session, f'Added {"observed period" if event.observation_ended_at else "behavior event"} for {event.target_name}', reason)
     return 201, event
 
 
 @router.delete('/sessions/{session_id}/behaviors/{event_id}', response={204: None})
+@transaction.atomic
 def delete_behavior(request, session_id: int, event_id: int, reason: str = ''):
     session, closed = _session_for_data_change(request, session_id, reason)
     try:
         event = BehaviorEvent.objects.get(id=event_id, session_run_id=session_id)
     except BehaviorEvent.DoesNotExist:
         raise HttpError(404, 'Behavior event not found')
-    description = f'Deleted behavior event for {event.target_name}'
+    description = f'Deleted {"observed period" if event.observation_ended_at else "behavior event"} for {event.target_name}'
     event.delete()
     if closed:
         _record_closed_session_edit(request, session, description, reason)
@@ -1189,6 +1430,7 @@ def list_abc(request, session_id: int):
 
 
 @router.post('/sessions/{session_id}/abc', response={201: ABCEventSchema})
+@transaction.atomic
 def add_abc(request, session_id: int, data: ABCEventCreateRequest, reason: str = ''):
     session, closed = _session_for_data_change(request, session_id, reason)
     data.occurred_at = _clamp_to_manual_window(session, data.occurred_at)
@@ -1199,6 +1441,7 @@ def add_abc(request, session_id: int, data: ABCEventCreateRequest, reason: str =
 
 
 @router.delete('/sessions/{session_id}/abc/{event_id}', response={204: None})
+@transaction.atomic
 def delete_abc(request, session_id: int, event_id: int, reason: str = ''):
     session, closed = _session_for_data_change(request, session_id, reason)
     try:
@@ -1263,7 +1506,7 @@ def submit(request, session_id: int, data: SessionSubmitRequest):
     session = _require_recording_access(request, session_id)
     if data.ended_at and session.entry_method != SessionRun.EntryMethod.MANUAL:
         session.ended_at = data.ended_at
-    advanced, faded = submit_session(session, request.user)
+    advanced, faded = submit_session(session, request.user, service_address=data.service_address)
     return {
         'session': _serialize_session(session),
         'advanced_targets': [
@@ -1286,17 +1529,21 @@ def submit(request, session_id: int, data: SessionSubmitRequest):
 
 
 @router.post('/sessions/{session_id}/approve', response=SessionRunSchema)
+@transaction.atomic
 def approve(request, session_id: int):
     require_permission(request, 'session_approve')
     session = _get_session_or_404(session_id, request)
+    session = SessionRun.objects.select_for_update().get(pk=session.pk)
     approve_session(session, request.user)
     return _serialize_session(session)
 
 
 @router.post('/sessions/{session_id}/reject', response=SessionRunSchema)
+@transaction.atomic
 def reject(request, session_id: int, data: SessionRejectRequest):
     require_permission(request, 'session_approve')
     session = _get_session_or_404(session_id, request)
+    session = SessionRun.objects.select_for_update().get(pk=session.pk)
     reject_session(session, request.user, data.reason)
     return _serialize_session(session)
 
@@ -1306,6 +1553,7 @@ def reject(request, session_id: int, data: SessionRejectRequest):
 # ---------------------------------------------------------------------------
 
 @router.post('/sessions/{session_id}/sync', response=SessionSyncResult)
+@transaction.atomic
 def sync_session(request, session_id: int, data: SessionSyncPayload):
     """
     Idempotent batch endpoint for the mobile offline workflow.
@@ -1317,6 +1565,7 @@ def sync_session(request, session_id: int, data: SessionSyncPayload):
     sends one — see _get_or_create_behavior/_get_or_create_abc.
     """
     session = _require_recording_access(request, session_id)
+    session = SessionRun.objects.select_for_update().get(pk=session.pk)
     if not session.is_editable:
         raise HttpError(409, f'Session is {session.status} — sync not allowed')
 
@@ -1326,20 +1575,23 @@ def sync_session(request, session_id: int, data: SessionSyncPayload):
 
     trials_created = 0
     for t in data.trials:
-        _, created = TrialEvent.objects.get_or_create(
-            session_run_id=session_id,
-            target_id=t.target_id,
-            trial_number=t.trial_number,
-            sub_item_key=t.sub_item_key,
-            defaults={
-                'target_name': t.target_name,
-                'response_score': t.response_score,
-                'prompt_level_label': t.prompt_level_label,
-                'value_seconds': t.value_seconds,
-                'recorded_at': t.recorded_at,
-                'staff_notes': t.staff_notes,
-            },
-        )
+        if t.client_event_id:
+            _, created = _get_or_create_trial(session_id, t.dict())
+        else:
+            _, created = TrialEvent.objects.get_or_create(
+                session_run_id=session_id,
+                target_id=t.target_id,
+                trial_number=t.trial_number,
+                sub_item_key=t.sub_item_key,
+                defaults={
+                    'target_name': t.target_name,
+                    'response_score': t.response_score,
+                    'prompt_level_label': t.prompt_level_label,
+                    'value_seconds': t.value_seconds,
+                    'recorded_at': t.recorded_at,
+                    'staff_notes': t.staff_notes,
+                },
+            )
         if created:
             trials_created += 1
 
@@ -1357,7 +1609,7 @@ def sync_session(request, session_id: int, data: SessionSyncPayload):
 
     submitted = False
     if data.submit_after_sync:
-        submit_session(session, request.user)
+        submit_session(session, request.user, service_address=data.service_address)
         submitted = True
 
     return SessionSyncResult(
@@ -1393,7 +1645,10 @@ def _serialize_media(media: SessionMedia, request) -> SessionMediaSchema:
 
 def _get_media_or_404(media_id: int, request) -> SessionMedia:
     """Same ownership rule as _get_session_or_404 — staff only reach media on their own sessions."""
-    qs = SessionMedia.objects.select_related('session_run', 'created_by', 'reviewed_by')
+    _require_session_read(request)
+    qs = SessionMedia.objects.select_related('session_run', 'created_by', 'reviewed_by').filter(
+        session_run__external_client_id__in=_accessible_external_client_ids(request),
+    )
     if request.user.role == 'staff':
         qs = qs.filter(session_run__staff_id=request.user.id)
     try:
@@ -1454,6 +1709,7 @@ def update_session_media(request, media_id: int, data: SessionMediaUpdateRequest
     is_uploader = media.created_by_id == request.user.id
 
     if data.review_status is not None:
+        require_permission(request, 'session_approve')
         if not is_reviewer:
             raise HttpError(403, 'Only a supervisor or admin can change review status')
         if data.review_status not in SessionMedia.ReviewStatus.values:
@@ -1463,6 +1719,10 @@ def update_session_media(request, media_id: int, data: SessionMediaUpdateRequest
         media.reviewed_at = timezone.now()
 
     if data.caption is not None:
+        if is_reviewer:
+            require_permission(request, 'session_approve')
+        else:
+            _require_recording_access(request, media.session_run_id)
         if not (is_reviewer or is_uploader):
             raise HttpError(403, 'Only the uploader, a supervisor, or an admin can edit the caption')
         media.caption = data.caption
@@ -1474,6 +1734,10 @@ def update_session_media(request, media_id: int, data: SessionMediaUpdateRequest
 @router.delete('/media/{media_id}', response={204: None})
 def delete_session_media(request, media_id: int):
     media = _get_media_or_404(media_id, request)
+    if request.user.role in ('admin', 'supervisor'):
+        require_permission(request, 'session_approve')
+    else:
+        _require_recording_access(request, media.session_run_id)
     if not (request.user.role in ('admin', 'supervisor') or media.created_by_id == request.user.id):
         raise HttpError(403, 'Only the uploader, a supervisor, or an admin can delete this')
     media.file.delete(save=False)

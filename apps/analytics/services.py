@@ -1,14 +1,17 @@
 from collections import Counter, defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from typing import TypedDict
 
-from apps.programs.models import Program, Target, ProgramModule, ProgramSubmodule, TargetSubItem
+from django.utils import timezone as dj_timezone
+
+from apps.programs.models import Program, Target, ProgramModule, ProgramSubmodule, TargetSubItem, default_measurement
 from apps.programs.measurements import (
     aggregate_measurement, MEASUREMENT_LABELS, MEASUREMENT_UNIT,
     DURATION_MEASUREMENTS, RATE_MEASUREMENTS, objective_key_for_measurement,
 )
 from apps.sessions.models import TrialEvent, BehaviorEvent, ABCEvent, SessionRun
 from .models import AssessmentRecord
+from .measurement_windows import session_seconds_on_day, session_window_statistics, chart_rate
 
 
 # ---------------------------------------------------------------------------
@@ -26,7 +29,14 @@ class TrialDataPoint(TypedDict):
     total_trials: int
     correct_count: int
     pct_correct: float
+    measurement: str
+    duration_count: int
+    total_duration_seconds: float
+    min_duration_seconds: float | None
+    max_duration_seconds: float | None
     duration_seconds: float
+    observation_seconds: float | None
+    observation_windows: list[dict]
     prompt_level_sum: float
     prompt_level_count: int
 
@@ -45,7 +55,10 @@ class BehaviorDataPoint(TypedDict):
     max_duration_seconds: float
     avg_duration_seconds: float
     measurement: str
-    measurement_value: float
+    measurement_value: float | None
+    duration_count: int
+    observation_seconds: float | None
+    observation_windows: list[dict]
     measurement_label: str
     measurement_unit: str
 
@@ -177,9 +190,11 @@ def _submodule_name_map(submodule_ids: set[int]) -> dict[int, str]:
 
 def _sub_item_series(target_ids: list[int]) -> dict[tuple[int, str], dict]:
     result: dict[tuple[int, str], dict] = {}
-    for item in TargetSubItem.objects.filter(target_id__in=target_ids).select_related('target'):
+    for item in TargetSubItem.objects.filter(target_id__in=target_ids).select_related('target', 'prompting_template'):
         result[(item.target_id, item.key)] = {
             'series_id': -item.id,
+            'measurement': item.measurement or default_measurement(item.measurement_type),
+            'success_score': item.prompting_template.success_score() if item.prompting_template else None,
             'name': f'{item.target.name} > {item.label}',
             'status': item.status,
             'target': item.target,
@@ -242,7 +257,7 @@ def get_trial_data_by_day(
     base_fields = [
         'recorded_at__date', 'target_id', 'target_name', 'response_score',
         'sub_item_key', 'session_run_id', 'prompt_level_label',
-        'session_run__started_at',
+        'session_run__started_at', 'value_seconds',
     ]
     qs = TrialEvent.objects.filter(
         target_id__in=target_ids,
@@ -255,14 +270,20 @@ def get_trial_data_by_day(
         raw = list(qs.values(*base_fields))
 
     session_ids = {e['session_run_id'] for e in raw}
-    session_seconds: dict[int, float] = {
-        s.id: (s.ended_at - s.started_at).total_seconds()
-        for s in SessionRun.objects.filter(id__in=session_ids, ended_at__isnull=False).only('id', 'started_at', 'ended_at')
+    sessions = {
+        session.id: session
+        for session in SessionRun.objects.filter(id__in=session_ids).only(
+            'id', 'started_at', 'ended_at', 'submitted_at', 'reviewed_at',
+        )
+    }
+    session_seconds = {
+        sid: (session.ended_at - session.started_at).total_seconds()
+        for sid, session in sessions.items() if session.ended_at
     }
 
     target_meta: dict[int, dict] = {
-        t.id: {'module_id': t.module_id, 'submodule_id': t.submodule_id}
-        for t in Target.objects.filter(id__in=target_ids).only('id', 'module_id', 'submodule_id')
+        t.id: {'module_id': t.module_id, 'submodule_id': t.submodule_id, 'measurement': t.measurement or default_measurement(t.measurement_type)}
+        for t in Target.objects.filter(id__in=target_ids).only('id', 'module_id', 'submodule_id', 'measurement', 'measurement_type')
     }
     mod_ids = {m['module_id'] for m in target_meta.values() if m['module_id']}
     sub_ids = {m['submodule_id'] for m in target_meta.values() if m['submodule_id']}
@@ -272,7 +293,7 @@ def get_trial_data_by_day(
 
     grouped: dict[tuple, dict] = defaultdict(lambda: {
         'total': 0, 'correct': 0, 'name': '', 'parent_target_id': None, 'session_ids': set(),
-        'prompt_rank_sum': 0.0, 'prompt_rank_count': 0,
+        'prompt_rank_sum': 0.0, 'prompt_rank_count': 0, 'durations': [], 'measurement': 'percent_correct',
     })
     for event in raw:
         if group_by == 'prompt_level':
@@ -297,15 +318,31 @@ def get_trial_data_by_day(
             series_id = child['series_id'] if child else event['target_id']
             series_name = child['name'] if child else event['target_name']
 
+        measurement = target_meta.get(event['target_id'], {}).get('measurement') or 'percent_correct'
+        if group_by == 'target':
+            child = child_series.get((event['target_id'], event.get('sub_item_key') or ''))
+            if child:
+                # Child duration steps store seconds on TrialEvent rather than BehaviorEvent.
+                measurement = child['measurement']
+        else:
+            measurement = 'percent_correct'
+
         bucket = event['session_run_id'] if x_axis == 'session' else event['recorded_at__date']
         key = (bucket, series_id)
+        grouped[key]['measurement'] = measurement
+        if event['value_seconds'] is not None:
+            grouped[key]['durations'].append(event['value_seconds'])
         grouped[key]['total'] += 1
         grouped[key]['name'] = series_name
         grouped[key]['parent_target_id'] = event['target_id']
         grouped[key]['session_ids'].add(event['session_run_id'])
-        grouped[key]['date'] = event['recorded_at__date']
+        grouped[key]['date'] = min(grouped[key].get('date', event['recorded_at__date']), event['recorded_at__date'])
         grouped[key]['started_at'] = event.get('session_run__started_at')
         max_score = max_scores.get(event['target_id'])
+        if group_by == 'target':
+            child = child_series.get((event['target_id'], event.get('sub_item_key') or ''))
+            if child and child['success_score'] is not None:
+                max_score = child['success_score']
         is_correct = (
             event['response_score'] >= max_score if max_score is not None
             else event['response_score'] > 0
@@ -345,10 +382,30 @@ def get_trial_data_by_day(
         mid = meta.get('module_id') if group_by in {'target', 'module'} else None
         subid = meta.get('submodule_id') if group_by in {'target', 'submodule'} else None
         duration_seconds = sum(session_seconds.get(rid, 0.0) for rid in data['session_ids'])
+        windows = []
+        observation_windows = []
+        for rid in data['session_ids']:
+            session = sessions.get(rid)
+            start = session.started_at if session else None
+            end = (session.ended_at or session.submitted_at or session.reviewed_at) if session else None
+            observation_windows.append(session_window_statistics(rid, start, end, data['date'], dj_timezone.get_current_timezone(), date_from, date_to))
+            if x_axis == 'session':
+                seconds = (end.timestamp() - start.timestamp()) if start and end and end > start else None
+            else:
+                seconds = session_seconds_on_day(start, end, data['date'], dj_timezone.get_current_timezone())
+            windows.append(seconds)
+        observation_seconds = sum(windows) if windows and all(w is not None for w in windows) else None
         session_id = bucket if x_axis == 'session' and isinstance(bucket, int) else None
         point_date = data.get('date') or bucket
         result.append({
             'date': point_date,
+            'observation_seconds': observation_seconds,
+            'observation_windows': observation_windows,
+            'measurement': data['measurement'],
+            'duration_count': len(data['durations']),
+            'total_duration_seconds': sum(data['durations']),
+            'min_duration_seconds': min(data['durations']) if data['durations'] else None,
+            'max_duration_seconds': max(data['durations']) if data['durations'] else None,
             'session_id': session_id,
             'session_label': f'Session {session_order.get(session_id)}' if session_id else None,
             'target_id': sid,
@@ -381,7 +438,7 @@ def get_behavior_data_by_day(
         return []
 
     raw = list(
-        BehaviorEvent.objects
+        BehaviorEvent.objects.filter(observation_ended_at__isnull=True)
         .filter(
             target_id__in=target_ids,
             occurred_at__date__gte=date_from,
@@ -389,14 +446,21 @@ def get_behavior_data_by_day(
         )
         .values(
             'occurred_at__date', 'occurred_at', 'target_id', 'target_name',
-            'frequency_count', 'duration_seconds',
+            'frequency_count', 'duration_seconds', 'session_run_id',
         )
     )
 
+    sessions = {
+        session.id: session
+        for session in SessionRun.objects.filter(id__in={e['session_run_id'] for e in raw}).only(
+            'id', 'started_at', 'ended_at', 'submitted_at', 'reviewed_at',
+        )
+    }
+
     target_meta: dict[int, dict] = {
-        t.id: {'module_id': t.module_id, 'submodule_id': t.submodule_id, 'measurement': t.measurement}
+        t.id: {'module_id': t.module_id, 'submodule_id': t.submodule_id, 'measurement': t.measurement or default_measurement(t.measurement_type)}
         for t in Target.objects.filter(id__in=target_ids).only(
-            'id', 'module_id', 'submodule_id', 'measurement',
+            'id', 'module_id', 'submodule_id', 'measurement', 'measurement_type',
         )
     }
     mod_ids = {m['module_id'] for m in target_meta.values() if m['module_id']}
@@ -405,7 +469,7 @@ def get_behavior_data_by_day(
     sub_names = _submodule_name_map(sub_ids)
 
     grouped: dict[tuple, dict] = defaultdict(
-        lambda: {'freq': 0, 'dur': 0, 'name': '', 'durations': [], 'first': None, 'last': None}
+        lambda: {'freq': 0, 'dur': 0, 'name': '', 'durations': [], 'session_ids': set()}
     )
     for event in raw:
         key = (event['occurred_at__date'], event['target_id'])
@@ -415,9 +479,7 @@ def get_behavior_data_by_day(
         g['name'] = event['target_name']
         if event['duration_seconds'] is not None:
             g['durations'].append(event['duration_seconds'])
-        ts = event['occurred_at']
-        g['first'] = ts if g['first'] is None or ts < g['first'] else g['first']
-        g['last'] = ts if g['last'] is None or ts > g['last'] else g['last']
+        g['session_ids'].add(event['session_run_id'])
 
     result: list[BehaviorDataPoint] = []
     for (day, tid), data in sorted(grouped.items()):
@@ -426,17 +488,30 @@ def get_behavior_data_by_day(
         sid = meta.get('submodule_id')
         measurement = meta.get('measurement') or ''
 
+        windows = []
+        observation_windows = []
+        for session_id in data['session_ids']:
+            session = sessions.get(session_id)
+            observation_windows.append(session_window_statistics(
+                session_id, session.started_at if session else None,
+                (session.ended_at or session.submitted_at or session.reviewed_at) if session else None,
+                day, dj_timezone.get_current_timezone(), date_from, date_to,
+            ))
+            windows.append(session_seconds_on_day(
+                session.started_at if session else None,
+                (session.ended_at or session.submitted_at or session.reviewed_at) if session else None,
+                day, dj_timezone.get_current_timezone(),
+            ))
+        observation_seconds = sum(windows) if windows and all(w is not None for w in windows) else None
         if measurement in DURATION_MEASUREMENTS:
-            value = aggregate_measurement(measurement, durations=data['durations'])
+            value = aggregate_measurement(measurement, durations=data['durations']) if data['durations'] else None
         elif measurement in RATE_MEASUREMENTS:
-            span = (
-                (data['last'] - data['first']).total_seconds()
-                if data['first'] and data['last'] and data['last'] > data['first']
-                else None
-            )
-            value = aggregate_measurement(measurement, event_count=data['freq'], seconds_elapsed=span)
+            value = chart_rate(data['freq'], observation_seconds, measurement == 'rate_per_hour')
+        elif measurement == 'percent_correct':
+            # Occurrences have no correct/incorrect response denominator.
+            value = None
         else:
-            value = float(data['freq'])  # frequency / percent_correct / legacy
+            value = float(data['freq'])
 
         durations = data['durations']
         result.append({
@@ -453,10 +528,88 @@ def get_behavior_data_by_day(
             'max_duration_seconds': round(max(durations), 2) if durations else 0.0,
             'avg_duration_seconds': round(sum(durations) / len(durations), 2) if durations else 0.0,
             'measurement': measurement,
-            'measurement_value': round(value, 2),
+            'duration_count': len(durations),
+            'observation_seconds': observation_seconds,
+            'observation_windows': observation_windows,
+            'measurement_value': round(value, 6) if value is not None else None,
             'measurement_label': MEASUREMENT_LABELS.get(measurement, 'Frequency'),
             'measurement_unit': MEASUREMENT_UNIT.get(measurement, 'count'),
         })
+    # Explicit rate periods use their own denominator, including observed
+    # zero-occurrence days. Legacy snapshots keep their original session basis.
+    rate_ids = [tid for tid, meta in target_meta.items() if meta['measurement'] in RATE_MEASUREMENTS]
+    if rate_ids:
+        explicit = _target_rate_data(rate_ids, target_meta, date_from, date_to, mod_names, sub_names)
+        replaced = {(point['date'], point['target_id']) for point in explicit}
+        result = [point for point in result if (point['date'], point['target_id']) not in replaced]
+        result.extend(explicit)
+    return sorted(result, key=lambda point: (point['date'], point['target_id']))
+
+
+def _target_rate_data(target_ids, metadata, date_from, date_to, mod_names, sub_names):
+    from apps.programs.measurements import rate_statistics, uses_target_windows
+
+    zone = dj_timezone.get_current_timezone()
+    lower = datetime.combine(date_from, time.min, tzinfo=zone)
+    upper = datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=zone)
+    # Include periods crossing the selected date range and all occurrences in
+    # their sessions, then clip numerators and coverage to each chart bucket.
+    from django.db.models import Q
+    rows = list(BehaviorEvent.objects.filter(target_id__in=target_ids).filter(
+        Q(occurred_at__gte=lower, occurred_at__lt=upper)
+        | Q(observation_ended_at__gt=lower, occurred_at__lt=upper),
+    ).values('target_id', 'target_name', 'session_run_id', 'occurred_at',
+             'observation_ended_at', 'frequency_count'))
+    sessions = {session.id: session for session in SessionRun.objects.filter(
+        id__in={row['session_run_id'] for row in rows},
+    ).only('id', 'program_snapshot', 'started_at', 'ended_at', 'submitted_at', 'reviewed_at')}
+    grouped = defaultdict(list)
+    for row in rows:
+        grouped[(row['target_id'], row['session_run_id'])].append(row)
+    daily = {}
+    for (tid, session_id), events in grouped.items():
+        session = sessions.get(session_id)
+        if not session:
+            continue
+        explicit = uses_target_windows(session.program_snapshot, tid) or any(e['observation_ended_at'] for e in events)
+        legacy = None if explicit else (session.started_at, session.ended_at or session.submitted_at or session.reviewed_at)
+        day = date_from
+        while day <= date_to:
+            start = datetime.combine(day, time.min, tzinfo=zone)
+            end = datetime.combine(day + timedelta(days=1), time.min, tzinfo=zone)
+            count, seconds = rate_statistics(events, lower=start, upper=end, legacy_window=legacy)
+            # Unknown coverage remains visible for occurrence days, never zero.
+            has_events = any(e['observation_ended_at'] is None and start <= e['occurred_at'] < end for e in events)
+            if seconds is not None or has_events:
+                key = (day, tid)
+                entry = daily.setdefault(key, {'count': 0, 'seconds': 0, 'unknown': False, 'windows': [], 'name': events[0]['target_name']})
+                entry['count'] += count
+                entry['seconds'] += seconds or 0
+                entry['unknown'] |= seconds is None
+                week = day - timedelta(days=day.weekday())
+                month = day.replace(day=1)
+                next_month = (month.replace(day=28) + timedelta(days=4)).replace(day=1)
+                def bucket(first, after):
+                    return rate_statistics(events,
+                        lower=max(lower, datetime.combine(first, time.min, tzinfo=zone)),
+                        upper=min(upper, datetime.combine(after, time.min, tzinfo=zone)), legacy_window=legacy)[1]
+                entry['windows'].append({'session_id': session_id, 'daily': seconds,
+                    'weekly': bucket(week, week + timedelta(days=7)),
+                    'monthly': bucket(month, next_month), 'session': bucket(date_from, date_to + timedelta(days=1))})
+            day += timedelta(days=1)
+    result = []
+    for (day, tid), data in daily.items():
+        meta = metadata[tid]
+        measurement = meta['measurement']
+        seconds = None if data['unknown'] else data['seconds']
+        result.append({'date': day, 'target_id': tid, 'target_name': data['name'],
+            'module_id': meta['module_id'], 'module_name': mod_names.get(meta['module_id']),
+            'submodule_id': meta['submodule_id'], 'submodule_name': sub_names.get(meta['submodule_id']),
+            'frequency': data['count'], 'total_duration_seconds': 0, 'duration_count': 0,
+            'min_duration_seconds': 0, 'max_duration_seconds': 0, 'avg_duration_seconds': 0,
+            'measurement': measurement, 'measurement_value': chart_rate(data['count'], seconds, measurement == 'rate_per_hour'),
+            'observation_seconds': seconds, 'observation_windows': data['windows'],
+            'measurement_label': MEASUREMENT_LABELS.get(measurement, ''), 'measurement_unit': MEASUREMENT_UNIT.get(measurement, '')})
     return result
 
 
@@ -484,9 +637,11 @@ def get_abc_data_by_day(
     setting: str | None = None,
 ) -> list[ABCDataPoint]:
     """Returns daily ABC event counts grouped by one ABC dimension."""
+    from apps.clients.id_aliases import client_identifier_aliases
+
     field = _ABC_GROUP_FIELD.get(group_by, 'behavior_description')
     qs = ABCEvent.objects.filter(
-        external_client_id=external_client_id,
+        external_client_id__in=client_identifier_aliases(external_client_id),
         occurred_at__date__gte=date_from,
         occurred_at__date__lte=date_to,
     )
@@ -542,9 +697,11 @@ def get_assessment_data(
     metric: str | None = None,
 ) -> list[AssessmentDataPoint]:
     """Returns assessment score records grouped by assessment, domain, or metric."""
+    from apps.clients.id_aliases import client_identifier_aliases
+
     field = _ASSESSMENT_GROUP_FIELD.get(group_by, 'domain')
     qs = AssessmentRecord.objects.filter(
-        external_client_id=external_client_id,
+        external_client_id__in=client_identifier_aliases(external_client_id),
         assessed_on__gte=date_from,
         assessed_on__lte=date_to,
     )
@@ -636,6 +793,34 @@ def _mastered_threshold_for_target(phases: list, measurement: str) -> tuple[floa
     return explicit or fallback
 
 
+def _duration_threshold_for_target(phases: list) -> tuple[float, str] | None:
+    """Same phase-picking rule as `_mastered_threshold_for_target` (prefer the
+    phase whose `on_success == 'mastered'`, else the one with the largest
+    threshold) but returns the raw (threshold_seconds, direction) pair
+    without routing through `_trial_metric_for_objective` — that helper only
+    recognizes pct_correct/count/rate metrics, so duration targets always
+    fell through as unsupported. Used to color the "All Trials" duration
+    table by whether each occurrence met the target's goal."""
+    explicit: tuple[float, str] | None = None
+    fallback: tuple[float, str] | None = None
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        criteria = phase.get('criteria') or {}
+        raw = criteria.get('threshold_pct')
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        direction = str(criteria.get('threshold_direction') or 'min').lower()
+        candidate = (value, direction)
+        if fallback is None or value > fallback[0]:
+            fallback = candidate
+        if phase.get('on_success') == 'mastered':
+            explicit = candidate
+    return explicit or fallback
+
+
 def get_program_mastery_criteria_detail(program_id: int) -> tuple[float | None, str | None, bool]:
     thresholds: list[tuple[float, str]] = []
     for phases, measurement in (
@@ -680,7 +865,7 @@ def _behavior_activity_by_target(target_ids: list[int], date_from: date, date_to
     summaries use this for targets that have no trials in the period."""
     stats: dict[int, dict] = defaultdict(lambda: {'events': 0, 'sessions': set(), 'dates': []})
     for row in (
-        BehaviorEvent.objects
+        BehaviorEvent.objects.filter(observation_ended_at__isnull=True)
         .filter(target_id__in=target_ids, occurred_at__date__gte=date_from, occurred_at__date__lte=date_to)
         .values('target_id', 'session_run_id', 'occurred_at__date')
     ):
@@ -965,6 +1150,7 @@ def get_client_progress_report(
     forms need resolving here regardless of which one the caller passed in.
     """
     from apps.clients.models import Client
+    from apps.clients.id_aliases import client_identifier_aliases
     client = Client.objects.filter(id=client_id).first() or Client.objects.filter(external_id=str(client_id)).first()
     dcm_client_id = client.id if client else client_id
     external_client_id = (
@@ -975,7 +1161,7 @@ def get_client_progress_report(
     # ── 1. Programs and targets ──────────────────────────────────────────────
     programs = list(
         Program.objects
-        .filter(external_client_id=dcm_client_id)
+        .filter(external_client_id__in=client_identifier_aliases(dcm_client_id))
         .prefetch_related('targets__prompting_template', 'targets__module', 'targets__submodule')
         .order_by('display_order', 'name')
     )
@@ -989,7 +1175,7 @@ def get_client_progress_report(
 
     # ── 2. Session counts ────────────────────────────────────────────────────
     sessions_qs = SessionRun.objects.filter(
-        external_client_id=external_client_id,
+        external_client_id__in=client_identifier_aliases(dcm_client_id),
         started_at__date__gte=date_from,
         started_at__date__lte=date_to,
     ).values('status')
@@ -1151,6 +1337,7 @@ def get_client_progress_overview(client_id: int) -> ClientProgressOverview:
     the local Client.id or the TPMS external id).
     """
     from apps.clients.models import Client
+    from apps.clients.id_aliases import client_identifier_aliases
     from apps.programs.models import TargetStatusChange
 
     client = Client.objects.filter(id=client_id).first() or Client.objects.filter(external_id=str(client_id)).first()
@@ -1158,7 +1345,7 @@ def get_client_progress_overview(client_id: int) -> ClientProgressOverview:
 
     programs = list(
         Program.objects
-        .filter(external_client_id=dcm_client_id)
+        .filter(external_client_id__in=client_identifier_aliases(dcm_client_id))
         .prefetch_related('targets')
         .order_by('display_order', 'name')
     )
@@ -1285,8 +1472,8 @@ def compute_program_baseline(program_id: int, sessions: int = 3) -> list[dict]:
             'total_trials': len(used),
             'correct_trials': correct,
             'percent_correct': round(100 * correct / len(used), 1),
-            'first_date': min(e['recorded_at'] for e in used).date(),
-            'last_date': max(e['recorded_at'] for e in used).date(),
+            'first_date': dj_timezone.localtime(min(e['recorded_at'] for e in used)).date(),
+            'last_date': dj_timezone.localtime(max(e['recorded_at'] for e in used)).date(),
         })
     return results
 
@@ -1297,8 +1484,16 @@ def get_duration_occurrences(target_ids: list[int], date_from: date, date_to: da
     duration view, which shows each occurrence rather than a daily summary."""
     if not target_ids:
         return []
+
+    thresholds: dict[int, tuple[float, str] | None] = {}
+    for target_id, phases in (
+        Target.objects.filter(id__in=target_ids, workflow_template__isnull=False)
+        .values_list('id', 'workflow_template__phases')
+    ):
+        thresholds[target_id] = _duration_threshold_for_target(phases) if isinstance(phases, list) else None
+
     events = (
-        BehaviorEvent.objects
+        BehaviorEvent.objects.filter(observation_ended_at__isnull=True)
         .filter(
             target_id__in=target_ids,
             duration_seconds__isnull=False,
@@ -1317,6 +1512,14 @@ def get_duration_occurrences(target_ids: list[int], date_from: date, date_to: da
     for event in events:
         key = (event['session_run_id'], event['target_id'])
         counters[key] += 1
+        threshold = thresholds.get(event['target_id'])
+        meets_criteria = None
+        if threshold is not None:
+            threshold_seconds, direction = threshold
+            meets_criteria = (
+                event['duration_seconds'] <= threshold_seconds if direction == 'max'
+                else event['duration_seconds'] >= threshold_seconds
+            )
         result.append({
             'session_id': event['session_run_id'],
             'session_label': event['session_run__session_name'] or '',
@@ -1325,6 +1528,7 @@ def get_duration_occurrences(target_ids: list[int], date_from: date, date_to: da
             'target_name': event['target_name'],
             'index': counters[key],
             'duration_seconds': event['duration_seconds'],
+            'meets_criteria': meets_criteria,
         })
     return result
 

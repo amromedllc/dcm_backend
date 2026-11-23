@@ -1,9 +1,11 @@
 from datetime import timedelta
 
 from django.utils import timezone
+from django.db.models import Case, When
 from ninja.errors import HttpError
 
 from apps.programs.models import Program, Lesson, ProgramDataField
+from apps.clients.id_aliases import client_identifier_aliases
 
 RUNNABLE_PROGRAM_PHASES = {
     Program.Phase.BASELINE,
@@ -48,7 +50,7 @@ def _target_due_for_session(target) -> bool:
     maintenance = (phase or {}).get('maintenance') or {}
     intervals = maintenance.get('intervals') or []
     if not intervals:
-        return True
+        return False
     if target.maintenance_episodes_completed <= 0:
         return True
 
@@ -73,7 +75,7 @@ def _target_due_for_session(target) -> bool:
         .first()
     )
     last_behavior = (
-        BehaviorEvent.objects
+        BehaviorEvent.objects.filter(observation_ended_at__isnull=True)
         .filter(target_id=target.id, **data_since)
         .order_by('-session_run__submitted_at')
         .values_list('session_run__submitted_at', flat=True)
@@ -127,7 +129,27 @@ def _visible_prompting_levels(program: Program, target) -> tuple[dict | None, in
     }, visible_idx
 
 
-def build_program_snapshot(client_id: int, lesson_id: int | None = None, restrict_to_lesson: bool = False) -> dict:
+def resolve_session_lesson(client_id, explicit_lesson_id=None, appointment=None, use_default=True):
+    """Resolve configuration at start, never copy an old SessionRun's snapshot."""
+    aliases = client_identifier_aliases(client_id)
+    lesson_id = explicit_lesson_id or (appointment.lesson_id if appointment else None)
+    if lesson_id:
+        lesson = Lesson.objects.filter(id=lesson_id, external_client_id__in=aliases, is_active=True).first()
+        if lesson is None or (explicit_lesson_id and not lesson.is_reusable and (appointment is None or appointment.lesson_id != lesson.id)):
+            raise HttpError(404, 'Session setup not found for this client')
+        return lesson
+    if use_default:
+        return Lesson.objects.filter(
+            external_client_id__in=aliases, is_active=True, is_reusable=True, is_default=True,
+        ).first()
+    return None
+
+
+def build_program_snapshot(
+    client_id: int, lesson_id: int | None = None, restrict_to_lesson: bool = False,
+    program_ids: list[int] | None = None,
+    rate_observation_mode: str = 'session',
+) -> dict:
     """
     Captures the full program/target configuration as an immutable JSONB snapshot.
     Called once when a SessionRun is created.
@@ -139,6 +161,12 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
 
     This means changes a supervisor makes after a session starts never affect
     historical reporting — the snapshot is the source of truth for that session.
+
+    program_ids, if given, further narrows whichever program set lesson_id/
+    restrict_to_lesson already selected down to just those — used by group
+    sessions, where each client in the group may only need a subset of their
+    assigned programs run (e.g. just the shared social-skills program, not
+    every 1:1 goal they also happen to have).
     """
     snapshot: dict = {
         'captured_at': timezone.now().isoformat(),
@@ -149,26 +177,30 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
 
     if lesson_id:
         try:
-            lesson = Lesson.objects.get(id=lesson_id, is_active=True)
+            lesson = Lesson.objects.get(id=lesson_id, is_active=True, external_client_id__in=client_identifier_aliases(client_id))
         except Lesson.DoesNotExist:
             raise HttpError(404, 'Lesson not found or not active')
         snapshot['lesson_name'] = lesson.name
-        program_ids = lesson.lesson_programs.values_list('program_id', flat=True)
+        lesson_program_ids = list(lesson.lesson_programs.order_by('-is_pinned', 'display_order', 'id').values_list('program_id', flat=True))
         programs_qs = (
             Program.objects
-            .filter(id__in=program_ids, archived_at__isnull=True, phase__in=RUNNABLE_PROGRAM_PHASES)
+            .filter(id__in=lesson_program_ids, external_client_id__in=client_identifier_aliases(client_id), status=Program.Status.ACTIVE, archived_at__isnull=True, phase__in=RUNNABLE_PROGRAM_PHASES)
+            .order_by(Case(*[When(pk=pk, then=order) for order, pk in enumerate(lesson_program_ids)]))
             .select_related('prompting_template')
             .prefetch_related('targets__prompting_template', 'targets__child_items')
         )
     elif not restrict_to_lesson:
         programs_qs = (
             Program.objects
-            .filter(external_client_id=client_id, archived_at__isnull=True, phase__in=RUNNABLE_PROGRAM_PHASES)
+            .filter(external_client_id__in=client_identifier_aliases(client_id), status=Program.Status.ACTIVE, archived_at__isnull=True, phase__in=RUNNABLE_PROGRAM_PHASES)
             .select_related('prompting_template')
             .prefetch_related('targets__prompting_template', 'targets__child_items')
         )
     else:
         programs_qs = Program.objects.none()
+
+    if program_ids is not None:
+        programs_qs = programs_qs.filter(id__in=program_ids)
 
     session_fields = list(
         ProgramDataField.objects
@@ -182,12 +214,15 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
             if not _target_due_for_session(target):
                 continue
             prompting_template, current_prompt_level_index = _visible_prompting_levels(program, target)
+            phase_config = _workflow_phase_for_target(target, target.status) or {}
+            minimum_trials = (phase_config.get('criteria') or {}).get('minimum_trials')
             targets_data.append({
                 'id': target.id,
                 'name': target.name,
                 'status': target.status,
                 'measurement_type': target.measurement_type,
                 'measurement': target.measurement,
+                'rate_observation_mode': rate_observation_mode if target.measurement_type == 'rate' and target.measurement in {'rate_per_minute', 'rate_per_hour'} else None,
                 'timer_type': target.timer_type,
                 'sub_items': _snapshot_sub_items(target),
                 'sub_item_progression': target.sub_item_progression,
@@ -205,6 +240,12 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
                 'percentage_fixed_denominator': target.percentage_fixed_denominator,
                 'prompting_template': prompting_template,
                 'current_prompt_level_index': current_prompt_level_index,
+                # From the target's current-status workflow phase, if one is
+                # configured — the live recording screen uses this to show
+                # "X / Y trials" and turn the counter green once met. Mirrors
+                # the same `minimum_trials` criteria apps.programs.services
+                # evaluates mastery against after the session is submitted.
+                'minimum_trials': minimum_trials,
             })
 
         snapshot['programs'].append({
@@ -233,7 +274,7 @@ def _assert_editable(session_run) -> None:
         raise HttpError(409, f'Session is {session_run.status} and cannot be modified')
 
 
-def submit_session(session_run, staff_user) -> tuple[list, list]:
+def submit_session(session_run, staff_user, service_address=None) -> tuple[list, list]:
     """Move a session from open → submitted, then evaluate target workflow
     advancement and prompt-level fading.
 
@@ -256,11 +297,23 @@ def submit_session(session_run, staff_user) -> tuple[list, list]:
     if note and note.docuseal_template_id and not note.docuseal_completed_at:
         raise HttpError(409, 'Session Note must be completed before submitting')
 
+    from pydantic import ValidationError
+    from .schemas import ServiceAddress
+
+    if session_run.service_setting in ('Home', 'Office', 'School', 'Community'):
+        try:
+            address = ServiceAddress.model_validate(service_address or session_run.service_address)
+        except ValidationError as exc:
+            raise HttpError(400, 'A complete US service address (street, city, state, and ZIP code) is required before submitting this session.') from exc
+        session_run.service_address = address.model_dump()
+    else:
+        session_run.service_address = {}
+
     auto_approve = staff_user.role in ('admin', 'supervisor')
     now = timezone.now()
     session_run.submitted_at = now
     session_run.ended_at = session_run.ended_at or now
-    update_fields = ['submitted_at', 'ended_at', 'status']
+    update_fields = ['submitted_at', 'ended_at', 'status', 'service_address']
     if auto_approve:
         session_run.status = session_run.Status.APPROVED
         session_run.reviewed_by = staff_user

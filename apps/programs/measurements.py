@@ -108,6 +108,7 @@ def aggregate_measurement(
     numerator: float = 0,
     denominator: float | None = None,
 ) -> float:
+) -> float | None:
     """Roll a set of observations up into the target's configured metric.
 
     - durations: observed duration_seconds values (duration measurements)
@@ -121,7 +122,8 @@ def aggregate_measurement(
       samples, occurred_count the number where the behavior occurred
     - numerator/denominator: for a generic `percentage` target
 
-    Returns 0.0 when there is nothing to aggregate.
+    Returns 0.0 when there is nothing to aggregate, except that rates without
+    a positive observation denominator remain unknown (None).
     """
     durations = [d for d in (durations or []) if d is not None]
     latencies = [v for v in (latencies or []) if v is not None]
@@ -139,14 +141,9 @@ def aggregate_measurement(
         return float(sum(durations))  # total
 
     if measurement in RATE_MEASUREMENTS:
-        if not event_count:
-            return 0.0
         if not seconds_elapsed or seconds_elapsed <= 0:
-            return float(event_count)
-        hours = max(seconds_elapsed / 3600, 1 / 60)
-        if measurement == M.RATE_PER_MINUTE:
-            return float(event_count / (hours * 60))
-        return float(event_count / hours)
+            return None
+        return float(event_count * (60 if measurement == M.RATE_PER_MINUTE else 3600) / seconds_elapsed)
 
     if measurement in LATENCY_MEASUREMENTS:
         if not latencies:
@@ -176,3 +173,61 @@ def aggregate_measurement(
         return float(event_count)
 
     return float(event_count)
+
+
+def merged_periods(rows, lower=None, upper=None):
+    periods = []
+    for row in rows:
+        end = row.get('observation_ended_at')
+        if end is None:
+            continue
+        start, end = row['occurred_at'].timestamp(), end.timestamp()
+        if lower is not None:
+            start = max(start, lower.timestamp())
+        if upper is not None:
+            end = min(end, upper.timestamp())
+        if end > start:
+            periods.append((start, end))
+    merged = []
+    for start, end in sorted(periods):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def rate_statistics(rows, *, lower=None, upper=None, legacy_window=None):
+    """Count occurrences only inside observed periods; merge overlaps once.
+
+    The end boundary is inclusive for occurrences, so stopping immediately
+    after a tally does not lose that occurrence. Merged periods prevent double
+    counting at adjacent boundaries. Unknown coverage is distinct from zero.
+    """
+    periods = merged_periods(rows, lower, upper)
+    has_periods = any(row.get('observation_ended_at') is not None for row in rows)
+    if not has_periods and legacy_window:
+        start, end = legacy_window
+        if start and end and end.timestamp() > start.timestamp():
+            start, end = start.timestamp(), end.timestamp()
+            start = max(start, lower.timestamp()) if lower is not None else start
+            end = min(end, upper.timestamp()) if upper is not None else end
+            periods = [(start, end)] if end > start else []
+    seconds = sum(end - start for start, end in periods)
+    count = sum(row['frequency_count'] for row in rows
+                if row.get('observation_ended_at') is None
+                and (upper is None or row['occurred_at'].timestamp() < upper.timestamp())
+                and any(start <= row['occurred_at'].timestamp() <= end for start, end in periods))
+    return count, seconds if seconds > 0 else None
+
+
+def uses_target_windows(snapshot, target_id):
+    return any(target.get('id') == target_id and target.get('rate_observation_mode') == 'target_windows'
+               for program in snapshot.get('programs', []) for target in program.get('targets', []))
+
+
+def session_rate_statistics(session, target_id, rows):
+    legacy = None
+    if not uses_target_windows(session.program_snapshot, target_id):
+        legacy = (session.started_at, session.ended_at or session.submitted_at or session.reviewed_at)
+    return rate_statistics(rows, legacy_window=legacy)

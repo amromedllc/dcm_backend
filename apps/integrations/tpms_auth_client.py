@@ -111,11 +111,11 @@ def clear_tpms_access_token(user_id: int) -> None:
     _redis().delete(_tpms_token_key(user_id))
 
 
-def _org_admin_token_key(org_id: int) -> str:
+def _org_admin_token_key(org_id: int | str) -> str:
     return f'dcm:tpms:org-admin-token:{org_id}'
 
 
-def store_org_tpms_admin_token(org_id: int, token: str) -> None:
+def store_org_tpms_admin_token(org_id: int | str, token: str) -> None:
     """Cache the practice-admin Bearer token used for Integrations Pull."""
     raw = _normalize_bearer_token(token)
     if not raw:
@@ -124,12 +124,12 @@ def store_org_tpms_admin_token(org_id: int, token: str) -> None:
     _redis().setex(_org_admin_token_key(org_id), ttl, raw)
 
 
-def get_org_tpms_admin_token(org_id: int) -> str | None:
+def get_org_tpms_admin_token(org_id: int | str) -> str | None:
     value = _redis().get(_org_admin_token_key(org_id))
     return value if isinstance(value, str) and value else None
 
 
-def clear_org_tpms_admin_token(org_id: int) -> None:
+def clear_org_tpms_admin_token(org_id: int | str) -> None:
     _redis().delete(_org_admin_token_key(org_id))
 
 
@@ -707,20 +707,26 @@ def admin_list_appointments(
     to_date: str,
     patient_ids: list[int] | None = None,
     staff_ids: list[int] | None = None,
+    updated_after: str | None = None,
 ) -> list[dict[str, Any]]:
     """POST /api/v1/admin/get/appointment — practice sessions for Integrations Pull.
 
     from_date / to_date are mandatory (YYYY-MM-DD). patient_ids and staff_ids
-    are optional filters forwarded when non-empty.
+    are optional filters forwarded when non-empty. updated_after is optional
+    and asks TherapyPMS for records changed since that timestamp. Request Zoom
+    links explicitly for Progressly's internal use; TherapyPMS omits them by default.
     """
     body: dict[str, Any] = {
         'from_date': from_date,
         'to_date': to_date,
+        'zoom_link': True,
     }
     if patient_ids:
         body['patient_ids'] = [int(p) for p in patient_ids]
     if staff_ids:
         body['staff_ids'] = [int(s) for s in staff_ids]
+    if updated_after:
+        body['updated_after'] = updated_after
 
     payload = _request(
         'POST',

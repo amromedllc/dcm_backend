@@ -9,6 +9,8 @@ logger = logging.getLogger(__name__)
 # Models to audit — add any new tenant-scoped model here
 _TRACKED = [
     'apps.sessions.models.SessionRun',
+    'apps.sessions.models.SupervisionContact',
+    'apps.sessions.models.SupervisionServiceHours',
     'apps.notes.models.LessonNote',
     'apps.clients.models.Client',
     'apps.programs.models.Program',

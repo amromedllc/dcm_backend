@@ -1,20 +1,26 @@
 """
-Seed DCM trial data onto real TherapyPMS provider sessions.
+Seed DCM programs, targets, and trial data onto locally-generated sessions
+for a client — entirely from our own database, no TPMS round trip.
+
+Session/appointment timestamps are synthesized directly (evenly spaced over
+the last `--days-back` days) rather than fetched from TPMS's calendar, so
+this command needs no live TPMS access token and works the same whether or
+not the client has ever logged in through TherapyPMS. `--client-id`
+(or `--tpms-client-id`, matched against the local Client's stored
+external_id) only selects which existing local Client row to attach the
+seeded programs/sessions to.
 
 Usage:
-    python manage.py seed_tpms_program_sessions --org dev --user-email admin@example.com --provider-id 123 --program-id 456
-    python manage.py seed_tpms_program_sessions --org dev --user-id 7 --tpms-provider-id 98765 --program-id 456 --sessions 15 --replace-existing
-    python manage.py seed_tpms_program_sessions --org dev --user-email admin@example.com --provider-id 123 --sessions 15 --replace-existing
-
-The command expects the selected user to have a live TPMS access token in Redis.
-That normally means the user has logged into DCM through TherapyPMS recently.
+    python manage.py seed_tpms_program_sessions --org dev --user-email admin@example.com --client-id 123 --program-id 456
+    python manage.py seed_tpms_program_sessions --org dev --user-id 7 --tpms-client-id 98765 --program-id 456 --sessions 15 --replace-existing
+    python manage.py seed_tpms_program_sessions --org dev --user-email admin@example.com --client-id 123 --sessions 15 --replace-existing
 """
 
 from __future__ import annotations
 
 import random
 import zlib
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError
@@ -24,18 +30,7 @@ from django.utils import timezone
 from django_tenants.utils import schema_context
 
 from apps.accounts.models import User
-from apps.clients.api import (
-    _appointment_service_name,
-    _dig_appointment,
-    _parse_appointment_datetime,
-    _tpms_status,
-)
 from apps.clients.models import Client
-from apps.integrations.tpms_auth_client import (
-    TpmsAuthError,
-    get_tpms_access_token,
-    list_provider_calendar,
-)
 from apps.programs.models import Lesson, LessonProgram, Program, PromptingTemplate, Target, TargetStatus
 from apps.sessions.models import Appointment, SessionRun, TrialEvent
 from apps.sessions.services import build_program_snapshot
@@ -149,26 +144,20 @@ LEGACY_SEED_PROGRAM_NAMES = [
 
 
 class Command(BaseCommand):
-    help = 'Seed programs, targets, and trial data on sessions fetched from TPMS for one provider'
+    help = 'Seed programs, targets, and trial data on locally-generated sessions for one client'
 
     def add_arguments(self, parser):
         parser.add_argument('--org', required=True, help='Organization schema_name, slug, or id')
         parser.add_argument('--program-id', type=int, help='Existing DCM Program.id to attach. Omit to create/use a 10+ program seed pack.')
-        parser.add_argument('--provider-id', type=int, help='Local DCM Client.id for the selected TPMS provider')
-        parser.add_argument('--tpms-provider-id', type=int, help='Raw TPMS provider id, used when local Client.id is not known')
-        parser.add_argument('--user-id', type=int, help='DCM User.id whose TPMS token should be used')
-        parser.add_argument('--user-email', help='DCM user email whose TPMS token should be used')
-        parser.add_argument('--sessions', type=int, default=15, help='How many TPMS sessions to seed')
+        parser.add_argument('--client-id', type=int, help='Local DCM Client.id to seed programs/sessions for')
+        parser.add_argument('--tpms-client-id', type=int, help='Raw TPMS client id, used when local Client.id is not known')
+        parser.add_argument('--user-id', type=int, help='DCM User.id to attribute the seeded sessions/programs to')
+        parser.add_argument('--user-email', help='DCM user email to attribute the seeded sessions/programs to')
+        parser.add_argument('--sessions', type=int, default=15, help='How many sessions to generate')
         parser.add_argument('--program-count', type=int, default=10, help='How many seed programs to create/use when --program-id is omitted')
         parser.add_argument('--targets-min', type=int, default=3, help='Minimum targets per auto-seeded program')
         parser.add_argument('--targets-max', type=int, default=10, help='Maximum targets per auto-seeded program')
-        parser.add_argument('--days-back', type=int, default=180, help='Calendar lookback window for TPMS sessions')
-        parser.add_argument('--days-forward', type=int, default=30, help='Calendar lookahead window for TPMS sessions')
-        parser.add_argument(
-            '--preserve-tpms-dates',
-            action='store_true',
-            help='Keep TPMS appointment dates for seeded session/trial timestamps. By default, dates are shifted into the recent analytics window.',
-        )
+        parser.add_argument('--days-back', type=int, default=180, help='Spread generated session dates evenly across this many past days')
         parser.add_argument('--trials-per-target', type=int, default=10, help='Trials to create per target per session')
         parser.add_argument(
             '--replace-existing',
@@ -183,8 +172,8 @@ class Command(BaseCommand):
         parser.add_argument('--seed', type=int, default=42, help='Random seed for repeatable trial patterns')
 
     def handle(self, *args, **options):
-        if not options.get('provider_id') and not options.get('tpms_provider_id'):
-            raise CommandError('Pass either --provider-id or --tpms-provider-id')
+        if not options.get('client_id') and not options.get('tpms_client_id'):
+            raise CommandError('Pass either --client-id or --tpms-client-id')
         if not options.get('user_id') and not options.get('user_email'):
             raise CommandError('Pass either --user-id or --user-email')
         if options['sessions'] <= 0:
@@ -221,38 +210,38 @@ class Command(BaseCommand):
             raise CommandError('User not found')
         return user
 
-    def _resolve_provider(self, *, provider_id: int | None, tpms_provider_id: int | None) -> tuple[Client, int]:
-        if provider_id:
-            provider = Client.objects.filter(id=provider_id).first()
-            if not provider:
-                raise CommandError(f'Local provider/client {provider_id} not found')
-            if provider.external_id and provider.external_id.isdigit():
-                return provider, int(provider.external_id)
-            if tpms_provider_id:
-                provider.external_id = str(tpms_provider_id)
-                provider.save(update_fields=['external_id', 'updated_at'])
-                return provider, tpms_provider_id
+    def _resolve_client(self, *, client_id: int | None, tpms_client_id: int | None) -> tuple[Client, int]:
+        if client_id:
+            client = Client.objects.filter(id=client_id).first()
+            if not client:
+                raise CommandError(f'Local client {client_id} not found')
+            if client.external_id and client.external_id.isdigit():
+                return client, int(client.external_id)
+            if tpms_client_id:
+                client.external_id = str(tpms_client_id)
+                client.save(update_fields=['external_id', 'updated_at'])
+                return client, tpms_client_id
             raise CommandError(
-                f'Local provider/client {provider_id} has no numeric external_id. '
-                'Pass --tpms-provider-id also.'
+                f'Local client {client_id} has no numeric external_id. '
+                'Pass --tpms-client-id also.'
             )
 
-        provider = Client.objects.filter(external_id=str(tpms_provider_id)).first()
-        if not provider:
+        client = Client.objects.filter(external_id=str(tpms_client_id)).first()
+        if not client:
             raise CommandError(
-                f'No local Client row found for TPMS provider {tpms_provider_id}. '
-                'Sync/select the provider first, or pass --provider-id.'
+                f'No local Client row found for TPMS client {tpms_client_id}. '
+                'Sync/select the client first, or pass --client-id.'
             )
-        return provider, int(tpms_provider_id)
+        return client, int(tpms_client_id)
 
     def _seed(self, org: Organization, options: dict[str, Any]) -> None:
         user = self._resolve_user(user_id=options.get('user_id'), user_email=options.get('user_email'))
-        provider, tpms_provider_id = self._resolve_provider(
-            provider_id=options.get('provider_id'),
-            tpms_provider_id=options.get('tpms_provider_id'),
+        client, _tpms_client_id = self._resolve_client(
+            client_id=options.get('client_id'),
+            tpms_client_id=options.get('tpms_client_id'),
         )
         programs = self._resolve_programs(
-            provider=provider,
+            client=client,
             user=user,
             program_id=options.get('program_id'),
             program_count=options['program_count'],
@@ -272,42 +261,22 @@ class Command(BaseCommand):
         if empty_programs:
             raise CommandError(f'Some programs have no visible trial-style targets: {", ".join(empty_programs)}')
 
-        token = get_tpms_access_token(user.id)
-        if not token:
-            raise CommandError(
-                f'No TPMS token found for user {user.email}. Log in through TPMS first, then rerun this command.'
-            )
+        session_times = self._generate_session_times(options['sessions'], options['days_back'])
 
-        start_date = date.today() - timedelta(days=options['days_back'])
-        end_date = date.today() + timedelta(days=options['days_forward'])
-        try:
-            appointments = list_provider_calendar(
-                token,
-                provider_ids=[tpms_provider_id],
-                start_date=start_date.isoformat(),
-                end_date=end_date.isoformat(),
-            )
-        except TpmsAuthError as exc:
-            raise CommandError(str(exc) or 'Failed to fetch TPMS provider calendar') from exc
-
-        selected = self._select_appointments(appointments, tpms_provider_id, options['sessions'])
-        if not selected:
-            raise CommandError(f'No usable TPMS sessions found for provider {tpms_provider_id}')
-
-        canonical_client_id = int(provider.external_id) if provider.external_id.isdigit() else provider.id
+        canonical_client_id = int(client.external_id) if client.external_id.isdigit() else client.id
         total_trials = 0
         session_count = 0
 
-        for idx, appt in enumerate(selected):
+        for idx, (start, end) in enumerate(session_times):
             with transaction.atomic():
                 session = self._ensure_session(
-                    appt=appt,
-                    provider=provider,
+                    start=start,
+                    end=end,
+                    ext_id=f'seed-{client.id}-{start:%Y%m%dT%H%M}',
+                    client=client,
                     canonical_client_id=canonical_client_id,
                     programs=programs,
                     user=user,
-                    recent_index=None if options['preserve_tpms_dates'] else idx,
-                    recent_total=None if options['preserve_tpms_dates'] else len(selected),
                 )
                 for program in programs:
                     created = self._seed_trials_for_session(
@@ -315,7 +284,7 @@ class Command(BaseCommand):
                         program=program,
                         targets=program_targets[program.id],
                         session_index=idx,
-                        session_total=len(selected),
+                        session_total=len(session_times),
                         trials_per_target=options['trials_per_target'],
                         replace_existing=options['replace_existing'],
                     )
@@ -326,14 +295,27 @@ class Command(BaseCommand):
             f'Seeded {len(programs)} program(s), '
             f'{sum(len(items) for items in program_targets.values())} target(s), '
             f'and {total_trials} trial event(s) '
-            f'across {session_count} TPMS session(s) for provider "{provider.full_name}" '
+            f'across {session_count} session(s) for client "{client.full_name}" '
             f'in organization "{org.schema_name}".'
         ))
+
+    def _generate_session_times(self, count: int, days_back: int) -> list[tuple[datetime, datetime]]:
+        """Evenly spaces `count` session start/end times across the last
+        `days_back` days (oldest first, most recent last), each 45 minutes
+        long, at a plausible clinic hour — entirely synthetic, no TPMS call."""
+        now = timezone.now()
+        times = []
+        for i in range(count):
+            days_ago = days_back if count <= 1 else round(days_back * (count - 1 - i) / (count - 1))
+            hour = 9 + (i % 7)  # spread across a 9am-3pm clinic day
+            start = (now - timedelta(days=days_ago)).replace(hour=hour, minute=0, second=0, microsecond=0)
+            times.append((start, start + timedelta(minutes=45)))
+        return times
 
     def _resolve_programs(
         self,
         *,
-        provider: Client,
+        client: Client,
         user: User,
         program_id: int | None,
         program_count: int,
@@ -351,15 +333,15 @@ class Command(BaseCommand):
             )
             if not program:
                 raise CommandError(f'Program {program_id} not found')
-            if program.external_client_id not in (None, provider.id):
+            if program.external_client_id not in (None, client.id):
                 raise CommandError(
-                    f'Program {program.id} belongs to client/provider {program.external_client_id}, '
-                    f'not selected provider {provider.id}.'
+                    f'Program {program.id} belongs to client {program.external_client_id}, '
+                    f'not selected client {client.id}.'
             )
             return [program]
 
         if reset_existing_seed:
-            self._clear_existing_seed_pack(provider)
+            self._clear_existing_seed_pack(client)
 
         self._ensure_seed_defaults(user)
         prompt_tpl = PromptingTemplate.objects.get(name='Standard Prompt Hierarchy')
@@ -369,7 +351,7 @@ class Command(BaseCommand):
         programs = []
         for order, row in enumerate(selected_defs):
             program, _ = Program.objects.update_or_create(
-                external_client_id=provider.id,
+                external_client_id=client.id,
                 name=row['name'],
                 defaults={
                     'is_template': False,
@@ -417,9 +399,9 @@ class Command(BaseCommand):
             .order_by('display_order', 'id')
         )
 
-    def _clear_existing_seed_pack(self, provider: Client) -> None:
+    def _clear_existing_seed_pack(self, client: Client) -> None:
         seed_names = [row['name'] for row in SEED_PROGRAMS] + LEGACY_SEED_PROGRAM_NAMES
-        programs = list(Program.objects.filter(external_client_id=provider.id, name__in=seed_names))
+        programs = list(Program.objects.filter(external_client_id=client.id, name__in=seed_names))
         if not programs:
             return
 
@@ -429,7 +411,7 @@ class Command(BaseCommand):
             TrialEvent.objects.filter(target_id__in=target_ids).delete()
         LessonProgram.objects.filter(program_id__in=program_ids).delete()
         deleted, _ = Program.objects.filter(id__in=program_ids).delete()
-        self.stdout.write(f'Cleared {deleted} existing auto-seeded program/target row(s) for provider {provider.full_name}.')
+        self.stdout.write(f'Cleared {deleted} existing auto-seeded program/target row(s) for client {client.full_name}.')
 
     def _ensure_seed_defaults(self, user: User) -> None:
         for row in DEFAULT_TARGET_STATUSES:
@@ -452,81 +434,47 @@ class Command(BaseCommand):
             },
         )
 
-    def _select_appointments(self, appointments: list[dict[str, Any]], provider_id: int, limit: int) -> list[dict[str, Any]]:
-        usable = []
-        for appt in appointments:
-            row_provider_id = _dig_appointment(appt, 'provider_id', 'providerId', 'employee_id')
-            try:
-                if row_provider_id is not None and int(row_provider_id) != provider_id:
-                    continue
-            except (TypeError, ValueError):
-                continue
-
-            raw_status = str(_dig_appointment(appt, 'status', 'appointment_status') or '')
-            if raw_status.lower() in {'deleted', 'void', 'voided', 'cancelled', 'canceled', 'no show', 'no-show'}:
-                continue
-
-            start = self._appointment_start(appt)
-            ext_id = self._appointment_external_id(appt)
-            if not start or not ext_id:
-                continue
-            usable.append((start, appt))
-
-        usable.sort(key=lambda row: row[0])
-        return [appt for _, appt in usable[-limit:]]
-
     def _ensure_session(
         self,
         *,
-        appt: dict[str, Any],
-        provider: Client,
+        start: datetime,
+        end: datetime,
+        ext_id: str,
+        client: Client,
         canonical_client_id: int,
         programs: list[Program],
         user: User,
-        recent_index: int | None,
-        recent_total: int | None,
     ) -> SessionRun:
-        tpms_start = self._aware(self._appointment_start(appt)) or timezone.now()
-        tpms_end = self._aware(self._appointment_end(appt, tpms_start)) or tpms_start
-        if recent_index is not None and recent_total is not None:
-            start = self._recent_session_start(tpms_start, recent_index, recent_total)
-            duration = max(timedelta(minutes=30), tpms_end - tpms_start)
-            end = start + duration
-        else:
-            start = tpms_start
-            end = tpms_end
-        ext_id = self._appointment_external_id(appt)
         appointment_key = self._appointment_key(ext_id)
 
         appointment, _ = Appointment.objects.get_or_create(
             external_id=ext_id,
             defaults={
-                'external_client_id': provider.id,
-                'source': Appointment.Source.SYNCED,
+                'external_client_id': client.id,
+                'source': Appointment.Source.MANUAL,
                 'start_time': start,
                 'end_time': end,
-                'service_type': _appointment_service_name(appt)[:100],
-                'status': _tpms_status(str(_dig_appointment(appt, 'status', 'appointment_status') or '')),
+                'service_type': 'ABA Therapy Session',
+                'status': Appointment.Status.COMPLETED,
                 'created_by': user,
             },
         )
         changed = False
         for field, value in (
-            ('external_client_id', provider.id),
+            ('external_client_id', client.id),
             ('start_time', start),
             ('end_time', end),
-            ('service_type', _appointment_service_name(appt)[:100]),
         ):
             if getattr(appointment, field) != value:
                 setattr(appointment, field, value)
                 changed = True
         if changed:
-            appointment.save(update_fields=['external_client_id', 'start_time', 'end_time', 'service_type', 'updated_at'])
+            appointment.save(update_fields=['external_client_id', 'start_time', 'end_time', 'updated_at'])
 
         lesson = appointment.lesson
         if lesson is None:
             lesson = Lesson.objects.create(
-                external_client_id=provider.id,
+                external_client_id=client.id,
                 name=start.strftime('Session %b %d, %Y'),
                 lesson_type=Lesson.LessonType.APPOINTMENT_LINKED,
                 created_by=user,
@@ -542,7 +490,7 @@ class Command(BaseCommand):
             )
 
         snapshot = build_program_snapshot(
-            client_id=provider.id,
+            client_id=client.id,
             lesson_id=lesson.id,
             restrict_to_lesson=True,
         )
@@ -580,16 +528,6 @@ class Command(BaseCommand):
         if update_fields:
             session.save(update_fields=[*update_fields, 'updated_at'])
         return session
-
-    def _recent_session_start(self, original_start, index: int, total: int):
-        anchor = timezone.now().replace(
-            hour=original_start.hour,
-            minute=original_start.minute,
-            second=0,
-            microsecond=0,
-        )
-        days_ago = max(0, total - index - 1)
-        return anchor - timedelta(days=days_ago)
 
     def _seed_trials_for_session(
         self,
@@ -638,7 +576,7 @@ class Command(BaseCommand):
                     response_score=success_score if is_success else miss_score,
                     prompt_level_label=success_label if is_success else miss_label,
                     recorded_at=session_start + timedelta(minutes=offset + 1),
-                    staff_notes='Seeded from TPMS provider session',
+                    staff_notes='Seeded session',
                 ))
 
         TrialEvent.objects.bulk_create(trial_events, batch_size=500)
@@ -664,47 +602,9 @@ class Command(BaseCommand):
             str(miss.get('label') or 'Prompted'),
         )
 
-    def _appointment_external_id(self, appt: dict[str, Any]) -> str:
-        return str(
-            _dig_appointment(
-                appt,
-                'session_id',
-                'id',
-                'appointment_id',
-                'recurring_appointment_id',
-                'recurring_session_id',
-            ) or ''
-        )
-
     def _appointment_key(self, ext_id: str) -> int:
+        # Non-numeric synthetic ids get a negative crc32 row id — same
+        # synthetic-id convention used for non-numeric TPMS external ids
+        # elsewhere in the app (see apps.clients.api), so seeded sessions
+        # behave identically to real synced ones downstream.
         return int(ext_id) if ext_id.isdigit() else -zlib.crc32(ext_id.encode())
-
-    def _appointment_start(self, appt: dict[str, Any]) -> datetime | None:
-        return _parse_appointment_datetime(
-            _dig_appointment(
-                appt,
-                'from_time',
-                'start_time',
-                'appointment_start_time',
-                'schedule_from',
-                'start',
-            )
-        )
-
-    def _appointment_end(self, appt: dict[str, Any], start: datetime) -> datetime | None:
-        parsed = _parse_appointment_datetime(
-            _dig_appointment(appt, 'to_time', 'end_time', 'appointment_end_time', 'schedule_to', 'end')
-        )
-        if parsed:
-            return parsed
-        duration_raw = _dig_appointment(appt, 'time_duration', 'duration_minutes', 'duration')
-        try:
-            duration_minutes = int(duration_raw)
-        except (TypeError, ValueError):
-            duration_minutes = 0
-        return start + timedelta(minutes=duration_minutes or 60)
-
-    def _aware(self, dt: datetime | None) -> datetime | None:
-        if dt is None:
-            return None
-        return timezone.make_aware(dt) if timezone.is_naive(dt) else dt

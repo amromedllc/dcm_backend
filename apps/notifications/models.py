@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.db import models
 from shared.models import TenantAwareModel
+from django.core.validators import MinValueValidator, MaxValueValidator
 
 
 class Notification(TenantAwareModel):
@@ -11,6 +12,8 @@ class Notification(TenantAwareModel):
         TARGET_ADVANCED     = 'target_advanced',      'Target automatically advanced'
         TARGET_PROMPT_LEVEL_CHANGED = 'target_prompt_level_changed', 'Target prompt level automatically changed'
         REPORT_REVIEW_REQUEST = 'report_review_request', 'Report review request'
+        APPOINTMENT_REMINDER = 'appointment_reminder', 'Appointment reminder'
+        APPOINTMENT_CHANGED = 'appointment_changed', 'Appointment changed'
 
     recipient = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -42,6 +45,7 @@ class NotificationPreference(TenantAwareModel):
     event_type = models.CharField(max_length=80, db_index=True)
     email_enabled = models.BooleanField(default=True)
     web_enabled = models.BooleanField(default=True)
+    mobile_enabled = models.BooleanField(default=True)
     locked = models.BooleanField(null=True, blank=True, default=None)
 
     class Meta:
@@ -66,6 +70,7 @@ class RoleNotificationPolicy(TenantAwareModel):
     event_type = models.CharField(max_length=80, db_index=True)
     email_enabled = models.BooleanField(default=True)
     web_enabled = models.BooleanField(default=True)
+    mobile_enabled = models.BooleanField(default=True)
     locked = models.BooleanField(default=False)
 
     class Meta:
@@ -86,6 +91,7 @@ class FirebaseMessagingToken(TenantAwareModel):
     )
     token = models.TextField(unique=True)
     user_agent = models.TextField(blank=True)
+    platform = models.CharField(max_length=10, choices=[('web', 'Web'), ('android', 'Android')], default='web')
     is_active = models.BooleanField(default=True)
     last_sent_at = models.DateTimeField(null=True, blank=True)
 
@@ -95,3 +101,29 @@ class FirebaseMessagingToken(TenantAwareModel):
 
     def __str__(self) -> str:
         return f'firebase token for {self.recipient_id}'
+
+
+class AppointmentReminderSettings(TenantAwareModel):
+    email_enabled = models.BooleanField(default=True)
+    lead_minutes = models.PositiveIntegerField(default=30, validators=[MinValueValidator(5), MaxValueValidator(10080)])
+    staff_enabled = models.BooleanField(default=True)
+    caregivers_enabled = models.BooleanField(default=False)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['organization'], name='one_appointment_reminder_settings_per_org')]
+
+
+class AppointmentEmailDelivery(TenantAwareModel):
+    appointment = models.ForeignKey('dcm_sessions.Appointment', on_delete=models.CASCADE)
+    recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, db_constraint=False)
+    scheduled_start = models.DateTimeField()
+    status = models.CharField(max_length=10, default='pending', choices=[('pending', 'Pending'), ('sending', 'Sending'), ('sent', 'Sent'), ('failed', 'Failed')])
+    attempts = models.PositiveIntegerField(default=0)
+    claimed_at = models.DateTimeField(null=True)
+    retry_at = models.DateTimeField(null=True)
+    sent_at = models.DateTimeField(null=True)
+
+    _org_scoped_fk_fields = ('appointment', 'recipient')
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['appointment', 'recipient', 'scheduled_start'], name='unique_appointment_email_occurrence')]

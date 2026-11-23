@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Literal
 
 from ninja import Schema
 
@@ -15,9 +16,35 @@ class OrganizationAuthenticationSettingsUpdate(Schema):
     pin_lock_allowed: bool | None = None
 
 
+class FacilityIntegrationSchema(Schema):
+    admin_id: int
+    facility_name: str
+    connected: bool
+
+
 class OrganizationIntegrationSettingsSchema(Schema):
     integration_platform: str
     organization_name: str
+    facility_admin_id: int | None = None
+    integration_email: str = ''
+    facilities: list[FacilityIntegrationSchema] = []
+
+
+class FacilityFormBuilderUpdate(Schema):
+    form_builder_mode: Literal['new', 'old', 'both']
+
+
+class SuperadminFacilityIntegrationSchema(Schema):
+    id: int
+    organization_id: int
+    organization_name: str
+    organization_active: bool
+    form_builder_mode: Literal['new', 'old', 'both'] = 'new'
+    admin_id: int
+    facility_name: str
+    connected: bool
+    integration_email: str
+    last_appointment_sync_at: datetime | None = None
 
 
 class OrganizationIntegrationSettingsUpdate(Schema):
@@ -53,6 +80,7 @@ class PullJobSchema(Schema):
     created_count: int
     updated_count: int
     skipped_count: int
+    cancelled_count: int
     error_message: str
     created_at: datetime
     started_at: datetime | None = None
@@ -65,6 +93,7 @@ class TpmsAdminEmailSettingSchema(Schema):
     facility_name: str = ''
     email_notifications_enabled: bool
     is_active: bool = True
+    ai_enabled: bool = False
 
 
 class TpmsAdminIdSeed(Schema):
@@ -108,6 +137,7 @@ class TpmsAdminIdCreate(Schema):
     facility_name: str = ''
     email_notifications_enabled: bool = False
     is_active: bool = True
+    ai_enabled: bool = False
 
 
 class TpmsAdminEmailSettingUpdate(Schema):
@@ -115,6 +145,7 @@ class TpmsAdminEmailSettingUpdate(Schema):
     facility_name: str | None = None
     email_notifications_enabled: bool | None = None
     is_active: bool | None = None
+    ai_enabled: bool | None = None
 
 
 class SuperadminAPIKeyCreate(Schema):
@@ -156,11 +187,16 @@ class SuperadminUserCreate(Schema):
     last_name: str
     password: str
     role: str = 'admin'
-    # An Administrator (or supervisor/staff) is scoped to one organization's
-    # TPMS practice, not the organization alone — required whenever the
-    # target org has any practices mapped (OrganizationTpmsAdminId); ignored
-    # for a native (non-TPMS) org. See create_superadmin_user.
     external_admin_id: int | None = None
+
+
+class SuperadminUserUpdate(Schema):
+    first_name: str | None = None
+    last_name: str | None = None
+    email: str | None = None
+    role: str | None = None
+    is_active: bool | None = None
+    password: str | None = None
 
 
 class SuperadminUserSchema(Schema):
@@ -176,3 +212,30 @@ class SuperadminUserSchema(Schema):
     external_admin_id: int | None
     tpms_facility_name: str | None
     created_at: datetime
+    superadmin_delegated_permissions: dict[str, bool] = {}
+
+
+class SuperadminDelegatedPermissionsUpdate(Schema):
+    """Keys must be one of accounts.permissions.SUPERADMIN_DELEGATABLE_PERMISSIONS;
+    unknown keys are rejected server-side, not silently dropped."""
+    permissions: dict[str, bool]
+
+
+class ImpersonateRequest(Schema):
+    reason: str = ''
+
+
+class ImpersonationLogSchema(Schema):
+    id: int
+    admin_id: int
+    admin_name: str
+    admin_email: str
+    target_user_id: int
+    target_user_name: str
+    target_user_email: str
+    started_at: datetime
+    ended_at: datetime | None = None
+    ip_address: str | None = None
+    session_id: str
+    status: str
+    reason: str

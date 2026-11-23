@@ -39,9 +39,11 @@ class Appointment(TenantAwareModel):
     start_time = models.DateTimeField(db_index=True)
     end_time = models.DateTimeField()
     service_type = models.CharField(max_length=100, blank=True)
+    telehealth_link = models.URLField(max_length=2048, blank=True, default='')
     notes = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.SCHEDULED)
     synced_at = models.DateTimeField(null=True, blank=True)
+    reminder_sent_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
     session_title = models.CharField(max_length=255, blank=True)
     external_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
@@ -67,6 +69,36 @@ class Appointment(TenantAwareModel):
 
     def __str__(self) -> str:
         return f'{self.external_client_id} | {self.start_time:%Y-%m-%d %H:%M}'
+
+
+class GroupSession(TenantAwareModel):
+    """
+    A thin shell linking several single-client SessionRuns that were all run
+    together as one group/co-treatment session (e.g. CPT 97154). Deliberately
+    does not duplicate any data-collection concept — each client in the group
+    still gets their own normal SessionRun underneath (own program_snapshot,
+    own TrialEvents, own open/submitted/approved lifecycle, own billing
+    record), unchanged from a solo session. This model only exists so the UI
+    can show/manage them together and reporting can tell which sessions were
+    part of the same physical group.
+    """
+    staff = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='group_sessions',
+        db_constraint=False,
+    )
+    title = models.CharField(max_length=160, blank=True)
+    started_at = models.DateTimeField(default=timezone.now)
+    ended_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        app_label = 'dcm_sessions'
+        ordering = ['-started_at']
+
+    def __str__(self) -> str:
+        return self.title or f'Group session {self.pk}'
 
 
 class SessionRun(TenantAwareModel):
@@ -98,6 +130,13 @@ class SessionRun(TenantAwareModel):
         related_name='session_runs',
         db_constraint=False,
     )
+    group_session = models.ForeignKey(
+        GroupSession,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='session_runs',
+    )
     lesson = models.ForeignKey(
         'programs.Lesson',
         on_delete=models.SET_NULL,
@@ -105,6 +144,16 @@ class SessionRun(TenantAwareModel):
         blank=True,
         related_name='session_runs',
     )
+    class ServiceSetting(models.TextChoices):
+        HOME = 'Home', 'Home'
+        OFFICE = 'Office', 'Office'
+        SCHOOL = 'School', 'School'
+        COMMUNITY = 'Community', 'Community'
+        OTHER = 'Other', 'Other'
+        TELEHEALTH = 'Telehealth', 'Telehealth'
+
+    service_setting = models.CharField(max_length=20, choices=ServiceSetting.choices, blank=True, default='')
+    service_address = models.JSONField(default=dict, blank=True)
     session_name = models.CharField(max_length=160, blank=True)
     message_to_therapist = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN, db_index=True)
@@ -177,12 +226,18 @@ class TrialEvent(OrganizationScopedMixin):
     # seconds for that step. Null for every plain pass/fail trial.
     value_seconds = models.FloatField(null=True, blank=True)
     recorded_at = models.DateTimeField(db_index=True)
+    service_setting = models.CharField(max_length=20, choices=SessionRun.ServiceSetting.choices, blank=True, default='')
     staff_notes = models.TextField(blank=True)
     # Cue/instruction onset timestamp for a latency target — latency is
     # recorded_at (response onset) minus this. Null for every other
     # measurement_type.
     cue_at = models.DateTimeField(null=True, blank=True)
+    client_event_id = models.CharField(max_length=64, null=True, blank=True)
 
+    def save(self, *args, **kwargs):
+        if self._state.adding:
+            self.service_setting = self.session_run.service_setting
+        return super().save(*args, **kwargs)
     def _derive_organization_id(self) -> int | None:
         return self.session_run.organization_id
 
@@ -190,6 +245,10 @@ class TrialEvent(OrganizationScopedMixin):
         app_label = 'dcm_sessions'
         ordering = ['target_id', 'trial_number']
         unique_together = [['session_run', 'target_id', 'trial_number', 'sub_item_key']]
+        constraints = [models.UniqueConstraint(
+            fields=['session_run', 'client_event_id'], condition=models.Q(client_event_id__isnull=False),
+            name='unique_trial_session_client_event_id',
+        )]
 
     def __str__(self) -> str:
         return f'Trial {self.trial_number} — target {self.target_id} [{self.prompt_level_label}]'
@@ -215,6 +274,7 @@ class BehaviorEvent(OrganizationScopedMixin):
     target_name = models.CharField(max_length=200)
     occurred_at = models.DateTimeField(db_index=True)
     duration_seconds = models.PositiveIntegerField(null=True, blank=True)
+    observation_ended_at = models.DateTimeField(null=True, blank=True)
     frequency_count = models.PositiveIntegerField(default=1)
     severity = models.CharField(max_length=10, choices=Severity.choices, blank=True)
     notes = models.TextField(blank=True)
@@ -230,6 +290,11 @@ class BehaviorEvent(OrganizationScopedMixin):
         app_label = 'dcm_sessions'
         ordering = ['occurred_at']
         constraints = [
+            models.CheckConstraint(
+                check=models.Q(observation_ended_at__isnull=True) | (
+                    models.Q(observation_ended_at__gt=models.F('occurred_at'), frequency_count=0, duration_seconds__isnull=True)
+                ), name='valid_scatterplot_observation',
+            ),
             models.UniqueConstraint(
                 fields=['session_run', 'client_event_id'],
                 condition=models.Q(client_event_id__isnull=False),
@@ -424,3 +489,69 @@ class SessionMediaComment(TenantAwareModel):
 
     def __str__(self) -> str:
         return f'Comment on media {self.session_media_id} @ {self.timestamp_seconds}s'
+
+
+class SessionSupervisionNote(TenantAwareModel):
+    """Persistent supervisor guidance attached to a session, including live sessions."""
+    session_run = models.ForeignKey(
+        SessionRun,
+        on_delete=models.CASCADE,
+        related_name='supervision_notes',
+    )
+    class NoteType(models.TextChoices):
+        GUIDANCE = 'guidance', 'Supervisor guidance'
+        PROGRAM_MODIFICATION = 'program_modification', 'Program modification'
+
+    note_type = models.CharField(max_length=24, choices=NoteType.choices, default=NoteType.GUIDANCE)
+    body = models.TextField()
+
+    _org_scoped_fk_fields = ('session_run',)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.session_run.organization_id
+
+    class Meta:
+        app_label = 'dcm_sessions'
+        ordering = ['created_at']
+
+    def __str__(self) -> str:
+        return f'Supervision note on session {self.session_run_id}'
+
+
+class SupervisionContact(TenantAwareModel):
+    """An individual RBT's participation in one supervision contact."""
+    _org_scoped_fk_fields = ('rbt', 'supervisor')
+    rbt = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+', db_constraint=False)
+    supervisor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+', db_constraint=False)
+    date = models.DateField(db_index=True)
+    hours = models.DecimalField(max_digits=5, decimal_places=2)
+    face_to_face = models.BooleanField(default=True)
+    individual = models.BooleanField(default=True)
+    observed_services = models.BooleanField(default=False)
+    qualifications_confirmed = models.BooleanField(default=False)
+    notes = models.TextField(blank=True)
+    void_reason = models.CharField(max_length=500, blank=True)
+
+    class Meta:
+        ordering = ['-date', '-id']
+        constraints = [models.CheckConstraint(check=models.Q(hours__gt=0, hours__lte=24), name='supervision_contact_hours_range')]
+
+    def __str__(self):
+        return f'Supervision contact #{self.pk}'
+
+
+class SupervisionServiceHours(TenantAwareModel):
+    """Explicit monthly total; never infer all ABA work from DCM appointments."""
+    _org_scoped_fk_fields = ('rbt',)
+    rbt = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+', db_constraint=False)
+    month = models.DateField()
+    hours = models.DecimalField(max_digits=6, decimal_places=2)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['organization', 'rbt', 'month'], name='unique_supervision_service_month'),
+            models.CheckConstraint(check=models.Q(hours__gte=0, hours__lte=744), name='supervision_service_hours_range'),
+        ]
+
+    def __str__(self):
+        return f'Supervision service hours #{self.pk}'

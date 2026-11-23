@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 from ninja import Schema
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 
 from shared.schema_types import NonEmptyStr
 from .models import BehaviorEvent
@@ -74,6 +74,31 @@ class AppointmentUpdateRequest(Schema):
 # Session
 # ---------------------------------------------------------------------------
 
+US_STATE_CODES = frozenset('AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY AS GU MP PR VI'.split())
+
+
+class ServiceAddress(Schema):
+    street: str = Field(min_length=1, max_length=200)
+    unit: str = Field(default='', max_length=100)
+    city: str = Field(min_length=1, max_length=100)
+    state: str
+    zip_code: str = Field(pattern=r'^[0-9]{5}(-[0-9]{4})?$')
+    country: Literal['US'] = 'US'
+
+    @field_validator('street', 'unit', 'city', 'state', 'zip_code', mode='before')
+    @classmethod
+    def strip_address_value(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator('state')
+    @classmethod
+    def validate_state(cls, value):
+        value = value.upper()
+        if value not in US_STATE_CODES:
+            raise ValueError('Select a valid US state or territory')
+        return value
+
+
 class TrialSummaryItem(Schema):
     target_id: int
     target_name: str
@@ -81,11 +106,13 @@ class TrialSummaryItem(Schema):
     correct_count: int
     pct_correct: float
     measurement: str = ''
-    measurement_value: float = 0.0
+    measurement_value: float | None = 0.0
     measurement_label: str = ''
 
 
 class SessionRunSchema(Schema):
+    service_address: dict[str, Any] = Field(default_factory=dict)
+    service_setting: str = ''
     id: int
     client_id: int
     staff_id: int | None
@@ -112,7 +139,33 @@ class SessionRunSchema(Schema):
     created_at: datetime
 
 
+class GroupSessionSchema(Schema):
+    id: int
+    staff_id: int | None
+    staff_name: str | None = None
+    title: str = ''
+    started_at: datetime
+    ended_at: datetime | None = None
+    session_runs: list[SessionRunSchema] = []
+
+
+class GroupSessionClientSelection(Schema):
+    client_id: int
+    program_ids: list[int] = []
+
+
+class GroupSessionStartRequest(Schema):
+    rate_observation_mode: Literal['session', 'target_windows'] = 'session'
+    service_setting: Literal['Home', 'Office', 'School', 'Community', 'Other', 'Telehealth', ''] = ''
+    clients: list[GroupSessionClientSelection]
+    title: str = ''
+    latitude: float | None = None
+    longitude: float | None = None
+
+
 class SessionStartRequest(Schema):
+    rate_observation_mode: Literal['session', 'target_windows'] = 'session'
+    service_setting: Literal['Home', 'Office', 'School', 'Community', 'Other', 'Telehealth', ''] = ''
     client_id: int
     appointment_id: int | None = None
     external_appointment_id: str | None = None
@@ -131,6 +184,7 @@ class SessionLinkAppointmentRequest(Schema):
 
 
 class SessionSubmitRequest(Schema):
+    service_address: ServiceAddress | None = None
     ended_at: datetime | None = None
 
 
@@ -161,6 +215,8 @@ class SessionRejectRequest(Schema):
 # ---------------------------------------------------------------------------
 
 class TrialEventSchema(Schema):
+    service_setting: str = ''
+    client_event_id: str | None = None
     id: int
     session_run_id: int
     target_id: int
@@ -176,6 +232,7 @@ class TrialEventSchema(Schema):
 
 
 class TrialEventCreateRequest(Schema):
+    client_event_id: str | None = Field(default=None, min_length=1, max_length=64)
     target_id: int
     target_name: str
     trial_number: int
@@ -200,6 +257,7 @@ class BehaviorEventSchema(Schema):
     target_id: int
     target_name: str
     occurred_at: datetime
+    observation_ended_at: datetime | None = None
     duration_seconds: int | None
     frequency_count: int
     severity: str
@@ -212,6 +270,7 @@ class BehaviorEventCreateRequest(Schema):
     target_id: int
     target_name: str
     occurred_at: datetime
+    observation_ended_at: datetime | None = None
     duration_seconds: int | None = Field(default=None, ge=0)
     frequency_count: int = Field(default=1, ge=0)
     severity: BehaviorEvent.Severity | Literal[''] = ''
@@ -219,6 +278,23 @@ class BehaviorEventCreateRequest(Schema):
     client_event_id: str | None = None
     # Explicit denominator for a `percentage` target (numerator is frequency_count).
     denominator_count: int | None = Field(default=None, ge=0)
+    client_event_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @model_validator(mode='after')
+    def validate_observation(self):
+        if self.observation_ended_at is not None:
+            from datetime import timedelta
+            from django.utils.timezone import is_aware
+            if not is_aware(self.occurred_at) or not is_aware(self.observation_ended_at):
+                raise ValueError('Observation times must include a timezone')
+            duration = self.observation_ended_at - self.occurred_at
+            if duration <= timedelta(0) or duration > timedelta(hours=24):
+                raise ValueError('Observed periods must be positive and no longer than 24 hours')
+            if self.frequency_count != 0 or self.duration_seconds is not None or self.severity:
+                raise ValueError('Observed periods must have zero occurrences, no duration metric, and no severity')
+            if not self.client_event_id:
+                raise ValueError('Observed periods require a stable client_event_id')
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +427,20 @@ class SessionMediaUpdateRequest(Schema):
     review_status: str | None = None
 
 
+class SessionSupervisionNoteSchema(Schema):
+    note_type: Literal['guidance', 'program_modification'] = 'guidance'
+    id: int
+    session_run_id: int
+    body: str
+    author: str | None = None
+    created_at: datetime
+
+
+class SessionSupervisionNoteCreateRequest(Schema):
+    note_type: Literal['guidance', 'program_modification'] = 'guidance'
+    body: NonEmptyStr
+
+
 # ---------------------------------------------------------------------------
 # Offline batch sync — mobile submits everything in one payload
 # ---------------------------------------------------------------------------
@@ -361,6 +451,7 @@ class SessionSyncPayload(Schema):
     All events are submitted in a single request when connectivity is restored.
     The API creates any events not already present (idempotent on trial_number per target).
     """
+    service_address: ServiceAddress | None = None
     ended_at: datetime | None = None
     trials: list[TrialEventCreateRequest] = []
     behaviors: list[BehaviorEventCreateRequest] = []
