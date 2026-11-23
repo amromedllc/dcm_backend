@@ -250,6 +250,7 @@ TENANT_BASE_DOMAIN = env('TENANT_BASE_DOMAIN')
 # Turnstile account configured yet. Flip to true once a real site exists.
 TURNSTILE_SECRET_KEY = env('TURNSTILE_SECRET_KEY', default='')
 REQUIRE_SIGNUP_CAPTCHA = env.bool('REQUIRE_SIGNUP_CAPTCHA', default=False)
+SIGNUP_SALES_NOTIFICATION_EMAIL = env('SIGNUP_SALES_NOTIFICATION_EMAIL', default='sales@therapypms.com')
 
 CORS_ALLOWED_ORIGINS = env.list(
     'CORS_ALLOWED_ORIGINS',
