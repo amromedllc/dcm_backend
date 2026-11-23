@@ -253,7 +253,6 @@ class Target(TenantAwareModel):
         PERCENTAGE                 = 'percentage',                'Percentage'
         RATING_SCALE               = 'rating_scale',               'Rating Scale'
         ABC                        = 'abc',                        'ABC'
-        SCATTERPLOT                = 'scatterplot',                'Scatterplot'
         NARRATIVE_EVENT            = 'narrative_event',            'Narrative/Event Recording'
         PERMANENT_PRODUCT          = 'permanent_product',          'Permanent Product'
         FIDELITY                   = 'fidelity',                   'Procedure Fidelity'
