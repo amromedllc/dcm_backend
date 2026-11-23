@@ -64,11 +64,13 @@ class TpmsAdminEmailSettingSchema(Schema):
     admin_id: int
     facility_name: str = ''
     email_notifications_enabled: bool
+    is_active: bool = True
 
 
 class TpmsAdminIdSeed(Schema):
     admin_id: int
     facility_name: str = ''
+    is_active: bool = True
 
 
 class OrganizationPracticeEmailSettingsSchema(Schema):
@@ -105,12 +107,14 @@ class TpmsAdminIdCreate(Schema):
     admin_id: int
     facility_name: str = ''
     email_notifications_enabled: bool = False
+    is_active: bool = True
 
 
 class TpmsAdminEmailSettingUpdate(Schema):
     admin_id: int | None = None
     facility_name: str | None = None
     email_notifications_enabled: bool | None = None
+    is_active: bool | None = None
 
 
 class SuperadminAPIKeyCreate(Schema):

@@ -103,6 +103,7 @@ def _serialize_superadmin_org(org: Organization) -> dict:
                     'admin_id': row.admin_id,
                     'facility_name': row.facility_name,
                     'email_notifications_enabled': row.email_notifications_enabled,
+                    'is_active': row.is_active,
                 }
             for row in org.tpms_admin_ids.all()
         ],
@@ -166,6 +167,7 @@ def create_superadmin_organization(request, data: OrganizationSuperadminCreate):
                 organization=org,
                 admin_id=item.admin_id,
                 facility_name=item.facility_name.strip(),
+                is_active=item.is_active,
             )
 
     return 201, _serialize_superadmin_org(
@@ -232,12 +234,14 @@ def create_superadmin_tpms_admin_id(request, data: TpmsAdminIdCreate):
         admin_id=data.admin_id,
         facility_name=data.facility_name.strip(),
         email_notifications_enabled=data.email_notifications_enabled,
+        is_active=data.is_active,
     )
     return 201, {
         'id': row.id,
         'admin_id': row.admin_id,
         'facility_name': row.facility_name,
         'email_notifications_enabled': row.email_notifications_enabled,
+        'is_active': row.is_active,
     }
 
 
@@ -265,6 +269,9 @@ def update_superadmin_practice_email_setting(
     if data.email_notifications_enabled is not None:
         row.email_notifications_enabled = data.email_notifications_enabled
         update_fields.append('email_notifications_enabled')
+    if data.is_active is not None:
+        row.is_active = data.is_active
+        update_fields.append('is_active')
     if update_fields:
         row.save(update_fields=update_fields)
     return {
@@ -272,6 +279,7 @@ def update_superadmin_practice_email_setting(
         'admin_id': row.admin_id,
         'facility_name': row.facility_name,
         'email_notifications_enabled': row.email_notifications_enabled,
+        'is_active': row.is_active,
     }
 
 
