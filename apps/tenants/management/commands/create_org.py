@@ -43,9 +43,6 @@ class Command(BaseCommand):
         if Organization.objects.filter(schema_name=schema).exists():
             raise CommandError(f'Schema "{schema}" already exists.')
 
-        if Domain.objects.filter(domain=domain).exists():
-            raise CommandError(f'Domain "{domain}" is already registered.')
-
         if admin_email and not admin_password:
             raise CommandError('--admin-password is required when --admin-email is provided.')
 

@@ -228,6 +228,10 @@ class TrialEvent(OrganizationScopedMixin):
     recorded_at = models.DateTimeField(db_index=True)
     service_setting = models.CharField(max_length=20, choices=SessionRun.ServiceSetting.choices, blank=True, default='')
     staff_notes = models.TextField(blank=True)
+    # Cue/instruction onset timestamp for a latency target — latency is
+    # recorded_at (response onset) minus this. Null for every other
+    # measurement_type.
+    cue_at = models.DateTimeField(null=True, blank=True)
     client_event_id = models.CharField(max_length=64, null=True, blank=True)
 
     def save(self, *args, **kwargs):
@@ -275,6 +279,9 @@ class BehaviorEvent(OrganizationScopedMixin):
     severity = models.CharField(max_length=10, choices=Severity.choices, blank=True)
     notes = models.TextField(blank=True)
     client_event_id = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+    # Explicit denominator for a `percentage` target (numerator is
+    # frequency_count). Null for every other measurement_type.
+    denominator_count = models.PositiveIntegerField(null=True, blank=True)
 
     def _derive_organization_id(self) -> int | None:
         return self.session_run.organization_id
@@ -309,12 +316,14 @@ class ABCEvent(OrganizationScopedMixin):
         blank=True,
     )
     external_client_id = models.BigIntegerField(null=True, blank=True, db_index=True)
+    target_id = models.PositiveIntegerField(null=True, blank=True, db_index=True)
+    target_name = models.CharField(max_length=200, blank=True, default='')
     occurred_at = models.DateTimeField(db_index=True)
     ended_at = models.DateTimeField(null=True, blank=True)
     duration_seconds = models.PositiveIntegerField(null=True, blank=True)
-    antecedent = models.TextField()
+    antecedent = models.TextField(blank=True)
     behavior_description = models.TextField()
-    consequence = models.TextField()
+    consequence = models.TextField(blank=True)
     setting = models.CharField(max_length=200, blank=True)
     staff_response = models.TextField(blank=True)
     notes = models.TextField(blank=True)

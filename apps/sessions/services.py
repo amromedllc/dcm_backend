@@ -235,6 +235,9 @@ def build_program_snapshot(
                 'interval_pause_on_warning': target.interval_pause_on_warning,
                 'interval_warn_seconds_before': target.interval_warn_seconds_before,
                 'interval_warning_sound': target.interval_warning_sound,
+                'rating_min': target.rating_min,
+                'rating_max': target.rating_max,
+                'percentage_fixed_denominator': target.percentage_fixed_denominator,
                 'prompting_template': prompting_template,
                 'current_prompt_level_index': current_prompt_level_index,
                 # From the target's current-status workflow phase, if one is

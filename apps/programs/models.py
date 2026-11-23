@@ -245,6 +245,19 @@ class Target(TenantAwareModel):
         # FREQUENCY        = 'frequency',        'Frequency (legacy)'
         # WHOLE_INTERVAL   = 'whole_interval',   'Whole Interval (legacy)'
         INTERVAL = 'interval', 'Interval (legacy)'
+        LATENCY                   = 'latency',                   'Latency'
+        WHOLE_INTERVAL             = 'whole_interval',            'Whole Interval'
+        PARTIAL_INTERVAL           = 'partial_interval',          'Partial Interval'
+        MOMENTARY_TIME_SAMPLING    = 'momentary_time_sampling',   'Momentary Time Sampling'
+        YES_NO                     = 'yes_no',                    'Yes/No'
+        PERCENTAGE                 = 'percentage',                'Percentage'
+        RATING_SCALE               = 'rating_scale',               'Rating Scale'
+        ABC                        = 'abc',                        'ABC'
+        SCATTERPLOT                = 'scatterplot',                'Scatterplot'
+        NARRATIVE_EVENT            = 'narrative_event',            'Narrative/Event Recording'
+        PERMANENT_PRODUCT          = 'permanent_product',          'Permanent Product'
+        FIDELITY                   = 'fidelity',                   'Procedure Fidelity'
+        OPPORTUNITIES              = 'opportunities',               'Opportunities'
 
     class Measurement(models.TextChoices):
         """The metric a target's raw session data rolls up into. Which values are
@@ -258,6 +271,15 @@ class Target(TenantAwareModel):
         MIN_OBSERVED_DURATION   = 'min_observed_duration',   'Min. Observed Duration'
         MAX_OBSERVED_DURATION   = 'max_observed_duration',   'Max. Observed Duration'
         AVG_OBSERVED_DURATION   = 'avg_observed_duration',   'Avg. Observed Duration'
+        AVG_LATENCY_SECONDS     = 'avg_latency_seconds',     'Avg. Latency'
+        MIN_LATENCY_SECONDS     = 'min_latency_seconds',     'Min. Latency'
+        MAX_LATENCY_SECONDS     = 'max_latency_seconds',     'Max. Latency'
+        PERCENT_INTERVALS       = 'percent_intervals',       'Percent of Intervals'
+        PERCENT_YES             = 'percent_yes',             'Percent Yes'
+        AVG_RATING              = 'avg_rating',              'Avg. Rating'
+        FIDELITY_PERCENT        = 'fidelity_percent',        'Fidelity %'
+        PERCENT_OF_DENOMINATOR  = 'percent_of_denominator',  'Percentage'
+        TOTAL_PRODUCT_COUNT     = 'total_product_count',     'Total Product Count'
 
     class TimerType(models.TextChoices):
         """How the recording screen's timer behaves for a rate target."""
@@ -363,6 +385,11 @@ class Target(TenantAwareModel):
     interval_warning_sound = models.CharField(
         max_length=20, choices=IntervalWarningSound.choices, blank=True, default='',
     )
+    # Ordinal scale bounds — only meaningful when measurement_type is
+    # 'rating_scale'. The recording screen scores within [rating_min, rating_max].
+    rating_min = models.PositiveSmallIntegerField(default=1)
+    rating_max = models.PositiveSmallIntegerField(default=5)
+    percentage_fixed_denominator = models.PositiveIntegerField(null=True, blank=True)
     # No longer choice-constrained — status keys are org-configurable via TargetStatus.
     status = models.CharField(max_length=20, default='waiting', db_index=True)
     mastery_mode = models.CharField(max_length=10, choices=MasteryMode.choices, default=MasteryMode.MANUAL)
@@ -403,6 +430,9 @@ class Target(TenantAwareModel):
 
 _ACCURACY_MEASUREMENTS = [Target.Measurement.PERCENT_CORRECT, Target.Measurement.FREQUENCY]
 
+_INTERVAL_MEASUREMENTS = [Target.Measurement.PERCENT_INTERVALS]
+_NO_COMPUTED_MEASUREMENT: list[str] = []  # event-log types: no automatic metric
+
 MEASUREMENTS_BY_TARGET_TYPE: dict[str, list[str]] = {
     Target.MeasurementType.DISCRETE_TRIAL: _ACCURACY_MEASUREMENTS,
     Target.MeasurementType.SCATTERPLOT: [Target.Measurement.FREQUENCY],
@@ -420,6 +450,30 @@ MEASUREMENTS_BY_TARGET_TYPE: dict[str, list[str]] = {
         Target.Measurement.RATE_PER_HOUR,
         Target.Measurement.RATE_PER_MINUTE,
     ],
+    Target.MeasurementType.TASK_ANALYSIS: _ACCURACY_MEASUREMENTS,
+    Target.MeasurementType.SET_OF_TARGETS: _ACCURACY_MEASUREMENTS,
+    Target.MeasurementType.SHAPING: _ACCURACY_MEASUREMENTS,
+    Target.MeasurementType.LATENCY: [
+        Target.Measurement.AVG_LATENCY_SECONDS,
+        Target.Measurement.MIN_LATENCY_SECONDS,
+        Target.Measurement.MAX_LATENCY_SECONDS,
+    ],
+    Target.MeasurementType.WHOLE_INTERVAL: _INTERVAL_MEASUREMENTS,
+    Target.MeasurementType.PARTIAL_INTERVAL: _INTERVAL_MEASUREMENTS,
+    Target.MeasurementType.MOMENTARY_TIME_SAMPLING: _INTERVAL_MEASUREMENTS,
+    Target.MeasurementType.YES_NO: [Target.Measurement.PERCENT_YES],
+    Target.MeasurementType.PERCENTAGE: [Target.Measurement.PERCENT_OF_DENOMINATOR],
+    Target.MeasurementType.RATING_SCALE: [Target.Measurement.AVG_RATING],
+    Target.MeasurementType.PERMANENT_PRODUCT: [Target.Measurement.TOTAL_PRODUCT_COUNT],
+    Target.MeasurementType.FIDELITY: [Target.Measurement.FIDELITY_PERCENT],
+    # Discrete response to a defined opportunity, prompt-coded — identical
+    # shape to discrete_trial (TrialEvent + response_score/prompt_level_label),
+    # just scored against opportunities instead of trials.
+    Target.MeasurementType.OPPORTUNITIES: _ACCURACY_MEASUREMENTS,
+    # Qualitative/event-log types — no automatic computed metric.
+    Target.MeasurementType.ABC: _NO_COMPUTED_MEASUREMENT,
+    Target.MeasurementType.NARRATIVE_EVENT: _NO_COMPUTED_MEASUREMENT,
+    Target.MeasurementType.SCATTERPLOT: _NO_COMPUTED_MEASUREMENT,
 }
 
 DEFAULT_MEASUREMENT_BY_TARGET_TYPE: dict[str, str] = {
@@ -427,6 +481,19 @@ DEFAULT_MEASUREMENT_BY_TARGET_TYPE: dict[str, str] = {
     Target.MeasurementType.SCATTERPLOT: Target.Measurement.FREQUENCY,
     Target.MeasurementType.DURATION: Target.Measurement.TOTAL_OBSERVED_DURATION,
     Target.MeasurementType.RATE: Target.Measurement.RATE_PER_MINUTE,
+    Target.MeasurementType.TASK_ANALYSIS: Target.Measurement.PERCENT_CORRECT,
+    Target.MeasurementType.SET_OF_TARGETS: Target.Measurement.PERCENT_CORRECT,
+    Target.MeasurementType.SHAPING: Target.Measurement.PERCENT_CORRECT,
+    Target.MeasurementType.LATENCY: Target.Measurement.AVG_LATENCY_SECONDS,
+    Target.MeasurementType.WHOLE_INTERVAL: Target.Measurement.PERCENT_INTERVALS,
+    Target.MeasurementType.PARTIAL_INTERVAL: Target.Measurement.PERCENT_INTERVALS,
+    Target.MeasurementType.MOMENTARY_TIME_SAMPLING: Target.Measurement.PERCENT_INTERVALS,
+    Target.MeasurementType.YES_NO: Target.Measurement.PERCENT_YES,
+    Target.MeasurementType.PERCENTAGE: Target.Measurement.PERCENT_OF_DENOMINATOR,
+    Target.MeasurementType.RATING_SCALE: Target.Measurement.AVG_RATING,
+    Target.MeasurementType.PERMANENT_PRODUCT: Target.Measurement.TOTAL_PRODUCT_COUNT,
+    Target.MeasurementType.FIDELITY: Target.Measurement.FIDELITY_PERCENT,
+    Target.MeasurementType.OPPORTUNITIES: Target.Measurement.PERCENT_CORRECT,
 }
 
 # Target types for which timer_type is surfaced / stored.

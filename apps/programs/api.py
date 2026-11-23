@@ -1,4 +1,5 @@
 import os
+import tempfile
 from copy import copy
 from functools import wraps
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from apps.central_library.models import (
     CentralProgram, CentralProgramFolder, CentralTarget,
     ChangelogEntry, KnowledgeBaseMedia, KnowledgeBaseModule, KnowledgeBaseTopic,
 )
+from apps.central_library.management.commands.import_central_programs import import_file
 from shared import ai_client
 from shared.ai_client import AIError
 from shared.html_sanitize import sanitize_kb_html
@@ -60,7 +62,7 @@ from .schemas import (
     OrgProgramSchema, OrgProgramCreateRequest, AssignOrgProgramRequest,
     AssignOrgProgramBulkRequest, DuplicateOrgProgramRequest, SetOrgProgramLockRequest,
     ProgramFolderSchema, ProgramFolderRequest, SetProgramFolderRequest,
-    CentralProgramFolderSchema, CentralProgramFolderRequest, ImportCentralFolderResult,
+    CentralProgramFolderSchema, CentralProgramFolderRequest, ImportCentralFolderResult, ImportCentralProgramsResult,
     CentralProgramRequest, CentralProgramUpdateRequest,
     CentralTargetSchema, CentralTargetRequest, CentralTargetUpdateRequest,
     TreatmentAreaSchema, TreatmentAreaRequest,
@@ -2833,6 +2835,7 @@ def _serialize_central_program(
         'objective': program.objective,
         'instructions': program.instructions,
         'prompting_template_id': None,
+        'prompting_levels': program.prompting_levels,
         'folder_id': program.folder_id,
         'image_url': _optimized_program_image_url(request, program.image),
         'already_imported': target_count > 0 and imported_target_count >= target_count,
@@ -2951,6 +2954,7 @@ def _serialize_superadmin_central_program(program: CentralProgram, request, incl
         'objective': program.objective,
         'instructions': program.instructions,
         'prompting_template_id': None,
+        'prompting_levels': program.prompting_levels,
         'folder_id': program.folder_id,
         'image_url': _optimized_program_image_url(request, program.image),
         'already_imported': False,
@@ -3062,6 +3066,7 @@ def superadmin_create_central_program(request, data: CentralProgramRequest):
         tags=data.tags,
         objective=data.objective,
         instructions=data.instructions,
+        prompting_levels=data.prompting_levels,
         folder_id=data.folder_id,
         display_order=data.display_order,
         created_by=request.user,
@@ -3071,6 +3076,34 @@ def superadmin_create_central_program(request, data: CentralProgramRequest):
     for index, target_data in enumerate(data.targets):
         _create_central_target(program, target_data, display_order=index)
     return 201, _serialize_superadmin_central_program(program, request, include_targets=True)
+
+
+@router.post('/superadmin/central-programs/import', response={201: ImportCentralProgramsResult})
+def superadmin_import_central_programs(
+    request,
+    file: UploadedFile = File(...),
+    folder_name: str = Form('Manual Programs'),
+    replace: bool = Form(False),
+):
+    _require_superadmin(request)
+    filename = os.path.basename(file.name or '')
+    if not filename.lower().endswith(('.csv', '.xlsx')):
+        raise HttpError(400, 'Only .csv and .xlsx files are supported.')
+    try:
+        with tempfile.NamedTemporaryFile(suffix=os.path.splitext(filename)[1]) as tmp:
+            for chunk in file.chunks():
+                tmp.write(chunk)
+            tmp.flush()
+            result = import_file(tmp.name, folder_name=folder_name, replace=replace, user=request.user)
+    except Exception as exc:
+        raise HttpError(400, str(exc))
+    return 201, {
+        'created_count': result['created'],
+        'updated_count': result['updated'],
+        'skipped_count': result['skipped'],
+        'folder_id': result['folder_id'],
+        'folder_name': result['folder_name'],
+    }
 
 
 @router.get('/superadmin/central-programs/{program_id}', response=OrgProgramSchema)
@@ -3296,11 +3329,19 @@ def _find_linked_org_program(source: CentralProgram, user) -> Program | None:
 
 
 def _create_linked_org_program(source: CentralProgram, user) -> Program:
+    prompting_template = None
+    if source.prompting_levels:
+        prompting_template = PromptingTemplate.objects.create(
+            name=f'{source.name} Prompting',
+            levels=source.prompting_levels,
+            created_by=user,
+        )
     dest = Program.objects.create(
         is_template=True,
         external_client_id=None,
         status=Program.Status.ACTIVE,
         name=source.name,
+        prompting_template=prompting_template,
         category=source.category,
         phase=source.phase,
         treatment_area=source.treatment_area,
@@ -3320,6 +3361,13 @@ def _append_central_targets(dest: Program, targets, user) -> None:
     """Copy linked settings into this facility, then attach local IDs only."""
     start_order = dest.targets.count()
     for i, t in enumerate(targets):
+        prompting_template = None
+        if t.prompting_levels:
+            prompting_template = PromptingTemplate.objects.create(
+                name=f'{t.name} Prompting',
+                levels=t.prompting_levels,
+                created_by=user,
+            )
         sync_legacy_links(t)
         linked = pull_links(t, user)
         prompting = linked.get('prompting', [(None, dest.prompting_template)])[0][1]

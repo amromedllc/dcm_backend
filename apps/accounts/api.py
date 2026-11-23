@@ -26,6 +26,18 @@ from .security_audit import audit_security
 from . import step_up
 from .pin_security import verify_pin_attempt, set_account_pin, update_pin_protection
 from . import mfa
+from .models import PasswordSetLink, User, UserMFA
+from .auth import (
+    INACTIVE_FACILITY_MESSAGE,
+    create_access_token,
+    create_refresh_token,
+    decode_token,
+    jwt_auth,
+    jwt_auth_any_role,
+    token_tenant_mismatch,
+    user_facility_is_active,
+)
+from .permissions import get_user_permissions, require_permission, resolve_permission_organization
 from .models import PasswordResetLink, PasswordSetLink, User, UserMFA
 from .auth import (
     create_access_token, create_refresh_token, decode_token, is_token_blocked, session_start_from_payload, consume_refresh_token,
@@ -108,6 +120,8 @@ router = Router()
 
 
 def _issue_tokens(user: User, tenant_id: int) -> TokenResponse:
+    if not user_facility_is_active(user, tenant_id):
+        raise HttpError(403, INACTIVE_FACILITY_MESSAGE)
     # This app issues JWTs directly rather than calling django.contrib.auth's
     # login(), so the user_logged_in signal that normally stamps last_login
     # never fires — do it here instead, since every login/token-issuing path
@@ -665,6 +679,8 @@ def _staff_local_auth(tenant, user: User, password: str) -> TokenResponse:
     if tenant_admin_ids:
         if user.external_admin_id not in tenant_admin_ids:
             raise HttpError(401, 'Invalid email or password')
+        if not user_facility_is_active(user, tenant.pk):
+            raise HttpError(403, INACTIVE_FACILITY_MESSAGE)
     elif user.organization_id != tenant.pk:
         # Native (non-TPMS) org — bind by Organization membership instead.
         raise HttpError(401, 'Invalid email or password')
@@ -679,10 +695,6 @@ def _tpms_caregiver_auth(request, tenant, email: str, payload: dict) -> TokenRes
     normalize_client_portal_payload's docstring): the base login payload's
     user.id already identifies the one linked patient.
     """
-    tenant_admin_ids = set(tenant.tpms_admin_ids.values_list('admin_id', flat=True))
-    if not tenant_admin_ids:
-        raise HttpError(401, 'Invalid email or password')
-
     try:
         profile = normalize_client_portal_payload(email, payload)
     except TpmsAuthError:
@@ -707,8 +719,13 @@ def _tpms_caregiver_auth(request, tenant, email: str, payload: dict) -> TokenRes
     # field (a client-portal payload carries no practice id of its own).
     # Never guess a practice for a caregiver the way the staff path's
     # single-practice fallback does — always require an explicit match.
-    if client.external_admin_id is None or client.external_admin_id not in tenant_admin_ids:
+    if client.external_admin_id is None:
         raise HttpError(401, 'Invalid email or password')
+    facility = tenant.tpms_admin_ids.filter(admin_id=client.external_admin_id).first()
+    if facility is None:
+        raise HttpError(401, 'Invalid email or password')
+    if not facility.is_active:
+        raise HttpError(403, INACTIVE_FACILITY_MESSAGE)
 
     provision_email = profile.email or email
 
@@ -813,6 +830,8 @@ def refresh_token(request, data: RefreshRequest):
         from .session_security import enforce_session_activity
         enforce_session_activity(payload, getattr(request, 'tenant', None))
         user = User.objects.get(id=int(payload['sub']), is_active=True)
+        if not user_facility_is_active(user, int(payload['org_id'])):
+            raise HttpError(403, INACTIVE_FACILITY_MESSAGE)
         # Reuse the tenant this refresh token was issued for — not
         # request.tenant again — so a refresh can never move a session to a
         # different tenant even if somehow presented elsewhere (defense in
