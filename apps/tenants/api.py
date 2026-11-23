@@ -140,6 +140,7 @@ def _serialize_superadmin_org(org: Organization) -> dict:
         'schema_name': org.schema_name,
         'plan': org.plan,
         'is_active': org.is_active,
+        'trial_ends_at': org.trial_ends_at,
         'domain': primary_domain or fallback_domain,
         'tpms_admin_ids': [
                 {
@@ -275,6 +276,10 @@ def create_superadmin_organization(request, data: OrganizationSuperadminCreate):
         taken = ', '.join(str(admin_id) for admin_id in duplicate_admin_ids.values_list('admin_id', flat=True))
         raise HttpError(409, f'TPMS admin ID(s) already mapped: {taken}')
 
+    trial_ends_at = (
+        timezone.now() + timedelta(days=Organization.FREE_TRIAL_DAYS)
+        if data.plan == Organization.Plan.FREE_TRIAL else None
+    )
     with transaction.atomic():
         org = Organization.objects.create(
             name=data.name.strip(),
@@ -282,6 +287,7 @@ def create_superadmin_organization(request, data: OrganizationSuperadminCreate):
             schema_name=schema_name,
             plan=data.plan,
             is_active=data.is_active,
+            trial_ends_at=trial_ends_at,
         )
         Domain.objects.create(tenant=org, domain=domain, is_primary=True)
         from apps.tenants.services import copy_default_target_statuses_to_org
@@ -320,6 +326,9 @@ def update_superadmin_organization(request, organization_id: int, data: Organiza
         update_fields.append('slug')
     if data.plan is not None:
         _validate_plan(data.plan)
+        if data.plan == Organization.Plan.FREE_TRIAL and org.plan != Organization.Plan.FREE_TRIAL:
+            org.trial_ends_at = timezone.now() + timedelta(days=Organization.FREE_TRIAL_DAYS)
+            update_fields.append('trial_ends_at')
         org.plan = data.plan
         update_fields.append('plan')
     if data.is_active is not None:

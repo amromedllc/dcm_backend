@@ -109,6 +109,7 @@ class OrganizationPracticeEmailSettingsSchema(Schema):
     schema_name: str
     plan: str
     is_active: bool
+    trial_ends_at: datetime | None = None
     domain: str | None = None
     tpms_admin_ids: list[TpmsAdminEmailSettingSchema]
 

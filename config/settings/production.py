@@ -197,6 +197,10 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'apps.notifications.tasks.send_upcoming_appointment_reminders',
         'schedule': crontab(minute='*/5'),
     },
+    'deactivate-expired-free-trials': {
+        'task': 'apps.tenants.tasks.deactivate_expired_free_trials',
+        'schedule': crontab(minute=0),
+    },
 }
 
 STATIC_URL = '/static/'

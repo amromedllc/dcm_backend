@@ -4,9 +4,12 @@ from django.db import models
 
 class Organization(TenantMixin):
     class Plan(models.TextChoices):
+        FREE_TRIAL = 'free_trial', 'Free Trial (30 days)'
         STARTER = 'starter', 'Starter'
         PROFESSIONAL = 'professional', 'Professional'
         ENTERPRISE = 'enterprise', 'Enterprise'
+
+    FREE_TRIAL_DAYS = 30
 
     class AutomaticLogoutMinutes(models.IntegerChoices):
         FIVE_MINUTES = 5, '5 minutes'
@@ -33,6 +36,8 @@ class Organization(TenantMixin):
     integration_email = models.EmailField(blank=True, default='')
     integration_password_encrypted = models.TextField(blank=True, default='')
     integration_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
+    # Set on creation when plan == FREE_TRIAL; see tasks.deactivate_expired_free_trials.
+    trial_ends_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
