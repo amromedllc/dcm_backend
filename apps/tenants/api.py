@@ -268,8 +268,6 @@ def create_superadmin_organization(request, data: OrganizationSuperadminCreate):
         raise HttpError(409, 'Organization slug already exists')
     if Organization.objects.filter(schema_name=schema_name).exists():
         raise HttpError(409, 'Organization schema already exists')
-    if Domain.objects.filter(domain=domain).exists():
-        raise HttpError(409, 'Organization domain already exists')
     seed_admin_ids = [item.admin_id for item in data.tpms_admin_ids]
     duplicate_admin_ids = OrganizationTpmsAdminId.objects.filter(admin_id__in=seed_admin_ids)
     if duplicate_admin_ids.exists():
@@ -332,8 +330,8 @@ def update_superadmin_organization(request, organization_id: int, data: Organiza
         domain = data.domain.lower().strip()
         if not domain:
             raise HttpError(400, 'Domain is required')
-        if Domain.objects.exclude(tenant=org).filter(domain=domain).exists():
-            raise HttpError(409, 'Organization domain already exists')
+        if org.domains.exclude(is_primary=True).filter(domain=domain).exists():
+            raise HttpError(409, 'Domain is already registered for this organization')
         primary = org.domains.filter(is_primary=True).first()
         if primary:
             primary.domain = domain
