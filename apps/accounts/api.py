@@ -27,7 +27,16 @@ from . import step_up
 from .pin_security import verify_pin_attempt, set_account_pin, update_pin_protection
 from . import mfa
 from .models import PasswordSetLink, User, UserMFA
-from .auth import create_access_token, create_refresh_token, decode_token, jwt_auth, jwt_auth_any_role, token_tenant_mismatch
+from .auth import (
+    INACTIVE_FACILITY_MESSAGE,
+    create_access_token,
+    create_refresh_token,
+    decode_token,
+    jwt_auth,
+    jwt_auth_any_role,
+    token_tenant_mismatch,
+    user_facility_is_active,
+)
 from .permissions import get_user_permissions, require_permission, resolve_permission_organization
 from .schemas import (
     LoginRequest,
