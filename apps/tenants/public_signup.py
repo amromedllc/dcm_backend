@@ -20,6 +20,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.mail import EmailMultiAlternatives
 from django.core.validators import validate_email
 from django.db import transaction
 from django.utils import timezone
@@ -65,6 +66,50 @@ def _unique_slug_and_schema(organization_name: str) -> tuple[str, str]:
         slug = f'{base_slug}-{suffix}'
         schema_name = _schema_from_slug(slug)
     return slug, schema_name
+
+
+def _send_signup_emails(org, admin_user, phone_number: str, domain: str, trial_ends_at) -> None:
+    """Best-effort notification emails — failure here must never fail the
+    signup itself (the organization/admin already exist at this point)."""
+    trial_end_str = timezone.localtime(trial_ends_at).strftime('%B %-d, %Y')
+
+    try:
+        welcome = EmailMultiAlternatives(
+            subject='Welcome to Progressly — your free trial is ready',
+            body=(
+                f"Hi {admin_user.first_name},\n\n"
+                f'Your Progressly organization "{org.name}" is ready, with a free 30-day trial '
+                f'through {trial_end_str}.\n\n'
+                f'Sign in at: https://{domain}\n'
+                f'Email: {admin_user.email}\n\n'
+                "We've pre-loaded a demo staff member, client, and a couple of sample sessions "
+                "so you can explore right away."
+            ),
+            from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', None),
+            to=[admin_user.email],
+        )
+        welcome.send(fail_silently=False)
+    except Exception:
+        logger.exception('Failed to send demo-signup welcome email to %s', admin_user.email)
+
+    sales_email = getattr(settings, 'SIGNUP_SALES_NOTIFICATION_EMAIL', '')
+    if not sales_email:
+        return
+    try:
+        sales_notice = EmailMultiAlternatives(
+            subject=f'New free-trial signup: {org.name}',
+            body=(
+                f'Organization: {org.name} ({domain})\n'
+                f'Admin: {admin_user.first_name} {admin_user.last_name} <{admin_user.email}>\n'
+                f'Phone: {phone_number}\n'
+                f'Trial ends: {trial_end_str}\n'
+            ),
+            from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', None),
+            to=[sales_email],
+        )
+        sales_notice.send(fail_silently=False)
+    except Exception:
+        logger.exception('Failed to send demo-signup sales notification for org %s', org.id)
 
 
 @router.post('/signup', response={201: PublicSignupResponse}, auth=None)
@@ -131,6 +176,7 @@ def public_signup(request, data: PublicSignupRequest):
             seed_demo_dataset(org, admin_user)
 
     tokens = _issue_tokens(admin_user, org.pk)
+    _send_signup_emails(org, admin_user, phone_number, domain, trial_ends_at)
 
     logger.info('Public demo signup: organization %s (%s), admin %s', org.id, org.slug, admin_user.email)
 
