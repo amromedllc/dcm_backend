@@ -32,7 +32,13 @@ class FakeRedis:
         return True
 
 
-@override_settings(AUTH_SESSION_MAX_HOURS=8, JWT_SECRET_KEY='pin-rotation-test-signing-key-at-least-32-bytes')
+@override_settings(
+    AUTH_SESSION_MAX_HOURS=8,
+    JWT_SECRET_KEY='pin-rotation-test-signing-key-at-least-32-bytes',
+    JWT_ALGORITHM='HS256',
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES=15,
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS=7,
+)
 class PinTokenRotationTests(SimpleTestCase):
     def setUp(self):
         audit = mock.patch('apps.accounts.security_audit.record_security_event')
@@ -41,7 +47,8 @@ class PinTokenRotationTests(SimpleTestCase):
         self.now = timezone.now()
         self.start = (self.now - timedelta(hours=2)).timestamp()
         self.user = mock.Mock(id=1, email='test@example.com', role='staff', is_superuser=False,
-                              pin_lock_enabled=True, has_pin=True, pin_locked_until=None, pin_failed_attempts=0)
+                              organization_id=1, pin_lock_enabled=True, has_pin=True,
+                              pin_locked_until=None, pin_failed_attempts=0)
         self.user.check_pin.return_value = True
         self.request = SimpleNamespace(tenant=SimpleNamespace(pk=1, pin_lock_allowed=True))
         self.redis = FakeRedis()

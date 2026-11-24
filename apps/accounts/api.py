@@ -39,6 +39,7 @@ from .auth import (
     session_start_from_payload,
     token_tenant_mismatch,
     user_facility_is_active,
+    user_tenant_mismatch,
 )
 from .permissions import (
     get_user_permissions,
@@ -115,6 +116,8 @@ router = Router()
 
 
 def _issue_tokens(user: User, tenant_id: int) -> TokenResponse:
+    if user_tenant_mismatch(user, tenant_id):
+        raise HttpError(401, 'Invalid account organization')
     if not user_facility_is_active(user, tenant_id):
         raise HttpError(403, INACTIVE_FACILITY_MESSAGE)
     # This app issues JWTs directly rather than calling django.contrib.auth's
@@ -825,6 +828,8 @@ def refresh_token(request, data: RefreshRequest):
         from .session_security import enforce_session_activity
         enforce_session_activity(payload, getattr(request, 'tenant', None))
         user = User.objects.get(id=int(payload['sub']), is_active=True)
+        if user_tenant_mismatch(user, int(payload['org_id'])):
+            raise HttpError(401, 'Invalid or expired token')
         if not user_facility_is_active(user, int(payload['org_id'])):
             raise HttpError(403, INACTIVE_FACILITY_MESSAGE)
         # Reuse the tenant this refresh token was issued for — not
@@ -1389,12 +1394,14 @@ def submit_password_set_link(request, data: PasswordSetLinkSubmitRequest):
             raise HttpError(404, 'This link is invalid or has expired')
 
         user = link.user
+        if user.organization_id is None or user.organization_id != tenant.pk:
+            raise HttpError(404, 'This link is invalid or has expired')
         user.set_password(data.password)
         user.save(update_fields=['password'])
         link.used_at = timezone.now()
         link.save(update_fields=['used_at'])
 
-    return _mfa_gate(tenant, _issue_tokens(user, tenant.pk))
+    return _mfa_gate(tenant, _issue_tokens(user, user.organization_id))
 
 
 @router.get('/password-link/{token}', response=PasswordSetLinkInfoResponse, auth=None)

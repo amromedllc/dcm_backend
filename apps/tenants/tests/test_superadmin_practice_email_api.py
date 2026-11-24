@@ -13,7 +13,7 @@ from apps.tenants.api import (
     update_superadmin_organization,
     update_superadmin_practice_email_setting,
 )
-from apps.tenants.models import Organization, OrganizationTpmsAdminId
+from apps.tenants.models import Domain, Organization, OrganizationTpmsAdminId
 from apps.tenants.schemas import (
     OrganizationSuperadminCreate,
     OrganizationSuperadminUpdate,
@@ -156,24 +156,26 @@ class SuperadminPracticeEmailApiTests(TestCase):
         self.assertEqual([row['admin_id'] for row in result['tpms_admin_ids']], [991, 992])
         self.assertEqual(result['tpms_admin_ids'][0]['facility_name'], 'North Facility')
 
-    @override_settings(FRONTEND_BASE_URL='https://app.example.test', SIGNUP_SALES_NOTIFICATION_EMAIL='')
+    @override_settings(FRONTEND_BASE_URL='http://app.example.test:3000', SIGNUP_SALES_NOTIFICATION_EMAIL='')
     @patch('apps.tenants.api.EmailMultiAlternatives')
     def test_free_trial_creation_can_seed_demo_data_and_send_setup_email(self, email_class):
-        status, result = create_superadmin_organization(
-            FakeRequest(self.superadmin),
-            OrganizationSuperadminCreate(
-                name='Trial Demo Clinic',
-                slug='trial-demo-clinic',
-                domain='trial-demo-clinic.localhost',
-                plan=Organization.Plan.FREE_TRIAL,
-                seed_demo_data=True,
-                admin_first_name='Taylor',
-                admin_last_name='Admin',
-                admin_email='taylor@example.test',
-            ),
-        )
+        # Superadmin requests can be routed through an unrelated tenant schema.
+        with schema_context(self.org.schema_name):
+            status, result = create_superadmin_organization(
+                FakeRequest(self.superadmin),
+                OrganizationSuperadminCreate(
+                    name='Trial Demo Clinic',
+                    slug='trial-demo-clinic',
+                    plan=Organization.Plan.FREE_TRIAL,
+                    seed_demo_data=True,
+                    admin_first_name='Taylor',
+                    admin_last_name='Admin',
+                    admin_email='taylor@example.test',
+                ),
+            )
 
         self.assertEqual(status, 201)
+        self.assertEqual(result['domain'], 'app.example.test')
         org = Organization.objects.get(pk=result['id'])
         admin = User.objects.get(email='taylor@example.test')
         self.assertEqual(admin.organization_id, org.id)
@@ -186,6 +188,7 @@ class SuperadminPracticeEmailApiTests(TestCase):
         email_class.assert_called_once()
         self.assertIn('free trial', email_class.call_args.kwargs['subject'].lower())
         self.assertEqual(email_class.call_args.kwargs['to'], ['taylor@example.test'])
+        self.assertIn('http://app.example.test:3000/set-password?token=', email_class.call_args.kwargs['body'])
         email_class.return_value.send.assert_called_once_with(fail_silently=False)
 
     def test_demo_onboarding_requires_admin_contact_and_free_trial_plan(self):
@@ -236,3 +239,14 @@ class SuperadminPracticeEmailApiTests(TestCase):
         self.assertEqual(created['admin_id'], 777)
         self.assertEqual(created['facility_name'], 'Evening Clinic')
         self.assertTrue(created['email_notifications_enabled'])
+
+    @override_settings(FRONTEND_BASE_URL='https://app.example.test')
+    def test_clearing_domain_uses_configured_app_host(self):
+        updated = update_superadmin_organization(
+            FakeRequest(self.superadmin), self.org.id, OrganizationSuperadminUpdate(domain=''),
+        )
+        self.assertEqual(updated['domain'], 'app.example.test')
+        self.assertEqual(
+            Domain.objects.get(tenant=self.org, is_primary=True).domain,
+            'app.example.test',
+        )
