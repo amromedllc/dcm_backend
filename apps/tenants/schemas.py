@@ -145,6 +145,10 @@ class OrganizationSuperadminCreate(Schema):
     plan: str = 'starter'
     is_active: bool = True
     tpms_admin_ids: list[TpmsAdminIdSeed] = []
+    seed_demo_data: bool = False
+    admin_first_name: str = ''
+    admin_last_name: str = ''
+    admin_email: str = ''
 
 
 class OrganizationSuperadminUpdate(Schema):
