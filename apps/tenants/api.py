@@ -1,6 +1,7 @@
 import logging
 import re
 from datetime import timedelta
+from urllib.parse import urlsplit
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -130,6 +131,14 @@ def _domain_for_slug(slug: str) -> str:
     if base_domain:
         return f'{slug}.{base_domain}'.lower()
     return f'{slug}.localhost'
+
+
+def _superadmin_organization_domain(domain: str | None, slug: str) -> str:
+    """Use an explicitly supplied host, or the configured app host by default."""
+    if domain and domain.strip():
+        return domain.strip().lower()
+    frontend_host = urlsplit(getattr(settings, 'FRONTEND_BASE_URL', '')).hostname
+    return (frontend_host or _domain_for_slug(slug)).lower()
 
 
 def _serialize_superadmin_org(org: Organization) -> dict:
@@ -266,7 +275,8 @@ def create_superadmin_organization(request, data: OrganizationSuperadminCreate):
     require_superadmin_or_delegated(request, 'manage_organizations')
     slug = _normalize_slug(data.slug or data.name)
     schema_name = (data.schema_name or _schema_from_slug(slug)).lower()
-    domain = (data.domain or _domain_for_slug(slug)).lower()
+    frontend_base_url = getattr(settings, 'FRONTEND_BASE_URL', '').rstrip('/')
+    domain = _superadmin_organization_domain(data.domain, slug)
     _validate_schema_name(schema_name)
     _validate_plan(data.plan)
     if Organization.objects.filter(slug=slug).exists():
@@ -338,14 +348,16 @@ def create_superadmin_organization(request, data: OrganizationSuperadminCreate):
                 seed_demo_dataset(org, admin_user)
 
     if admin_user is not None:
-        _send_superadmin_trial_welcome(request.user, org, admin_user, domain, trial_ends_at)
+        _send_superadmin_trial_welcome(
+            request.user, org, admin_user, domain, trial_ends_at, frontend_base_url,
+        )
 
     return 201, _serialize_superadmin_org(
         Organization.objects.prefetch_related('tpms_admin_ids', 'domains').get(id=org.id)
     )
 
 
-def _send_superadmin_trial_welcome(actor, org, admin_user, domain, trial_ends_at):
+def _send_superadmin_trial_welcome(actor, org, admin_user, domain, trial_ends_at, frontend_base_url=''):
     """Send a one-time password setup link and trial welcome after provisioning.
 
     Email failures are logged without the recipient address and do not roll back
@@ -358,10 +370,13 @@ def _send_superadmin_trial_welcome(actor, org, admin_user, domain, trial_ends_at
         link, raw_token = PasswordSetLink.generate(
             admin_user, created_by=actor, expires_at=expires_at,
         )
-        base_url = getattr(settings, 'FRONTEND_BASE_URL', '').rstrip('/')
-        if not base_url:
-            raise ValueError('FRONTEND_BASE_URL is not configured')
-        setup_url = f'{base_url}/set-password?token={raw_token}'
+        frontend = urlsplit(frontend_base_url)
+        if frontend.hostname and frontend.hostname.lower() == domain.lower():
+            setup_origin = f'{frontend.scheme}://{frontend.netloc}'
+        else:
+            scheme = 'http' if domain == 'localhost' or domain.endswith('.localhost') else 'https'
+            setup_origin = f'{scheme}://{domain}'
+        setup_url = f'{setup_origin}/set-password?token={raw_token}'
         body = (
             f"Hi {admin_user.first_name},\n\n"
             f'Your Progressly organization "{org.name}" is ready. '
@@ -431,9 +446,7 @@ def update_superadmin_organization(request, organization_id: int, data: Organiza
         update_fields.append('updated_at')
         org.save(update_fields=update_fields)
     if data.domain is not None:
-        domain = data.domain.lower().strip()
-        if not domain:
-            raise HttpError(400, 'Domain is required')
+        domain = _superadmin_organization_domain(data.domain, org.slug)
         if org.domains.exclude(is_primary=True).filter(domain=domain).exists():
             raise HttpError(409, 'Domain is already registered for this organization')
         primary = org.domains.filter(is_primary=True).first()

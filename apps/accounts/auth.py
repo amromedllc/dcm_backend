@@ -179,6 +179,13 @@ def token_tenant_mismatch(payload: dict[str, Any], request) -> bool:
     return False
 
 
+def user_tenant_mismatch(user: User, organization_id: int) -> bool:
+    """A user's signed session must always be bound to their own organization."""
+    if user.is_superuser:
+        return False
+    return getattr(user, 'organization_id', None) != int(organization_id)
+
+
 class _BaseJWTAuth(HttpBearer):
     """Decodes + validates a DCM access token, then optionally restricts
     which roles may authenticate through this instance at all.
@@ -203,6 +210,8 @@ class _BaseJWTAuth(HttpBearer):
             from .session_security import enforce_session_activity
             enforce_session_activity(payload, getattr(request, 'tenant', None))
             user = User.objects.get(id=int(payload['sub']), is_active=True)
+            if user_tenant_mismatch(user, int(payload['org_id'])):
+                return None
             if not user_facility_is_active(user, int(payload['org_id'])):
                 raise HttpError(403, INACTIVE_FACILITY_MESSAGE)
             if self.allowed_roles is not None and user.role not in self.allowed_roles:

@@ -10,7 +10,13 @@ from apps.accounts import api, auth
 from apps.accounts.schemas import PinUnlockRequest, RefreshRequest
 
 
-@override_settings(AUTH_SESSION_MAX_HOURS=8)
+@override_settings(
+    AUTH_SESSION_MAX_HOURS=8,
+    JWT_SECRET_KEY='session-lifetime-test-signing-key-at-least-32-bytes',
+    JWT_ALGORITHM='HS256',
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES=15,
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS=7,
+)
 class SessionLifetimeTests(SimpleTestCase):
     def setUp(self):
         audit = mock.patch('apps.accounts.security_audit.record_security_event')
@@ -18,6 +24,7 @@ class SessionLifetimeTests(SimpleTestCase):
         self.addCleanup(audit.stop)
         self.now = timezone.now()
         self.user = mock.Mock(id=1, email='test@example.com', role='staff', is_superuser=False,
+                              organization_id=1, external_admin_id=None,
                               pin_lock_enabled=True, has_pin=True, pin_locked_until=None)
         self.user.check_pin.return_value = True
         self.request = SimpleNamespace(tenant=SimpleNamespace(pk=1, pin_lock_allowed=True))
