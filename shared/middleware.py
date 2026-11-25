@@ -16,7 +16,6 @@ from threading import Lock
 
 from django.db import connection
 from django.http import JsonResponse
-from django.utils import timezone
 from apps.tenants.models import Domain, Organization
 
 from .tenancy import tenant_context
@@ -75,35 +74,6 @@ def _org_id_from_api_key(request) -> int | None:
     return APIKey.org_id_for(raw)
 
 
-def _org_id_from_password_set_link(request) -> int | None:
-    """Use a password setup token only as an organization-routing hint.
-
-    The endpoint still verifies, consumes, and checks the one-time link. This
-    lookup lets onboarding links reach their owner's tenant when the API host
-    is shared across organizations.
-    """
-    try:
-        if request.method == 'GET' and request.path.startswith('/api/v1/auth/password-link/'):
-            raw_token = request.path.rsplit('/', 1)[-1]
-        elif request.method == 'POST' and request.path == '/api/v1/auth/password-link/set-password':
-            payload = json.loads(request.body or b'{}')
-            raw_token = payload.get('token') if isinstance(payload, dict) else None
-        else:
-            return None
-        if not isinstance(raw_token, str) or not raw_token.startswith('pwl_'):
-            return None
-        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
-        from apps.accounts.models import PasswordSetLink
-        return PasswordSetLink.objects.filter(
-            token_prefix=raw_token[:8],
-            token_hash=token_hash,
-            used_at__isnull=True,
-            expires_at__gt=timezone.now(),
-        ).values_list('user__organization_id', flat=True).first()
-    except (ValueError, UnicodeDecodeError):
-        return None
-
-
 class TenantResolverMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
@@ -135,31 +105,23 @@ class TenantResolverMiddleware:
         hostname = request.get_host().split(':')[0]
         request.tenant = None
 
-        # Password setup is unauthenticated until its one-time token is
-        # consumed, so resolve its owning org before relying on Host routing.
-        # The API endpoint independently verifies the token and tenant match.
-        password_link_org_id = _org_id_from_password_set_link(request)
-        if password_link_org_id:
-            request.tenant = self._get_org_by_pk(password_link_org_id)
-
-        domains = Domain.objects.filter(domain=hostname).select_related('tenant')
-        domain_count = 0 if request.tenant else domains.count()
-        if request.tenant is None and domain_count == 1:
-            request.tenant = domains.first().tenant
-        elif request.tenant is None and domain_count > 1:
+        domains = list(Domain.objects.filter(domain=hostname).select_related('tenant')[:2])
+        if len(domains) == 1:
+            request.tenant = domains[0].tenant
+        elif len(domains) > 1:
             # A shared hostname cannot identify an organization by itself.
             # Prefer the organization bound to an existing signed-in session;
             # for login, resolve by the globally unique Progressly email.
             org_id = _org_id_from_jwt(request)
             if org_id:
-                match = domains.filter(tenant_id=org_id).first()
-                request.tenant = match.tenant if match else None
+                request.tenant = next((row.tenant for row in domains if row.tenant_id == org_id), None)
 
             if request.tenant is None:
                 api_key_org_id = _org_id_from_api_key(request)
                 if api_key_org_id:
-                    match = domains.filter(tenant_id=api_key_org_id).first()
-                    request.tenant = match.tenant if match else None
+                    request.tenant = next(
+                        (row.tenant for row in domains if row.tenant_id == api_key_org_id), None,
+                    )
 
             if request.tenant is None and request.path == '/api/v1/auth/login':
                 try:
@@ -171,10 +133,11 @@ class TenantResolverMiddleware:
                             'organization_id', 'is_superuser',
                         ).first()
                         if user and user.organization_id:
-                            match = domains.filter(tenant_id=user.organization_id).first()
-                            request.tenant = match.tenant if match else None
+                            request.tenant = next(
+                                (row.tenant for row in domains if row.tenant_id == user.organization_id), None,
+                            )
                         elif user and user.is_superuser:
-                            request.tenant = domains.first().tenant
+                            request.tenant = domains[0].tenant
                 except (ValueError, UnicodeDecodeError):
                     pass
 
