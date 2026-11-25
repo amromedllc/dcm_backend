@@ -3,12 +3,9 @@ import re
 from datetime import timedelta
 
 from django.conf import settings
-from django.core.exceptions import ValidationError
-from django.core.mail import EmailMultiAlternatives
-from django.core.validators import validate_email
 from django.db import transaction
 from django.utils import timezone
-from django_tenants.utils import get_public_schema_name, schema_context
+from django_tenants.utils import schema_context
 from ninja import Router
 from ninja.errors import HttpError
 
@@ -273,20 +270,6 @@ def create_superadmin_organization(request, data: OrganizationSuperadminCreate):
         raise HttpError(409, 'Organization slug already exists')
     if Organization.objects.filter(schema_name=schema_name).exists():
         raise HttpError(409, 'Organization schema already exists')
-    admin_email = data.admin_email.strip().lower()
-    admin_first_name = data.admin_first_name.strip()
-    admin_last_name = data.admin_last_name.strip()
-    if data.seed_demo_data:
-        if data.plan != Organization.Plan.FREE_TRIAL:
-            raise HttpError(400, 'Demo onboarding is available when creating a free-trial organization')
-        if not admin_email or not admin_first_name or not admin_last_name:
-            raise HttpError(400, 'Admin first name, last name, and email are required to seed demo data')
-        try:
-            validate_email(admin_email)
-        except ValidationError:
-            raise HttpError(400, 'A valid admin email address is required')
-        if User.objects.filter(email__iexact=admin_email).exists():
-            raise HttpError(409, 'A user with this email already exists')
     seed_admin_ids = [item.admin_id for item in data.tpms_admin_ids]
     duplicate_admin_ids = OrganizationTpmsAdminId.objects.filter(admin_id__in=seed_admin_ids)
     if duplicate_admin_ids.exists():
@@ -297,106 +280,30 @@ def create_superadmin_organization(request, data: OrganizationSuperadminCreate):
         timezone.now() + timedelta(days=Organization.FREE_TRIAL_DAYS)
         if data.plan == Organization.Plan.FREE_TRIAL else None
     )
-    admin_user = None
     with transaction.atomic():
-        # Organization, Domain, account, and facility rows live in shared
-        # tables. Requests may arrive on any tenant schema, but django-tenants
-        # only permits creating a tenant while the connection is on public.
-        with schema_context(get_public_schema_name()):
-            org = Organization.objects.create(
-                name=data.name.strip(),
-                slug=slug,
-                schema_name=schema_name,
-                plan=data.plan,
-                is_active=data.is_active,
-                trial_ends_at=trial_ends_at,
-            )
-            Domain.objects.create(tenant=org, domain=domain, is_primary=True)
-            if data.seed_demo_data:
-                admin_user = User.objects.create_user(
-                    email=admin_email,
-                    first_name=admin_first_name,
-                    last_name=admin_last_name,
-                    role=User.Role.ADMIN,
-                    password=None,
-                    organization=org,
-                )
-            for item in data.tpms_admin_ids:
-                OrganizationTpmsAdminId.objects.create(
-                    organization=org,
-                    admin_id=item.admin_id,
-                    facility_name=item.facility_name.strip(),
-                    is_active=item.is_active,
-                )
-
+        org = Organization.objects.create(
+            name=data.name.strip(),
+            slug=slug,
+            schema_name=schema_name,
+            plan=data.plan,
+            is_active=data.is_active,
+            trial_ends_at=trial_ends_at,
+        )
+        Domain.objects.create(tenant=org, domain=domain, is_primary=True)
         from apps.tenants.services import copy_default_target_statuses_to_org
-        from shared.tenancy import tenant_context
-        with schema_context(schema_name), tenant_context(org.id):
+        with schema_context(schema_name):
             copy_default_target_statuses_to_org(org.id)
-            if data.seed_demo_data:
-                from .demo_seed import seed_demo_dataset
-                seed_demo_dataset(org, admin_user)
-
-    if admin_user is not None:
-        _send_superadmin_trial_welcome(request.user, org, admin_user, domain, trial_ends_at)
+        for item in data.tpms_admin_ids:
+            OrganizationTpmsAdminId.objects.create(
+                organization=org,
+                admin_id=item.admin_id,
+                facility_name=item.facility_name.strip(),
+                is_active=item.is_active,
+            )
 
     return 201, _serialize_superadmin_org(
         Organization.objects.prefetch_related('tpms_admin_ids', 'domains').get(id=org.id)
     )
-
-
-def _send_superadmin_trial_welcome(actor, org, admin_user, domain, trial_ends_at):
-    """Send a one-time password setup link and trial welcome after provisioning.
-
-    Email failures are logged without the recipient address and do not roll back
-    the organization or its demo data.
-    """
-    trial_end = timezone.localtime(trial_ends_at).strftime('%B %-d, %Y') if trial_ends_at else 'your plan end date'
-    try:
-        from apps.accounts.models import PasswordSetLink
-        expires_at = timezone.now() + timedelta(days=7)
-        link, raw_token = PasswordSetLink.generate(
-            admin_user, created_by=actor, expires_at=expires_at,
-        )
-        base_url = getattr(settings, 'FRONTEND_BASE_URL', '').rstrip('/')
-        if not base_url:
-            raise ValueError('FRONTEND_BASE_URL is not configured')
-        setup_url = f'{base_url}/set-password?token={raw_token}'
-        body = (
-            f"Hi {admin_user.first_name},\n\n"
-            f'Your Progressly organization "{org.name}" is ready. '
-            f'Your free trial runs through {trial_end}.\n\n'
-            f'Organization domain: {domain}\n\n'
-            'Use this one-time link to choose a password and access your account. '
-            f'The link expires {timezone.localtime(link.expires_at).strftime("%B %-d, %Y at %-I:%M %p %Z")}.\n\n'
-            f'{setup_url}\n\n'
-            'We added synthetic demo staff, client, program, and session data so you can explore the app. '
-            'Please do not treat this sample data as real clinical records.'
-        )
-        EmailMultiAlternatives(
-            subject='Your Progressly free trial is ready',
-            body=body,
-            from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', None),
-            to=[admin_user.email],
-        ).send(fail_silently=False)
-    except Exception:
-        logger.error('Failed to send superadmin organization welcome email (organization_id=%s)', org.id)
-
-    sales_email = getattr(settings, 'SIGNUP_SALES_NOTIFICATION_EMAIL', '')
-    if sales_email:
-        try:
-            EmailMultiAlternatives(
-                subject=f'New free-trial organization: {org.name}',
-                body=(
-                    f'Organization: {org.name} ({domain})\n'
-                    f'Admin email: {admin_user.email}\n'
-                    f'Trial ends: {trial_end}\n'
-                ),
-                from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', None),
-                to=[sales_email],
-            ).send(fail_silently=False)
-        except Exception:
-            logger.error('Failed to send superadmin trial notification (organization_id=%s)', org.id)
 
 
 @router.patch('/superadmin/organizations/{organization_id}', response=OrganizationPracticeEmailSettingsSchema)

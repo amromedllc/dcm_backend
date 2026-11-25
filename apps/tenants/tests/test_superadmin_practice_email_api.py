@@ -1,11 +1,7 @@
-from django.test import TestCase, override_settings
-from django_tenants.utils import schema_context
-from unittest.mock import patch
+from django.test import TestCase
 from ninja.errors import HttpError
 
 from apps.accounts.models import User
-from apps.accounts.models import PasswordSetLink
-from apps.clients.models import Client
 from apps.tenants.api import (
     create_superadmin_organization,
     create_superadmin_tpms_admin_id,
@@ -155,59 +151,6 @@ class SuperadminPracticeEmailApiTests(TestCase):
         self.assertEqual(result['domain'], 'new-sales-org.localhost')
         self.assertEqual([row['admin_id'] for row in result['tpms_admin_ids']], [991, 992])
         self.assertEqual(result['tpms_admin_ids'][0]['facility_name'], 'North Facility')
-
-    @override_settings(FRONTEND_BASE_URL='https://app.example.test', SIGNUP_SALES_NOTIFICATION_EMAIL='')
-    @patch('apps.tenants.api.EmailMultiAlternatives')
-    def test_free_trial_creation_can_seed_demo_data_and_send_setup_email(self, email_class):
-        status, result = create_superadmin_organization(
-            FakeRequest(self.superadmin),
-            OrganizationSuperadminCreate(
-                name='Trial Demo Clinic',
-                slug='trial-demo-clinic',
-                domain='trial-demo-clinic.localhost',
-                plan=Organization.Plan.FREE_TRIAL,
-                seed_demo_data=True,
-                admin_first_name='Taylor',
-                admin_last_name='Admin',
-                admin_email='taylor@example.test',
-            ),
-        )
-
-        self.assertEqual(status, 201)
-        org = Organization.objects.get(pk=result['id'])
-        admin = User.objects.get(email='taylor@example.test')
-        self.assertEqual(admin.organization_id, org.id)
-        self.assertEqual(admin.role, User.Role.ADMIN)
-        self.assertFalse(admin.has_usable_password())
-        self.assertTrue(PasswordSetLink.objects.filter(user=admin, created_by=self.superadmin).exists())
-        with schema_context(org.schema_name):
-            self.assertEqual(Client.all_organizations.filter(organization_id=org.id, created_by=admin).count(), 1)
-        self.assertGreater(org.trial_ends_at, org.created_at)
-        email_class.assert_called_once()
-        self.assertIn('free trial', email_class.call_args.kwargs['subject'].lower())
-        self.assertEqual(email_class.call_args.kwargs['to'], ['taylor@example.test'])
-        email_class.return_value.send.assert_called_once_with(fail_silently=False)
-
-    def test_demo_onboarding_requires_admin_contact_and_free_trial_plan(self):
-        with self.assertRaises(HttpError) as missing_contact:
-            create_superadmin_organization(
-                FakeRequest(self.superadmin),
-                OrganizationSuperadminCreate(
-                    name='Missing Contact Clinic', slug='missing-contact-clinic', seed_demo_data=True,
-                ),
-            )
-        self.assertEqual(missing_contact.exception.status_code, 400)
-
-        with self.assertRaises(HttpError) as wrong_plan:
-            create_superadmin_organization(
-                FakeRequest(self.superadmin),
-                OrganizationSuperadminCreate(
-                    name='Starter Demo Clinic', slug='starter-demo-clinic', plan='starter',
-                    seed_demo_data=True, admin_first_name='Taylor', admin_last_name='Admin',
-                    admin_email='taylor@example.test',
-                ),
-            )
-        self.assertEqual(wrong_plan.exception.status_code, 400)
 
     def test_superadmin_can_update_organization_and_add_tpms_admin_id(self):
         updated = update_superadmin_organization(
