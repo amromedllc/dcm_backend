@@ -34,6 +34,13 @@ increment MAJOR. All notes shipped together share a version.
 Imports fill missing versions and replace matching legacy date and initial v1 sequence versions, while
 preserving manually assigned semantic versions, content, publication and IDs.
 
+## manual-client-creation-fields | 2026-11-27 | Add clients without an external ID
+Version: v2.44.0
+Status: Draft
+
+**Improvements**
+- The Add Client form no longer asks for an external ID. It includes preferred name, date of birth, intake date, status, and optional internal notes so an organization can create a client directly in Progressly.
+
 ## manual-appointment-scheduling | 2026-11-27 | Schedule appointments in Progressly
 Version: v2.44.0
 Status: Draft

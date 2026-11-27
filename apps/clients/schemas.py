@@ -38,6 +38,7 @@ class ClientCreateRequest(Schema):
     date_of_birth: date | None = None
     status: Client.Status = Client.Status.ACTIVE
     intake_date: date | None = None
+    internal_notes: str = ''
 
 
 class ClientUpdateRequest(Schema):

@@ -20,6 +20,7 @@ from apps.clients.document_schemas import DocumentUpdate, FolderInput
 from apps.clients.document_storage import PrivateDocumentStorage
 from apps.clients.document_validation import MAX_DOCUMENT_BYTES, validate_document
 from apps.clients.models import Client, ClientDocument, ClientDocumentFolder, ClientStaffAssignment
+from apps.clients.schemas import ClientCreateRequest
 from apps.tenants.models import Organization
 from shared.tenancy import tenant_context
 
@@ -240,6 +241,15 @@ class ClientDocumentTests(TestCase):
         with self.assertRaises(HttpError) as error:
             clients_api._get_client_or_404(request, self.client.id)
         self.assertEqual(error.exception.status_code, 404)
+
+    def test_client_created_by_facility_user_keeps_facility_scope(self):
+        _, client = clients_api.create_client(
+            self.request,
+            ClientCreateRequest(first_name='Local', last_name='Synthetic'),
+        )
+
+        self.assertEqual(client.external_admin_id, self.admin.external_admin_id)
+        self.assertEqual(clients_api._get_accessible_clients(self.request).get(pk=client.pk), client)
 
     def test_patient_upsert_matches_external_id_with_facility_id(self):
         duplicate_id = 'same-external-id'

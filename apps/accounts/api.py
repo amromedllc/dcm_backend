@@ -1521,6 +1521,7 @@ def create_user(request, data: UserCreateRequest):
         role=data.role,
         password=data.password,
         organization=request.user.organization,
+        external_admin_id=request.user.external_admin_id,
     )
     return 201, user
 

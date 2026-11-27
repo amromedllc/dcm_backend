@@ -615,6 +615,7 @@ def create_client(request, data: ClientCreateRequest):
     require_permission(request, 'clients_create')
     client = Client.objects.create(
         created_by=request.user,
+        external_admin_id=request.user.external_admin_id,
         **data.dict(),
     )
     return 201, client
