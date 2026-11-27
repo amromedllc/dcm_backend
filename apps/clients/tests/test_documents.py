@@ -15,6 +15,7 @@ from ninja.errors import HttpError
 from apps.accounts.models import RolePermission, User
 from apps.audit.models import AuditLog
 from apps.clients import documents_api as api
+from apps.clients import api as clients_api
 from apps.clients.document_schemas import DocumentUpdate, FolderInput
 from apps.clients.document_storage import PrivateDocumentStorage
 from apps.clients.document_validation import MAX_DOCUMENT_BYTES, validate_document
@@ -94,6 +95,9 @@ class ClientDocumentTests(TestCase):
         self.admin = User.objects.create(email='synthetic-admin@example.test', role='admin', organization=self.org, external_admin_id=100)
         self.staff = User.objects.create(email='synthetic-staff@example.test', role='staff', organization=self.org, external_admin_id=100)
         self.reporting = User.objects.create(email='synthetic-reporting@example.test', role='reporting', organization=self.org)
+        self.unlinked_admin = User.objects.create(
+            email='synthetic-unlinked-admin@example.test', role='admin', organization=self.org,
+        )
         self.client = Client.objects.create(first_name='Synthetic', last_name='A', external_admin_id=100)
         self.unassigned = Client.objects.create(first_name='Synthetic', last_name='B', external_admin_id=100)
         self.other_practice = Client.objects.create(first_name='Synthetic', last_name='C', external_admin_id=200)
@@ -224,6 +228,37 @@ class ClientDocumentTests(TestCase):
             with self.assertRaises(HttpError) as error:
                 api.download_document(self.request, self.client.pk, data['id'])
             self.assertEqual(error.exception.status_code, 404)
+
+    def test_unlinked_org_user_sees_native_clients_only(self):
+        native_client = Client.objects.create(first_name='Native', last_name='Synthetic')
+        request = SimpleNamespace(user=self.unlinked_admin, tenant=self.org)
+
+        self.assertEqual(
+            list(clients_api._get_accessible_clients(request).values_list('id', flat=True)),
+            [native_client.id],
+        )
+        with self.assertRaises(HttpError) as error:
+            clients_api._get_client_or_404(request, self.client.id)
+        self.assertEqual(error.exception.status_code, 404)
+
+    def test_patient_upsert_matches_external_id_with_facility_id(self):
+        duplicate_id = 'same-external-id'
+        other_facility = Client.objects.create(
+            first_name='Other', last_name='Facility', external_id=duplicate_id,
+            external_admin_id=200,
+        )
+
+        result = clients_api._upsert_clients_from_patients(
+            [{'id': duplicate_id, 'name': 'Current Facility'}],
+            fallback_admin_id=100,
+            include_inactive=False,
+            search=None,
+        )
+
+        self.assertEqual(len(result), 1)
+        self.assertNotEqual(result[0].id, other_facility.id)
+        self.assertEqual(result[0].external_admin_id, 100)
+        self.assertEqual(result[0].first_name, 'Current')
 
     def test_audit_failure_rolls_back_new_upload_and_cleans_only_new_blob(self):
         with patch.object(api, '_audit', side_effect=RuntimeError('Synthetic audit failure')):

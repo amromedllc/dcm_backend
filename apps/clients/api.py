@@ -259,8 +259,9 @@ def _get_accessible_clients(request):
     """
     qs = Client.objects.all()
 
-    if request.user.external_admin_id is not None:
-        qs = qs.filter(external_admin_id=request.user.external_admin_id)
+    # NULL is a scope too: users not bound to a TPMS facility must see only
+    # native clients, never every facility's imported clients in the org.
+    qs = qs.filter(external_admin_id=request.user.external_admin_id)
 
     if request.user.role in ('admin', 'supervisor'):
         return qs
@@ -359,8 +360,11 @@ def _upsert_clients_from_patients(
 
     ext_ids = [row['external_id'] for row in mapped]
     existing = {
-        c.external_id: c
-        for c in Client.objects.filter(external_id__in=ext_ids)
+        (c.external_admin_id, c.external_id): c
+        for c in Client.objects.filter(
+            external_id__in=ext_ids,
+            external_admin_id=fallback_admin_id,
+        )
     }
 
     update_attrs = ('first_name', 'last_name', 'preferred_name', 'date_of_birth', 'status', 'external_admin_id')
@@ -374,13 +378,14 @@ def _upsert_clients_from_patients(
     for fields in mapped:
         fields = {k: v for k, v in fields.items() if k != 'is_active'}
         ext_id = fields['external_id']
-        dcm_client = existing.get(ext_id)
+        client_key = (fields['external_admin_id'], ext_id)
+        dcm_client = existing.get(client_key)
         if dcm_client is None:
             client = Client(**fields)
             if org_id is not None:
                 client.organization_id = org_id
             to_create.append(client)
-            existing[ext_id] = client
+            existing[client_key] = client
         else:
             changed = False
             for attr in update_attrs:
@@ -401,10 +406,17 @@ def _upsert_clients_from_patients(
 
     # Prefer DB rows (with PKs) for the response when available.
     persisted = {
-        c.external_id: c
-        for c in Client.objects.filter(external_id__in=ext_ids)
+        (c.external_admin_id, c.external_id): c
+        for c in Client.objects.filter(
+            external_id__in=ext_ids,
+            external_admin_id=fallback_admin_id,
+        )
     }
-    result = [persisted[ext_id] for ext_id in ext_ids if ext_id in persisted]
+    result = [
+        persisted[(fallback_admin_id, ext_id)]
+        for ext_id in ext_ids
+        if (fallback_admin_id, ext_id) in persisted
+    ]
     result.sort(key=lambda c: (c.last_name.lower(), c.first_name.lower()))
     return result
 
