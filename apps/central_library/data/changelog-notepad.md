@@ -34,6 +34,18 @@ increment MAJOR. All notes shipped together share a version.
 Imports fill missing versions and replace matching legacy date and initial v1 sequence versions, while
 preserving manually assigned semantic versions, content, publication and IDs.
 
+## manual-appointment-scheduling | 2026-11-27 | Schedule appointments in Progressly
+Version: v2.44.0
+Status: Draft
+
+**New Features**
+- Admins and supervisors with appointment creation access can schedule a Progressly appointment by choosing a client, staff member, start and end time, and optional service details and notes from the Appointments page.
+- The appointment creation permission is managed in Admin → Privileges. This supports organizations that schedule directly in Progressly alongside those that import appointments through their practice management integration.
+
+<!-- developer-fix -->
+- The API validates that the selected active staff member and client belong to the same organization facility before creating a manual appointment.
+<!-- /developer-fix -->
+
 ## superadmin-separate-feature-management | 2026-11-17 | Separate feature management
 Version: v2.43.0
 Status: Draft

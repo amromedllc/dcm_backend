@@ -9,6 +9,7 @@ from ninja.files import UploadedFile
 from ninja.errors import HttpError
 
 from apps.accounts.auth import partner_auth
+from apps.accounts.models import User
 from apps.accounts.permissions import require_any_permission, require_permission
 from apps.clients.id_aliases import client_identifier_aliases
 from apps.programs.measurements import (
@@ -647,6 +648,23 @@ def create_appointment(request, data: AppointmentCreateRequest):
     require_permission(request, 'appointments_create')
     if data.client_id not in _accessible_external_client_ids(request):
         raise HttpError(404, 'Client not found')
+    accessible_clients = _get_accessible_clients(request)
+    client = accessible_clients.filter(id=data.client_id).first()
+    if client is None:
+        # Appointment clients can also be addressed by their external TPMS ID.
+        # Resolve that form only within the caller's already accessible client set.
+        client = accessible_clients.filter(external_id=str(data.client_id)).first()
+    if client is None:
+        raise HttpError(404, 'Client not found')
+    staff = User.objects.filter(
+        id=data.staff_id,
+        organization_id=request.user.organization_id,
+        is_active=True,
+    ).exclude(role=User.Role.CAREGIVER).first()
+    if staff is None:
+        raise HttpError(400, 'Choose an active staff member in this organization.')
+    if staff.external_admin_id != client.external_admin_id:
+        raise HttpError(400, 'The selected staff member and client must belong to the same facility.')
     payload = data.dict()
     external_client_id = payload.pop('client_id', None)
     appt = Appointment.objects.create(created_by=request.user, external_client_id=external_client_id, **payload)
