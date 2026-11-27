@@ -105,7 +105,7 @@ class TenantResolverMiddleware:
         hostname = request.get_host().split(':')[0]
         request.tenant = None
 
-        domains = list(Domain.objects.filter(domain=hostname).select_related('tenant')[:2])
+        domains = list(Domain.objects.filter(domain=hostname).select_related('tenant'))
         if len(domains) == 1:
             request.tenant = domains[0].tenant
         elif len(domains) > 1:

@@ -212,6 +212,7 @@ class SuperadminUserCreate(Schema):
     password: str
     role: str = 'admin'
     external_admin_id: int | None = None
+    seed_demo_data: bool = False
 
 
 class SuperadminUserUpdate(Schema):

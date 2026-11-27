@@ -29,6 +29,7 @@ from . import mfa
 from .models import PasswordResetLink, PasswordSetLink, User, UserMFA
 from .auth import (
     INACTIVE_FACILITY_MESSAGE,
+    INACTIVE_ORGANIZATION_MESSAGE,
     consume_refresh_token,
     create_access_token,
     create_refresh_token,
@@ -39,6 +40,7 @@ from .auth import (
     session_start_from_payload,
     token_tenant_mismatch,
     user_facility_is_active,
+    user_organization_is_active,
 )
 from .permissions import (
     get_user_permissions,
@@ -669,6 +671,8 @@ def _staff_local_auth(tenant, user: User, password: str) -> TokenResponse:
         raise HttpError(401, 'Invalid email or password')
     if not user.is_active:
         raise HttpError(403, 'Account is inactive')
+    if not user_organization_is_active(user, tenant):
+        raise HttpError(403, INACTIVE_ORGANIZATION_MESSAGE)
 
     tenant_admin_ids = set(tenant.tpms_admin_ids.values_list('admin_id', flat=True))
     if tenant_admin_ids:

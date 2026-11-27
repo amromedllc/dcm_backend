@@ -13,6 +13,7 @@ from apps.tenants.models import OrganizationTpmsAdminId
 
 
 INACTIVE_FACILITY_MESSAGE = 'This facility is inactive. Please contact the Progressly support team.'
+INACTIVE_ORGANIZATION_MESSAGE = 'This organization is inactive. Please contact the Progressly support team.'
 
 
 def user_facility_is_active(user: User, organization_id: int) -> bool:
@@ -24,6 +25,17 @@ def user_facility_is_active(user: User, organization_id: int) -> bool:
         admin_id=user.external_admin_id,
         is_active=True,
     ).exists()
+
+
+def user_organization_is_active(user: User, tenant) -> bool:
+    """Block a non-platform user once their Organization is deactivated.
+
+    Platform staff (superusers, delegated sales/support) must keep access to
+    inactive orgs to manage them, so only ordinary org members are gated here.
+    """
+    if user.is_superuser or tenant is None:
+        return True
+    return bool(tenant.is_active)
 
 # ---------------------------------------------------------------------------
 # Token blocklist (Redis-backed)
@@ -205,6 +217,8 @@ class _BaseJWTAuth(HttpBearer):
             user = User.objects.get(id=int(payload['sub']), is_active=True)
             if not user_facility_is_active(user, int(payload['org_id'])):
                 raise HttpError(403, INACTIVE_FACILITY_MESSAGE)
+            if not user_organization_is_active(user, getattr(request, 'tenant', None)):
+                raise HttpError(403, INACTIVE_ORGANIZATION_MESSAGE)
             if self.allowed_roles is not None and user.role not in self.allowed_roles:
                 return None
             request.user = user

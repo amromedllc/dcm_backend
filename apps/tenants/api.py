@@ -5,7 +5,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
-from django_tenants.utils import schema_context
+from django_tenants.utils import get_public_schema_name, schema_context
 from ninja import Router
 from ninja.errors import HttpError
 
@@ -280,7 +280,7 @@ def create_superadmin_organization(request, data: OrganizationSuperadminCreate):
         timezone.now() + timedelta(days=Organization.FREE_TRIAL_DAYS)
         if data.plan == Organization.Plan.FREE_TRIAL else None
     )
-    with transaction.atomic():
+    with transaction.atomic(), schema_context(get_public_schema_name()):
         org = Organization.objects.create(
             name=data.name.strip(),
             slug=slug,
@@ -334,24 +334,108 @@ def update_superadmin_organization(request, organization_id: int, data: Organiza
     if data.is_active is not None:
         org.is_active = data.is_active
         update_fields.append('is_active')
-    if update_fields:
-        update_fields.append('updated_at')
-        org.save(update_fields=update_fields)
-    if data.domain is not None:
-        domain = data.domain.lower().strip()
-        if not domain:
-            raise HttpError(400, 'Domain is required')
-        if org.domains.exclude(is_primary=True).filter(domain=domain).exists():
-            raise HttpError(409, 'Domain is already registered for this organization')
-        primary = org.domains.filter(is_primary=True).first()
-        if primary:
-            primary.domain = domain
-            primary.save(update_fields=['domain'])
-        else:
-            Domain.objects.create(tenant=org, domain=domain, is_primary=True)
+    with schema_context(get_public_schema_name()):
+        if update_fields:
+            update_fields.append('updated_at')
+            org.save(update_fields=update_fields)
+        if data.domain is not None:
+            domain = data.domain.lower().strip()
+            if not domain:
+                raise HttpError(400, 'Domain is required')
+            if org.domains.exclude(is_primary=True).filter(domain=domain).exists():
+                raise HttpError(409, 'Domain is already registered for this organization')
+            primary = org.domains.filter(is_primary=True).first()
+            if primary:
+                primary.domain = domain
+                primary.save(update_fields=['domain'])
+            else:
+                Domain.objects.create(tenant=org, domain=domain, is_primary=True)
 
     org = Organization.objects.prefetch_related('tpms_admin_ids', 'domains').get(id=org.id)
     return _serialize_superadmin_org(org)
+
+
+@router.delete('/superadmin/organizations/{organization_id}', response={204: None})
+def delete_superadmin_organization(request, organization_id: int):
+    """Hard-delete an Organization and drop its schema — only when the org
+    has never recorded real clinical data. Orgs with any client, program or
+    session should be deactivated instead (see update_superadmin_organization),
+    never dropped: there is no undo for a schema CASCADE delete.
+    """
+    require_superadmin_or_delegated(request, 'manage_organizations')
+    with schema_context(get_public_schema_name()):
+        try:
+            org = Organization.objects.get(id=organization_id)
+        except Organization.DoesNotExist:
+            raise HttpError(404, 'Organization not found')
+
+        from django.db import connection, transaction
+        from django.db.utils import ProgrammingError
+        from shared.tenancy import tenant_context
+        from apps.accounts.models import User
+        from apps.clients.models import Client
+        from apps.programs.models import Program
+        from apps.sessions.models import SessionRun
+
+        def _safe_count(queryset):
+            # A schema that never finished migrating (or was only ever
+            # created, not synced) has no tables at all — that counts as
+            # no data, not an error; a bare ProgrammingError would otherwise
+            # poison the surrounding transaction for every query after it.
+            try:
+                with transaction.atomic():
+                    return queryset.count()
+            except ProgrammingError:
+                return 0
+
+        with schema_context(org.schema_name), tenant_context(org.pk):
+            counts = {
+                'clients': _safe_count(Client.objects.all()),
+                'programs': _safe_count(Program.objects.all()),
+                'sessions': _safe_count(SessionRun.objects.all()),
+            }
+        # User.organization is on_delete=PROTECT (accounts/models.py) — Postgres
+        # itself refuses to drop an Organization row while any user still
+        # references it, so this must be checked up front too, not just the
+        # tenant-schema clinical models.
+        counts['users'] = User.objects.filter(organization_id=org.id).count()
+        if any(counts.values()):
+            raise HttpError(
+                409,
+                'This organization has recorded data (clients: {clients}, programs: {programs}, '
+                'sessions: {sessions}, users: {users}) and cannot be deleted. Deactivate it, or '
+                'remove its users, instead.'.format(**counts),
+            )
+
+        # Every tenant-scoped model (Client, Program, SessionRun, and dozens
+        # more via OrganizationScopedMixin) carries an `organization` FK, so
+        # Organization.delete()'s ORM-level collector would try to visit all
+        # of them after the schema is gone — guaranteed to crash regardless
+        # of whether the org actually had data. None of these FKs (including
+        # the public-schema ones below) actually have ON DELETE CASCADE at
+        # the Postgres level despite on_delete=CASCADE in the Python model
+        # (confirmed: every constraint referencing tenants_organization is
+        # NO ACTION) — Django only emulates cascade through its ORM collector.
+        # So: drop the schema (removes every tenant-scoped table and its
+        # constraints together), explicitly clear the known public-schema
+        # referrers ourselves, then raw-delete the Organization row. Users
+        # are deliberately left alone — User.organization is PROTECT, and the
+        # check above already blocks this path while any user remains.
+        from apps.central_library.models import CentralSettingCopy
+        from apps.accounts.models import APIKey, RolePermission
+
+        org._drop_schema(force_drop=True)
+        Domain.objects.filter(tenant_id=org.pk).delete()
+        OrganizationTpmsAdminId.objects.filter(organization_id=org.pk).delete()
+        APIKey.objects.filter(organization_id=org.pk).delete()
+        RolePermission.objects.filter(organization_id=org.pk).delete()
+        CentralSettingCopy.objects.filter(organization_id=org.pk).delete()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f'DELETE FROM {Organization._meta.db_table} WHERE id = %s', [org.pk],
+            )
+
+    return 204, None
 
 
 @router.post('/superadmin/tpms-admin-ids', response={201: TpmsAdminEmailSettingSchema})
@@ -879,6 +963,13 @@ def create_superadmin_user(request, data: SuperadminUserCreate):
         organization=org,
         external_admin_id=external_admin_id,
     )
+
+    if data.seed_demo_data:
+        from shared.tenancy import tenant_context
+        from apps.tenants.demo_seed import seed_demo_dataset
+        with schema_context(org.schema_name), tenant_context(org.pk):
+            seed_demo_dataset(org, user)
+
     return 201, _serialize_superadmin_user(
         user, _facility_name_map({external_admin_id} if external_admin_id is not None else set()),
     )
