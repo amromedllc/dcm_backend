@@ -354,6 +354,21 @@ def _map_admin_client(row: dict[str, Any], *, practice_admin_id: int) -> dict[st
     preferred = str(
         _dig(row, 'client_preferred', 'preferred_name', 'preferred') or ''
     ).strip()
+    middle = str(
+        _dig(row, 'client_middle', 'middle_name', 'client_middle_name') or ''
+    ).strip()
+    gender = str(
+        _dig(row, 'client_gender', 'gender') or ''
+    ).strip()
+    email = str(
+        _dig(row, 'email', 'client_email') or ''
+    ).strip()
+    email_type = str(
+        _dig(row, 'email_type', 'client_email_type') or ''
+    ).strip()
+    phone_number = str(
+        _dig(row, 'phone_number', 'client_phone_number', 'phone') or ''
+    ).strip()
     if not first and not last:
         first, last = _split_name(
             str(_dig(row, 'client_full_name', 'full_name', 'name', 'client_name') or '')
@@ -376,8 +391,13 @@ def _map_admin_client(row: dict[str, Any], *, practice_admin_id: int) -> dict[st
         'external_id': str(ext_id),
         'external_admin_id': practice_admin_id,
         'first_name': first or 'Unknown',
+        'middle_name': middle,
         'last_name': last or 'Unknown',
         'preferred_name': preferred,
+        'gender': gender,
+        'email': email,
+        'email_type': email_type,
+        'phone_number': phone_number,
         'date_of_birth': dob,
         'status': status,
     }
@@ -418,7 +438,8 @@ def pull_clients(org: Organization) -> PullResult:
     }
 
     update_attrs = (
-        'first_name', 'last_name', 'preferred_name', 'date_of_birth',
+        'first_name', 'middle_name', 'last_name', 'preferred_name',
+        'gender', 'email', 'email_type', 'phone_number', 'date_of_birth',
         'status', 'external_admin_id',
     )
     to_create: list[Client] = []

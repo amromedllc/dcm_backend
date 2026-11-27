@@ -19,6 +19,28 @@ class ClientSchema(Schema):
     id: int
     external_id: str
     first_name: str
+    middle_name: str
+    last_name: str
+    preferred_name: str
+    gender: str
+    email: str
+    email_type: str
+    phone_number: str
+    full_name: str
+    date_of_birth: date | None
+    status: str
+    intake_date: date | None
+    discharge_date: date | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ClientListSchema(Schema):
+    """Client directory fields; contact details stay on the individual profile."""
+    id: int
+    external_id: str
+    first_name: str
+    middle_name: str
     last_name: str
     preferred_name: str
     full_name: str
@@ -32,8 +54,13 @@ class ClientSchema(Schema):
 
 class ClientCreateRequest(Schema):
     first_name: NonEmptyStr
+    middle_name: str = ''
     last_name: NonEmptyStr
     preferred_name: str = ''
+    gender: str = ''
+    email: str = ''
+    email_type: str = ''
+    phone_number: str = ''
     external_id: str = ''
     date_of_birth: date | None = None
     status: Client.Status = Client.Status.ACTIVE
@@ -43,8 +70,13 @@ class ClientCreateRequest(Schema):
 
 class ClientUpdateRequest(Schema):
     first_name: NonEmptyStr | None = None
+    middle_name: str | None = None
     last_name: NonEmptyStr | None = None
     preferred_name: str | None = None
+    gender: str | None = None
+    email: str | None = None
+    email_type: str | None = None
+    phone_number: str | None = None
     date_of_birth: date | None = None
     status: Client.Status | None = None
     intake_date: date | None = None

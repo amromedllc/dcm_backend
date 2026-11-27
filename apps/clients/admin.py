@@ -15,11 +15,12 @@ class StaffAssignmentInline(OrganizationScopedAdminMixin, TabularInline):
 class ClientAdmin(OrganizationScopedAdminMixin, ModelAdmin):
     list_display = ['full_name', 'external_id', 'status', 'date_of_birth', 'intake_date']
     list_filter = ['status']
-    search_fields = ['first_name', 'last_name', 'preferred_name', 'external_id']
+    search_fields = ['first_name', 'middle_name', 'last_name', 'preferred_name', 'email', 'phone_number', 'external_id']
     inlines = [StaffAssignmentInline]
     readonly_fields = ['created_at', 'updated_at']
     fieldsets = (
-        ('Identity', {'fields': ('first_name', 'last_name', 'preferred_name', 'external_id', 'date_of_birth')}),
+        ('Identity', {'fields': ('first_name', 'middle_name', 'last_name', 'preferred_name', 'gender', 'date_of_birth', 'external_id')}),
+        ('Contact', {'fields': ('email', 'email_type', 'phone_number')}),
         ('Status', {'fields': ('status', 'intake_date', 'discharge_date')}),
         ('Notes', {'fields': ('internal_notes',)}),
         ('Audit', {'fields': ('created_by', 'created_at', 'updated_at')}),

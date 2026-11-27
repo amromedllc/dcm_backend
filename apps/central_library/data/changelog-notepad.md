@@ -34,6 +34,14 @@ increment MAJOR. All notes shipped together share a version.
 Imports fill missing versions and replace matching legacy date and initial v1 sequence versions, while
 preserving manually assigned semantic versions, content, publication and IDs.
 
+## tpms-client-contact-details | 2026-11-27 | Keep client contact details from TherapyPMS
+Version: v2.44.0
+Status: Draft
+
+**Improvements**
+- Client sync now keeps middle name, gender, email, email type, and phone number.
+- These details appear on the client profile and can be edited in the client directory. New local client records can include them too.
+
 ## manual-client-creation-fields | 2026-11-27 | Add clients without an external ID
 Version: v2.44.0
 Status: Draft

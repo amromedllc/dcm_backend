@@ -16,8 +16,13 @@ class Client(TenantAwareModel):
     # admin_id in the linked external PM system this client belongs to — used to scope access per login
     external_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
     first_name = models.CharField(max_length=100)
+    middle_name = models.CharField(max_length=100, blank=True, default='')
     last_name = models.CharField(max_length=100)
     preferred_name = models.CharField(max_length=100, blank=True)
+    gender = models.CharField(max_length=50, blank=True, default='')
+    email = models.CharField(max_length=254, blank=True, default='')
+    email_type = models.CharField(max_length=50, blank=True, default='')
+    phone_number = models.CharField(max_length=50, blank=True, default='')
     date_of_birth = models.DateField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
     intake_date = models.DateField(null=True, blank=True)
@@ -35,7 +40,7 @@ class Client(TenantAwareModel):
     @property
     def full_name(self) -> str:
         display = self.preferred_name or self.first_name
-        return f'{display} {self.last_name}'.strip()
+        return ' '.join(part for part in (display, self.middle_name, self.last_name) if part).strip()
 
     def __str__(self) -> str:
         return self.full_name

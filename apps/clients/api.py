@@ -58,6 +58,7 @@ from .models import Client, ClientFavorite, ClientDirectoryView, ClientStaffAssi
 from .schemas import (
     SignTreatmentPlanRequest,
     ClientFilterOptionSchema,
+    ClientListSchema,
     ClientSchema,
     ClientCreateRequest,
     ClientUpdateRequest,
@@ -296,6 +297,7 @@ def _list_native_clients(request, include_inactive: bool, search: str | None) ->
     if search:
         qs = qs.filter(
             Q(first_name__icontains=search)
+            | Q(middle_name__icontains=search)
             | Q(last_name__icontains=search)
             | Q(preferred_name__icontains=search)
         )
@@ -367,7 +369,10 @@ def _upsert_clients_from_patients(
         )
     }
 
-    update_attrs = ('first_name', 'last_name', 'preferred_name', 'date_of_birth', 'status', 'external_admin_id')
+    update_attrs = (
+        'first_name', 'middle_name', 'last_name', 'preferred_name', 'gender',
+        'email', 'email_type', 'phone_number', 'date_of_birth', 'status', 'external_admin_id',
+    )
     to_create: list[Client] = []
     to_update: list[Client] = []
 
@@ -531,6 +536,7 @@ def list_client_filter_options(request, search: str | None = None):
     if search:
         qs = qs.filter(
             Q(first_name__icontains=search)
+            | Q(middle_name__icontains=search)
             | Q(last_name__icontains=search)
             | Q(preferred_name__icontains=search)
         )
@@ -566,7 +572,7 @@ def toggle_client_favorite(request, client_id: int):
     }
 
 
-@router.get('', response=list[ClientSchema])
+@router.get('', response=list[ClientListSchema])
 def list_clients(
     request,
     include_inactive: bool = False,
